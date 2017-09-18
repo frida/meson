@@ -15,6 +15,7 @@
 from . import backends
 from .. import build
 from .. import mesonlib
+from .. import mlog
 import uuid, os, sys
 
 from ..mesonlib import MesonException
@@ -27,22 +28,6 @@ class XCodeBackend(backends.Backend):
         self.project_conflist = self.gen_id()
         self.indent = '       '
         self.indent_level = 0
-        self.xcodetypemap = {'c': 'sourcecode.c.c',
-                             'a': 'archive.ar',
-                             'cc': 'sourcecode.cpp.cpp',
-                             'cxx': 'sourcecode.cpp.cpp',
-                             'cpp': 'sourcecode.cpp.cpp',
-                             'c++': 'sourcecode.cpp.cpp',
-                             'm': 'sourcecode.c.objc',
-                             'mm': 'sourcecode.cpp.objcpp',
-                             'h': 'sourcecode.c.h',
-                             'hpp': 'sourcecode.cpp.h',
-                             'hxx': 'sourcecode.cpp.h',
-                             'hh': 'sourcecode.cpp.hh',
-                             'inc': 'sourcecode.c.h',
-                             'dylib': 'compiled.mach-o.dylib',
-                             'o': 'compiled.mach-o.objfile',
-                             }
         self.maingroup_id = self.gen_id()
         self.all_id = self.gen_id()
         self.all_buildconf_id = self.gen_id()
@@ -50,20 +35,7 @@ class XCodeBackend(backends.Backend):
         self.test_id = self.gen_id()
         self.test_command_id = self.gen_id()
         self.test_buildconf_id = self.gen_id()
-
-    def gen_id(self):
-        return str(uuid.uuid4()).upper().replace('-', '')[:24]
-
-    def get_target_dir(self, target):
-        dirname = os.path.join(target.get_subdir(), self.environment.coredata.get_builtin_option('buildtype'))
-        os.makedirs(os.path.join(self.environment.get_build_dir(), dirname), exist_ok=True)
-        return dirname
-
-    def write_line(self, text):
-        self.ofile.write(self.indent * self.indent_level + text)
-        if not text.endswith('\n'):
-            self.ofile.write('\n')
-
+    
     def generate(self, interp):
         self.interpreter = interp
         test_data = self.serialize_tests()[0]
@@ -101,33 +73,89 @@ class XCodeBackend(backends.Backend):
             self.generate_xc_configurationList()
             self.generate_suffix()
 
-    def get_xcodetype(self, fname):
-        return self.xcodetypemap[fname.split('.')[-1]]
+    def get_type_for_filename(self, filename):
+        if not hasattr(self, 'type_map'):
+            self.type_map = {'c': 'sourcecode.c.c',
+                             'a': 'archive.ar',
+                             'cc': 'sourcecode.cpp.cpp',
+                             'cxx': 'sourcecode.cpp.cpp',
+                             'cpp': 'sourcecode.cpp.cpp',
+                             'c++': 'sourcecode.cpp.cpp',
+                             'm': 'sourcecode.c.objc',
+                             'mm': 'sourcecode.cpp.objcpp',
+                             'h': 'sourcecode.c.h',
+                             'hpp': 'sourcecode.cpp.h',
+                             'hxx': 'sourcecode.cpp.h',
+                             'hh': 'sourcecode.cpp.hh',
+                             'inc': 'sourcecode.c.h',
+                             'dylib': 'compiled.mach-o.dylib',
+                             'o': 'compiled.mach-o.objfile',
+                             'S': 'sourcecode.asm',
+                             'js': 'sourcecode.javascript'
+                             }
+    
+        extension = filename.split('.')[-1]
+
+        if not extension in self.type_map:
+            mlog.warning('Unknown extension: %s for file %s' %(extension, filename))
+            return 'compiled'
+
+        return self.type_map[extension]
+
+    
+
+    def gen_id(self):
+        return str(uuid.uuid4()).upper().replace('-', '')[:24]
+
+    def get_target_dir(self, target):
+        dirname = os.path.join(target.get_subdir(), self.environment.coredata.get_builtin_option('buildtype'))
+        os.makedirs(os.path.join(self.environment.get_build_dir(), dirname), exist_ok=True)
+        return dirname
+
+    def write_line(self, text):
+        self.ofile.write(self.indent * self.indent_level + text)
+        if not text.endswith('\n'):
+            self.ofile.write('\n')
 
     def generate_filemap(self):
         self.filemap = {} # Key is source file relative to src root.
         self.target_filemap = {}
-        for name, t in self.build.targets.items():
-            for s in t.sources:
-                if isinstance(s, mesonlib.File):
-                    s = os.path.join(s.subdir, s.fname)
-                    self.filemap[s] = self.gen_id()
-            for o in t.objects:
-                if isinstance(o, str):
-                    o = os.path.join(t.subdir, o)
-                    self.filemap[o] = self.gen_id()
-            self.target_filemap[name] = self.gen_id()
+        for target_name, target in self.build.targets.items():
+            for source in target.sources:
+                if isinstance(source, mesonlib.File):
+                    source = os.path.join(source.subdir, source.fname)
+                    self.filemap[source] = self.gen_id()
+                elif isinstance(source, str):
+                    source = os.path.join(target.subdir, source)
+                    self.filemap[source] = self.gen_id()
+                else:
+                    mlog.warning('Unknown type for source %s' % source)
+
+                if hasattr(target, 'objects'):
+                    for target_object in target.objects:
+                        if isinstance(target_object, str):
+                            target_object = os.path.join(target.subdir, target_object)
+                            self.filemap[target_object] = self.gen_id()
+                self.target_filemap[target_name] = self.gen_id()
 
     def generate_buildmap(self):
         self.buildmap = {}
-        for t in self.build.targets.values():
-            for s in t.sources:
-                s = os.path.join(s.subdir, s.fname)
-                self.buildmap[s] = self.gen_id()
-            for o in t.objects:
-                o = os.path.join(t.subdir, o)
-                if isinstance(o, str):
-                    self.buildmap[o] = self.gen_id()
+        for target in self.build.targets.values():
+            for source in target.sources:
+                if isinstance(source, mesonlib.File):
+                    source = os.path.join(source.subdir, source.fname)
+                    self.buildmap[source] = self.gen_id()
+                elif isinstance(source, str):
+                    source = os.path.join(target.subdir, source)
+                    self.buildmap[source] = self.gen_id()
+                else:
+                    mlog.warning('Unknown type for source %s' % source)
+
+                if hasattr(target, 'objects'):
+                    for target_object in target.objects:
+                        target_object = os.path.join(target.subdir, target_object)
+                        if isinstance(target_object, str):
+                            self.buildmap[target_object] = self.gen_id()
 
     def generate_buildstylemap(self):
         self.buildstylemap = {'debug': self.gen_id()}
@@ -164,9 +192,14 @@ class XCodeBackend(backends.Backend):
 
     def generate_target_dependency_map(self):
         self.target_dependency_map = {}
-        for tname, t in self.build.targets.items():
-            for target in t.link_targets:
-                self.target_dependency_map[(tname, target.get_basename())] = self.gen_id()
+        for target_name, target in self.build.targets.items():
+            if isinstance(target, build.CustomTarget):
+                for dependency in target.get_target_dependencies():
+                   self.target_dependency_map[(target_name, dependency.get_basename())] = self.gen_id()
+            else:
+                for link_target in target.link_targets:
+                    self.target_dependency_map[(target_name, link_target.get_basename())] = self.gen_id()
+                
 
     def generate_pbxdep_map(self):
         self.pbx_dep_map = {}
@@ -222,26 +255,27 @@ class XCodeBackend(backends.Backend):
         self.ofile.write('\n/* Begin PBXBuildFile section */\n')
         templ = '%s /* %s */ = { isa = PBXBuildFile; fileRef = %s /* %s */; settings = { COMPILER_FLAGS = "%s"; }; };\n'
         otempl = '%s /* %s */ = { isa = PBXBuildFile; fileRef = %s /* %s */;};\n'
-        for t in self.build.targets.values():
-            for s in t.sources:
-                if isinstance(s, mesonlib.File):
-                    s = s.fname
+        for target in self.build.targets.values():
+            for source in target.sources:
+                if isinstance(source, mesonlib.File):
+                    source = source.fname
 
-                if isinstance(s, str):
-                    s = os.path.join(t.subdir, s)
-                    idval = self.buildmap[s]
-                    fullpath = os.path.join(self.environment.get_source_dir(), s)
-                    fileref = self.filemap[s]
+                if isinstance(source, str):
+                    source = os.path.join(target.subdir, source)
+                    idval = self.buildmap[source]
+                    fullpath = os.path.join(self.environment.get_source_dir(), source)
+                    fileref = self.filemap[source]
                     fullpath2 = fullpath
                     compiler_args = ''
                     self.ofile.write(templ % (idval, fullpath, fileref, fullpath2, compiler_args))
-            for o in t.objects:
-                o = os.path.join(t.subdir, o)
-                idval = self.buildmap[o]
-                fileref = self.filemap[o]
-                fullpath = os.path.join(self.environment.get_source_dir(), o)
-                fullpath2 = fullpath
-                self.ofile.write(otempl % (idval, fullpath, fileref, fullpath2))
+            if hasattr(target, 'objects'):
+                for target_object in target.objects:
+                    target_object = os.path.join(target.subdir, target_object)
+                    idval = self.buildmap[target_object]
+                    fileref = self.filemap[target_object]
+                    fullpath = os.path.join(self.environment.get_source_dir(), target_object)
+                    fullpath2 = fullpath
+                    self.ofile.write(otempl % (idval, fullpath, fileref, fullpath2))
         self.ofile.write('/* End PBXBuildFile section */\n')
 
     def generate_pbx_build_style(self):
@@ -279,7 +313,7 @@ class XCodeBackend(backends.Backend):
         src_templ = '%s /* %s */ = { isa = PBXFileReference; explicitFileType = "%s"; fileEncoding = 4; name = "%s"; path = "%s"; sourceTree = SOURCE_ROOT; };\n'
         for fname, idval in self.filemap.items():
             fullpath = os.path.join(self.environment.get_source_dir(), fname)
-            xcodetype = self.get_xcodetype(fname)
+            xcodetype = self.get_type_for_filename(fname)
             name = os.path.split(fname)[-1]
             path = fname
             self.ofile.write(src_templ % (idval, fullpath, xcodetype, name, path))
@@ -292,10 +326,10 @@ class XCodeBackend(backends.Backend):
                 typestr = 'compiled.mach-o.executable'
                 path = fname
             elif isinstance(t, build.SharedLibrary):
-                typestr = self.get_xcodetype('dummy.dylib')
+                typestr = self.get_type_for_filename('dummy.dylib')
                 path = fname
             else:
-                typestr = self.get_xcodetype(fname)
+                typestr = self.get_type_for_filename(fname)
                 path = '"%s"' % t.get_filename()
             self.ofile.write(target_templ % (idval, tname, typestr, path, reftype))
         self.ofile.write('/* End PBXFileReference section */\n')
@@ -303,9 +337,9 @@ class XCodeBackend(backends.Backend):
     def generate_pbx_group(self):
         groupmap = {}
         target_src_map = {}
-        for t in self.build.targets:
-            groupmap[t] = self.gen_id()
-            target_src_map[t] = self.gen_id()
+        for target in self.build.targets:
+            groupmap[target] = self.gen_id()
+            target_src_map[target] = self.gen_id()
         self.ofile.write('\n/* Begin PBXGroup section */\n')
         sources_id = self.gen_id()
         resources_id = self.gen_id()
@@ -330,12 +364,12 @@ class XCodeBackend(backends.Backend):
         self.write_line('isa = PBXGroup;')
         self.write_line('children = (')
         self.indent_level += 1
-        for t in self.build.targets:
-            self.write_line('%s /* %s */,' % (groupmap[t], t))
+        for target in self.build.targets:
+            self.write_line('%s /* %s */,' % (groupmap[target], target))
         self.indent_level -= 1
         self.write_line(');')
         self.write_line('name = Sources;')
-        self.write_line('sourcetree = "<group>";')
+        self.write_line('sourceTree = "<group>";')
         self.indent_level -= 1
         self.write_line('};')
 
@@ -350,31 +384,37 @@ class XCodeBackend(backends.Backend):
         self.write_line('};')
 
         # Targets
-        for t in self.build.targets:
-            self.write_line('%s /* %s */ = {' % (groupmap[t], t))
+        for target_name, target in self.build.targets.items():
+            self.write_line('%s /* %s */ = {' % (groupmap[target_name], target_name))
             self.indent_level += 1
             self.write_line('isa = PBXGroup;')
             self.write_line('children = (')
             self.indent_level += 1
-            self.write_line('%s /* Source files */,' % target_src_map[t])
+            self.write_line('%s /* Source files */,' % target_src_map[target_name])
             self.indent_level -= 1
             self.write_line(');')
-            self.write_line('name = "%s";' % t)
+            self.write_line('name = "%s";' % target.get_basename())
             self.write_line('sourceTree = "<group>";')
             self.indent_level -= 1
             self.write_line('};')
-            self.write_line('%s /* Source files */ = {' % target_src_map[t])
+            self.write_line('%s /* Source files */ = {' % target_src_map[target_name])
             self.indent_level += 1
             self.write_line('isa = PBXGroup;')
             self.write_line('children = (')
             self.indent_level += 1
-            for s in self.build.targets[t].sources:
-                s = os.path.join(s.subdir, s.fname)
-                if isinstance(s, str):
-                    self.write_line('%s /* %s */,' % (self.filemap[s], s))
-            for o in self.build.targets[t].objects:
-                o = os.path.join(self.build.targets[t].subdir, o)
-                self.write_line('%s /* %s */,' % (self.filemap[o], o))
+            for source in target.sources:
+                if isinstance(source, mesonlib.File):
+                    source_path = os.path.join(source.subdir, source.fname)
+                elif isinstance(source, str):
+                    source_path = os.path.join(target.subdir, source)
+                else:
+                    mlog.warning('Unknown type for source %s' % source)
+
+                self.write_line('%s /* %s */,' % (self.filemap[source_path], source_path))
+            if hasattr(target, 'objects'):        
+                for target_object in target.objects:
+                    target_object = os.path.join(target.subdir, target_object)
+                    self.write_line('%s /* %s */,' % (self.filemap[target_object], target_object))
             self.indent_level -= 1
             self.write_line(');')
             self.write_line('name = "Source files";')
@@ -401,10 +441,16 @@ class XCodeBackend(backends.Backend):
     def generate_pbx_native_target(self):
         self.ofile.write('\n/* Begin PBXNativeTarget section */\n')
         for tname, idval in self.native_targets.items():
-            t = self.build.targets[tname]
+            target = self.build.targets[tname]
             self.write_line('%s /* %s */ = {' % (idval, tname))
             self.indent_level += 1
-            self.write_line('isa = PBXNativeTarget;')
+
+            if isinstance(target, build.CustomTarget):
+                isa = 'PBXLegacyTarget'
+            else:
+                isa = 'PBXNativeTarget'
+
+            self.write_line('isa = %s;' % isa)
             self.write_line('buildConfigurationList = %s /* Build configuration list for PBXNativeTarget "%s" */;'
                             % (self.buildconflistmap[tname], tname))
             self.write_line('buildPhases = (')
@@ -416,25 +462,27 @@ class XCodeBackend(backends.Backend):
             self.write_line(');')
             self.write_line('dependencies = (')
             self.indent_level += 1
-            for lt in self.build.targets[tname].link_targets:
-                # NOT DOCUMENTED, may need to make different links
-                # to same target have different targetdependency item.
-                idval = self.pbx_dep_map[lt.get_id()]
-                self.write_line('%s /* PBXTargetDependency */,' % idval)
+            if hasattr(target, 'link_targets'):
+                for link_target in self.build.targets[tname].link_targets:
+                    # NOT DOCUMENTED, may need to make different links
+                    # to same target have different targetdependency item.
+                    idval = self.pbx_dep_map[link_target.get_id()]
+                    self.write_line('%s /* PBXTargetDependency */,' % idval)
             self.indent_level -= 1
             self.write_line(");")
-            self.write_line('name = "%s";' % tname)
+            self.write_line('name = "%s";' % target.get_basename())
             self.write_line('productName = "%s";' % tname)
             self.write_line('productReference = %s /* %s */;' % (self.target_filemap[tname], tname))
-            if isinstance(t, build.Executable):
-                typestr = 'com.apple.product-type.tool'
-            elif isinstance(t, build.StaticLibrary):
-                typestr = 'com.apple.product-type.library.static'
-            elif isinstance(t, build.SharedLibrary):
-                typestr = 'com.apple.product-type.library.dynamic'
-            else:
-                raise MesonException('Unknown target type for %s' % tname)
-            self.write_line('productType = "%s";' % typestr)
+            if not isinstance(target, build.CustomTarget):
+                if isinstance(target, build.Executable):
+                    typestr = 'com.apple.product-type.tool'
+                elif isinstance(target, build.StaticLibrary):
+                    typestr = 'com.apple.product-type.library.static'
+                elif isinstance(target, build.SharedLibrary):
+                    typestr = 'com.apple.product-type.library.dynamic'
+                else:
+                    raise MesonException('Unknown target type for %s' % tname)
+                self.write_line('productType = "%s";' % typestr)
             self.indent_level -= 1
             self.write_line('};')
         self.ofile.write('/* End PBXNativeTarget section */\n')
@@ -509,10 +557,18 @@ class XCodeBackend(backends.Backend):
             self.write_line('buildActionMask = 2147483647;')
             self.write_line('files = (')
             self.indent_level += 1
-            for s in self.build.targets[name].sources:
-                s = os.path.join(s.subdir, s.fname)
-                if not self.environment.is_header(s):
-                    self.write_line('%s /* %s */,' % (self.buildmap[s], os.path.join(self.environment.get_source_dir(), s)))
+            target = self.build.targets[name]
+            for source in target.sources:
+                if isinstance(source, mesonlib.File):
+                    source = os.path.join(source.subdir, source.fname)
+                elif isinstance(source, str):
+                    source = os.path.join(target.subdir, source)
+                else:
+                    mlog.warning('Unknown type for source %s' % source)
+                    continue
+
+                if not self.environment.is_header(source):
+                    self.write_line('%s /* %s */,' % (self.buildmap[source], os.path.join(self.environment.get_source_dir(), source)))
             self.indent_level -= 1
             self.write_line(');')
             self.write_line('runOnlyForDeploymentPostprocessing = 0;')
@@ -532,6 +588,13 @@ class XCodeBackend(backends.Backend):
             self.indent_level -= 1
             self.write_line('};')
         self.ofile.write('/* End PBXTargetDependency section */\n')
+
+    def target_to_build_root(self, target):
+        if target.subdir == '':
+            return ''
+
+        directories = os.path.normpath(target.subdir).split(os.sep)
+        return os.sep.join(['..'] * len(directories))
 
     def generate_xc_build_configuration(self):
         self.ofile.write('\n/* Begin XCBuildConfiguration section */\n')
@@ -611,28 +674,37 @@ class XCodeBackend(backends.Backend):
         # Now finally targets.
         langnamemap = {'c': 'C', 'cpp': 'CPLUSPLUS', 'objc': 'OBJC', 'objcpp': 'OBJCPLUSPLUS'}
         for target_name, target in self.build.targets.items():
+            build_root = self.target_to_build_root(target)
+
             for buildtype in self.buildtypes:
                 dep_libs = []
                 links_dylib = False
                 headerdirs = []
-                for d in target.include_dirs:
-                    for sd in d.incdirs:
-                        cd = os.path.join(d.curdir, sd)
-                        headerdirs.append(os.path.join(self.environment.get_source_dir(), cd))
-                        headerdirs.append(os.path.join(self.environment.get_build_dir(), cd))
-                for l in target.link_targets:
-                    abs_path = os.path.join(self.environment.get_build_dir(),
-                                            l.subdir, buildtype, l.get_filename())
-                    dep_libs.append("'%s'" % abs_path)
-                    if isinstance(l, build.SharedLibrary):
-                        links_dylib = True
+                if isinstance(target, build.CustomTarget):
+                    # for output in target.get_outputs():
+                    #     generated_source = os.path.join(build_root, self.get_target_dir(target, output))
+                    directory = self.relpath(self.get_target_dir(target), self.get_target_dir(target))
+                    if directory not in headerdirs:
+                        headerdirs.append(directory)
+                else:     
+                    for directories in target.include_dirs:
+                        for header_directory in directories.incdirs:
+                            directory = os.path.join(directories.curdir, header_directory)
+                            headerdirs.append(os.path.join(self.environment.get_source_dir(), directory))
+                            headerdirs.append(os.path.join(self.environment.get_build_dir(), directory))
+                    for l in target.link_targets:
+                        abs_path = os.path.join(self.environment.get_build_dir(),
+                                                l.subdir, buildtype, l.get_filename())
+                        dep_libs.append("'%s'" % abs_path)
+                        if isinstance(l, build.SharedLibrary):
+                            links_dylib = True
                 if links_dylib:
                     dep_libs = ['-Wl,-search_paths_first', '-Wl,-headerpad_max_install_names'] + dep_libs
                 dylib_version = None
                 if isinstance(target, build.SharedLibrary):
                     ldargs = ['-dynamiclib', '-Wl,-headerpad_max_install_names'] + dep_libs
                     install_path = os.path.join(self.environment.get_build_dir(), target.subdir, buildtype)
-                    dylib_version = target.version
+                    dylib_version = target.soversion
                 else:
                     ldargs = dep_libs
                     install_path = ''
@@ -640,7 +712,8 @@ class XCodeBackend(backends.Backend):
                     product_name = target.get_basename() + '.' + dylib_version
                 else:
                     product_name = target.get_basename()
-                ldargs += target.link_args
+                if hasattr(target, 'link_args'):
+                    ldargs += target.link_args
                 ldstr = ' '.join(ldargs)
                 valid = self.buildconfmap[target_name][buildtype]
                 langargs = {}
@@ -648,7 +721,10 @@ class XCodeBackend(backends.Backend):
                     if lang not in langnamemap:
                         continue
                     gargs = self.build.global_args.get(lang, [])
-                    targs = target.get_extra_args(lang)
+                    if not isinstance(target, build.CustomTarget):
+                        targs = target.get_extra_args(lang)
+                    else:
+                        targs = []
                     args = gargs + targs
                     if len(args) > 0:
                         langargs[langnamemap[lang]] = args
@@ -661,11 +737,16 @@ class XCodeBackend(backends.Backend):
                 self.write_line('COMBINE_HIDPI_IMAGES = YES;')
                 if dylib_version is not None:
                     self.write_line('DYLIB_CURRENT_VERSION = "%s";' % dylib_version)
-                self.write_line('EXECUTABLE_PREFIX = "%s";' % target.prefix)
-                if target.suffix == '':
-                    suffix = ''
+                if hasattr(target, 'prefix'):
+                    self.write_line('EXECUTABLE_PREFIX = "%s";' % target.prefix)
+                
+                if hasattr(target, 'prefix'):
+                    if target.suffix == '':
+                        suffix = ''
+                    else:
+                        suffix = '.' + target.suffix
                 else:
-                    suffix = '.' + target.suffix
+                    suffix = ''
                 self.write_line('EXECUTABLE_SUFFIX = "%s";' % suffix)
                 self.write_line('GCC_GENERATE_DEBUGGING_SYMBOLS = YES;')
                 self.write_line('GCC_INLINES_ARE_PRIVATE_EXTERN = NO;')
