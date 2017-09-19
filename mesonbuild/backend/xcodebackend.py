@@ -938,4 +938,4 @@ class XCodeBackend(backends.Backend):
             for lang, c in self.environment.coredata.compilers.items():
                 if lang in ('c', 'cpp'):
                     return c
-        raise MesonException('Could not find a C or C++ compiler. MSVC can only build C/C++ projects.')
+        raise MesonException('Could not find a C or C++ compiler.')
