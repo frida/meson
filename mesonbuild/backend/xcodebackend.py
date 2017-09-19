@@ -37,7 +37,7 @@ class XCodeBackend(backends.Backend):
         self.test_id = self.gen_id()
         self.test_command_id = self.gen_id()
         self.test_buildconf_id = self.gen_id()
-    
+
     def generate(self, interp):
         self.interpreter = interp
         test_data = self.serialize_tests()[0]
@@ -94,8 +94,8 @@ class XCodeBackend(backends.Backend):
                              'o': 'compiled.mach-o.objfile',
                              'S': 'sourcecode.asm',
                              'js': 'sourcecode.javascript'
-                             }
-    
+                            }
+
         extension = filename.split('.')[-1]
 
         if not extension in self.type_map:
@@ -103,8 +103,6 @@ class XCodeBackend(backends.Backend):
             return 'compiled'
 
         return self.type_map[extension]
-
-    
 
     def gen_id(self):
         return str(uuid.uuid4()).upper().replace('-', '')[:24]
@@ -197,11 +195,10 @@ class XCodeBackend(backends.Backend):
         for target_name, target in self.build.targets.items():
             if isinstance(target, build.CustomTarget):
                 for dependency in target.get_target_dependencies():
-                   self.target_dependency_map[(target_name, dependency.get_basename())] = self.gen_id()
+                    self.target_dependency_map[(target_name, dependency.get_basename())] = self.gen_id()
             else:
                 for link_target in target.link_targets:
                     self.target_dependency_map[(target_name, link_target.get_basename())] = self.gen_id()
-                
 
     def generate_pbxdep_map(self):
         self.pbx_dep_map = {}
@@ -413,7 +410,7 @@ class XCodeBackend(backends.Backend):
                     mlog.warning('Unknown type for source %s' % source)
 
                 self.write_line('%s /* %s */,' % (self.filemap[source_path], source_path))
-            if hasattr(target, 'objects'):        
+            if hasattr(target, 'objects'):
                 for target_object in target.objects:
                     target_object = os.path.join(target.subdir, target_object)
                     self.write_line('%s /* %s */,' % (self.filemap[target_object], target_object))
@@ -684,17 +681,15 @@ class XCodeBackend(backends.Backend):
                 headerdirs = []
                 headerdirs.append(self.environment.get_build_dir())
                 if isinstance(target, build.CustomTarget):
-                    # for output in target.get_outputs():
-                    #     generated_source = os.path.join(build_root, self.get_target_dir(target, output))
                     directory = os.path.join(self.environment.get_source_dir(), self.get_target_dir(target))
                     headerdirs.append(directory)
-                else:     
+                else:
                     for directories in reversed(target.get_include_dirs()):
                         for header_directory in directories.get_incdirs():
                             current_directory = os.path.join(directories.get_curdir(), header_directory)
                             directory = os.path.join(self.environment.get_source_dir(), current_directory)
                             headerdirs.append(directory)
-                            
+
                         for header_directory in directories.get_extra_build_dirs():
                             current_directory = os.path.join(directories.get_curdir(), header_directory)
                             directory = os.path.join(self.environment.get_build_dir(), current_directory)
@@ -747,7 +742,7 @@ class XCodeBackend(backends.Backend):
                     self.write_line('DYLIB_CURRENT_VERSION = "%s";' % dylib_version)
                 if hasattr(target, 'prefix'):
                     self.write_line('EXECUTABLE_PREFIX = "%s";' % target.prefix)
-                
+
                 if hasattr(target, 'prefix'):
                     if target.suffix == '':
                         suffix = ''
@@ -780,13 +775,12 @@ class XCodeBackend(backends.Backend):
                         # to override all the defaults, but not the per-target compile args.
                         for l, args in self.environment.coredata.external_args.items():
                             if l in file_args:
-                                file_args[l] += args    
+                                file_args[l] += args
                     # Add per-target compile args, f.ex, `c_args : ['-DFOO']`. We set these
                     # near the end since these are supposed to override everything else.
                     for l, args in target.extra_args.items():
                         if l in file_args:
                             file_args[l] += args
-                    
 
                     # Split preprocessor defines and include directories out of the list of
                     # all extra arguments. The rest go into %(AdditionalOptions).
@@ -798,7 +792,7 @@ class XCodeBackend(backends.Backend):
                                 # De-dup
                                 if inc_dir not in headerdirs:
                                     headerdirs.append(inc_dir)
-                                    
+
                     compiler = self._get_cl_compiler(target)
                     for d in reversed(target.get_external_deps()):
                         d_compile_args = compiler.unix_args_to_native(d.get_compile_args())
@@ -811,10 +805,9 @@ class XCodeBackend(backends.Backend):
                             else:
                                 if arg not in file_args:
                                     target_args.append(arg)
-                    
-                
+
                 if 'c' in file_args:
-                    c_flags = ' '.join(file_args['c']).replace('"','\\\\\\"')
+                    c_flags = ' '.join(file_args['c']).replace('"', '\\\\\\"')
                     self.write_line('OTHER_CFLAGS = "%s";' % c_flags)
 
                 self.write_line('EXECUTABLE_SUFFIX = "%s";' % suffix)
@@ -927,7 +920,7 @@ class XCodeBackend(backends.Backend):
         self.write_line('rootObject = ' + self.project_uid + ';')
         self.indent_level -= 1
         self.write_line('}\n')
-        
+
     def _get_cl_compiler(self, target):
         for lang, c in target.compilers.items():
             if lang in ('c', 'cpp'):
