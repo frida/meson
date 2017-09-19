@@ -16,7 +16,9 @@ from . import backends
 from .. import build
 from .. import mesonlib
 from .. import mlog
+from .. import compilers
 import uuid, os, sys
+from ..compilers import CompilerArgs
 
 from ..mesonlib import MesonException
 
@@ -675,23 +677,29 @@ class XCodeBackend(backends.Backend):
         langnamemap = {'c': 'C', 'cpp': 'CPLUSPLUS', 'objc': 'OBJC', 'objcpp': 'OBJCPLUSPLUS'}
         for target_name, target in self.build.targets.items():
             build_root = self.target_to_build_root(target)
-
+            project_to_source_root = os.path.join(build_root, self.build_to_src)
             for buildtype in self.buildtypes:
                 dep_libs = []
                 links_dylib = False
                 headerdirs = []
+                headerdirs.append(self.environment.get_build_dir())
                 if isinstance(target, build.CustomTarget):
                     # for output in target.get_outputs():
                     #     generated_source = os.path.join(build_root, self.get_target_dir(target, output))
-                    directory = self.relpath(self.get_target_dir(target), self.get_target_dir(target))
-                    if directory not in headerdirs:
-                        headerdirs.append(directory)
+                    directory = os.path.join(self.environment.get_source_dir(), self.get_target_dir(target))
+                    headerdirs.append(directory)
                 else:     
-                    for directories in target.include_dirs:
-                        for header_directory in directories.incdirs:
-                            directory = os.path.join(directories.curdir, header_directory)
-                            headerdirs.append(os.path.join(self.environment.get_source_dir(), directory))
-                            headerdirs.append(os.path.join(self.environment.get_build_dir(), directory))
+                    for directories in reversed(target.get_include_dirs()):
+                        for header_directory in directories.get_incdirs():
+                            current_directory = os.path.join(directories.get_curdir(), header_directory)
+                            directory = os.path.join(self.environment.get_source_dir(), current_directory)
+                            headerdirs.append(directory)
+                            
+                        for header_directory in directories.get_extra_build_dirs():
+                            current_directory = os.path.join(directories.get_curdir(), header_directory)
+                            directory = os.path.join(self.environment.get_build_dir(), current_directory)
+                            headerdirs.append(directory)
+
                     for l in target.link_targets:
                         abs_path = os.path.join(self.environment.get_build_dir(),
                                                 l.subdir, buildtype, l.get_filename())
@@ -747,6 +755,68 @@ class XCodeBackend(backends.Backend):
                         suffix = '.' + target.suffix
                 else:
                     suffix = ''
+
+                # Extra compile arguments
+                if not isinstance(target, build.CustomTarget):
+                    file_args = dict((lang, CompilerArgs(comp)) for lang, comp in target.compilers.items())
+                    file_defines = dict((lang, []) for lang in target.compilers)
+                    file_inc_dirs = dict((lang, []) for lang in target.compilers)
+                    target_defines = []
+                    target_args = []
+                    for l, comp in target.compilers.items():
+                        if l in file_args:
+                            file_args[l] += compilers.get_base_compile_args(self.environment.coredata.base_options, comp)
+                            file_args[l] += comp.get_option_compile_args(self.environment.coredata.compiler_options)
+
+                    for l, args in self.build.projects_args.get(target.subproject, {}).items():
+                        if l in file_args:
+                            file_args[l] += args
+
+                    for l, args in self.build.global_args.items():
+                        if l in file_args:
+                            file_args[l] += args
+                    if not target.is_cross:
+                        # Compile args added from the env: CFLAGS/CXXFLAGS, etc. We want these
+                        # to override all the defaults, but not the per-target compile args.
+                        for l, args in self.environment.coredata.external_args.items():
+                            if l in file_args:
+                                file_args[l] += args    
+                    # Add per-target compile args, f.ex, `c_args : ['-DFOO']`. We set these
+                    # near the end since these are supposed to override everything else.
+                    for l, args in target.extra_args.items():
+                        if l in file_args:
+                            file_args[l] += args
+                    
+
+                    # Split preprocessor defines and include directories out of the list of
+                    # all extra arguments. The rest go into %(AdditionalOptions).
+                    for l, args in file_args.items():
+                        for arg in args[:]:
+                            if arg.startswith('-I'):
+                                file_args[l].remove(arg)
+                                inc_dir = arg[2:]
+                                # De-dup
+                                if inc_dir not in headerdirs:
+                                    headerdirs.append(inc_dir)
+                                    
+                    compiler = self._get_cl_compiler(target)
+                    for d in reversed(target.get_external_deps()):
+                        d_compile_args = compiler.unix_args_to_native(d.get_compile_args())
+                        for arg in d_compile_args:
+                            if arg.startswith('-I'):
+                                inc_dir = arg[2:]
+                                # De-dup
+                                if inc_dir not in headerdirs:
+                                    headerdirs.append(inc_dir)
+                            else:
+                                if arg not in file_args:
+                                    target_args.append(arg)
+                    
+                
+                if 'c' in file_args:
+                    c_flags = ' '.join(file_args['c']).replace('"','\\\\\\"')
+                    self.write_line('OTHER_CFLAGS = "%s";' % c_flags)
+
                 self.write_line('EXECUTABLE_SUFFIX = "%s";' % suffix)
                 self.write_line('GCC_GENERATE_DEBUGGING_SYMBOLS = YES;')
                 self.write_line('GCC_INLINES_ARE_PRIVATE_EXTERN = NO;')
@@ -857,3 +927,15 @@ class XCodeBackend(backends.Backend):
         self.write_line('rootObject = ' + self.project_uid + ';')
         self.indent_level -= 1
         self.write_line('}\n')
+        
+    def _get_cl_compiler(self, target):
+        for lang, c in target.compilers.items():
+            if lang in ('c', 'cpp'):
+                return c
+        # No source files, only objects, but we still need a compiler, so
+        # return a found compiler
+        if len(target.objects) > 0:
+            for lang, c in self.environment.coredata.compilers.items():
+                if lang in ('c', 'cpp'):
+                    return c
+        raise MesonException('Could not find a C or C++ compiler. MSVC can only build C/C++ projects.')
