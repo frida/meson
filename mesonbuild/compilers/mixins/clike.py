@@ -352,7 +352,7 @@ class CLikeCompiler(Compiler):
                      extra_args: T.Union[None, T.List[str], T.Callable[['CompileCheckMode'], T.List[str]]] = None,
                      dependencies: T.Optional[T.List['Dependency']] = None) -> T.Tuple[bool, bool]:
         code = f'''{prefix}
-        #include <{hname}>'''
+        #include <{hname}>\n'''
         return self.compiles(code, env, extra_args=extra_args,
                              dependencies=dependencies)
 
@@ -367,7 +367,7 @@ class CLikeCompiler(Compiler):
          #endif
         #else
          #include <{hname}>
-        #endif'''
+        #endif\n'''
         return self.compiles(code, env, extra_args=extra_args,
                              dependencies=dependencies, mode=CompileCheckMode.PREPROCESS, disable_cache=disable_cache)
 
@@ -383,7 +383,7 @@ class CLikeCompiler(Compiler):
                 {symbol};
             #endif
             return 0;
-        }}'''
+        }}\n'''
         return self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)
 
@@ -499,7 +499,7 @@ class CLikeCompiler(Compiler):
                      dependencies: T.Optional[T.List['Dependency']]) -> bool:
         t = f'''{prefix}
         #include <stdio.h>
-        int main(void) {{ static int a[1-2*!({expression})]; a[0]=0; return 0; }}'''
+        int main(void) {{ static int a[1-2*!({expression})]; a[0]=0; return 0; }}\n'''
         return self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)[0]
 
@@ -582,7 +582,7 @@ class CLikeCompiler(Compiler):
         int main(void) {{
             {typename} something;
             return 0;
-        }}'''
+        }}\n'''
         if not self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)[0]:
             return -1
@@ -621,7 +621,7 @@ class CLikeCompiler(Compiler):
         int main(void) {{
             {typename} something;
             return 0;
-        }}'''
+        }}\n'''
         if not self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)[0]:
             return -1
@@ -829,7 +829,7 @@ class CLikeCompiler(Compiler):
             head, main = self._have_prototype_templ()
         else:
             head, main = self._no_prototype_templ()
-        templ = head + stubs_fail + main
+        templ = head + stubs_fail + main + '\n'
 
         res, cached = self.links(templ.format(**fargs), env, extra_args=extra_args,
                                  dependencies=dependencies)
@@ -872,7 +872,7 @@ class CLikeCompiler(Compiler):
             {__builtin_}{func};
         #endif
         return 0;
-        }}'''
+        }}\n'''
         return self.links(t.format(**fargs), env, extra_args=extra_args,
                           dependencies=dependencies)
 
@@ -888,7 +888,7 @@ class CLikeCompiler(Compiler):
         void bar(void) {{
             {typename} foo;
             {members}
-        }}'''
+        }}\n'''
         return self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)
 
@@ -898,7 +898,7 @@ class CLikeCompiler(Compiler):
         t = f'''{prefix}
         void bar(void) {{
             sizeof({typename});
-        }}'''
+        }}\n'''
         return self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)
 
