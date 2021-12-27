@@ -297,7 +297,7 @@ class CLikeCompiler(Compiler):
                      extra_args: T.Union[None, T.List[str], T.Callable[['CompileCheckMode'], T.List[str]]] = None,
                      dependencies: T.Optional[T.List['Dependency']] = None) -> T.Tuple[bool, bool]:
         code = f'''{prefix}
-        #include <{hname}>'''
+        #include <{hname}>\n'''
         return self.compiles(code, extra_args=extra_args, dependencies=dependencies)
 
     def has_header(self, hname: str, prefix: str, *,
@@ -311,7 +311,7 @@ class CLikeCompiler(Compiler):
          #endif
         #else
          #include <{hname}>
-        #endif'''
+        #endif\n'''
         return self.compiles(code, extra_args=extra_args,
                              dependencies=dependencies, mode=CompileCheckMode.PREPROCESS, disable_cache=disable_cache)
 
@@ -326,7 +326,7 @@ class CLikeCompiler(Compiler):
                 {symbol};
             #endif
             return 0;
-        }}'''
+        }}\n'''
         return self.compiles(t, extra_args=extra_args,
                              dependencies=dependencies)
 
@@ -423,7 +423,7 @@ class CLikeCompiler(Compiler):
                      dependencies: T.Optional[T.List['Dependency']]) -> bool:
         t = f'''{prefix}
         #include <stddef.h>
-        int main(void) {{ static int a[1-2*!({expression})]; a[0]=0; return 0; }}'''
+        int main(void) {{ static int a[1-2*!({expression})]; a[0]=0; return 0; }}\n'''
         return self.compiles(t, extra_args=extra_args, dependencies=dependencies)[0]
 
     def _cross_compute_int(self, expression: str, low: T.Optional[int], high: T.Optional[int],
@@ -442,7 +442,7 @@ class CLikeCompiler(Compiler):
                 evaluate_expanded = f'''
                 #include <stdio.h>
                 #include <stdint.h>
-                int main(void) {{ int expression = {expanded}; printf("%d", expression); return 0; }}'''
+                int main(void) {{ int expression = {expanded}; printf("%d", expression); return 0; }}\n'''
                 run = self.environment.coredata.compilers.build[self.language].run(evaluate_expanded)
                 if run and run.compiled and run.returncode == 0:
                     if self._compile_int(f'{expression} == {run.stdout}', prefix, extra_args, dependencies):
@@ -521,7 +521,7 @@ class CLikeCompiler(Compiler):
         int main(void) {{
             {typename} something;
             return 0;
-        }}'''
+        }}\n'''
         if not self.compiles(t, extra_args=extra_args,
                              dependencies=dependencies)[0]:
             return -1
@@ -566,7 +566,7 @@ class CLikeCompiler(Compiler):
         int main(void) {{
             {typename} something;
             return 0;
-        }}'''
+        }}\n'''
         if not self.compiles(t, extra_args=extra_args,
                              dependencies=dependencies)[0]:
             return -1
@@ -800,7 +800,7 @@ class CLikeCompiler(Compiler):
             head, main = self._have_prototype_templ()
         else:
             head, main = self._no_prototype_templ()
-        templ = head + stubs_fail + main
+        templ = head + stubs_fail + main + '\n'
 
         res, cached = self.links(templ.format(**fargs), extra_args=extra_args,
                                  dependencies=dependencies)
@@ -843,7 +843,7 @@ class CLikeCompiler(Compiler):
             {__builtin_}{func};
         #endif
         return 0;
-        }}'''
+        }}\n'''
         return self.links(t.format(**fargs), extra_args=extra_args,
                           dependencies=dependencies)
 
@@ -859,7 +859,7 @@ class CLikeCompiler(Compiler):
             {typename} foo;
             {members}
             (void) foo;
-        }}'''
+        }}\n'''
         return self.compiles(t, extra_args=extra_args, dependencies=dependencies)
 
     def has_type(self, typename: str, prefix: str,
@@ -868,7 +868,7 @@ class CLikeCompiler(Compiler):
         t = f'''{prefix}
         void bar(void) {{
             (void) sizeof({typename});
-        }}'''
+        }}\n'''
         return self.compiles(t, extra_args=extra_args, dependencies=dependencies)
 
     def _symbols_have_underscore_prefix_searchbin(self) -> bool:
