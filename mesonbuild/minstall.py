@@ -28,7 +28,7 @@ from . import environment
 from .backend.backends import InstallData, InstallDataBase, InstallEmptyDir, TargetInstallData, ExecutableSerialisation
 from .coredata import major_versions_differ, MesonVersionMismatchException
 from .coredata import version as coredata_version
-from .mesonlib import Popen_safe, RealPathAction, is_windows
+from .mesonlib import Popen_safe, RealPathAction, is_freebsd, is_windows
 from .scripts import depfixer, destdir_join
 from .scripts.meson_exe import run_exe
 try:
@@ -251,8 +251,12 @@ def apply_ldconfig(dm: DirMaker) -> None:
         # If we don't have ldconfig, failure is ignored quietly.
         return
 
+    args = ['-v']
+    if is_freebsd():
+        args.append('-R')
+
     # Try to update ld cache, it could fail if we don't have permission.
-    proc, out, err = Popen_safe(['ldconfig', '-v'])
+    proc, out, err = Popen_safe(['ldconfig', *args])
     if proc.returncode == 0:
         return
 
