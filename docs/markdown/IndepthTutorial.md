@@ -65,7 +65,7 @@ there and execute it. The last few lines are a stanza to generate a
 `pkg-config` file. We'll skip that for now and come back to it at the
 end of this document.
 
-The first subdirectory we go into is `include`. In it we have a a
+The first subdirectory we go into is `include`. In it we have a
 header file for the library that we want to install. This requires one
 line.
 
@@ -138,7 +138,7 @@ test suite, we just need to execute the following commands (starting
 at source tree root directory).
 
 ```console
-$ meson builddir && cd builddir
+$ meson setup builddir && cd builddir
 $ meson compile
 $ meson test
 ```

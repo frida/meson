@@ -1,4 +1,4 @@
-# Copyright 2012-2017 The Meson development team
+# Copyright 2012-2022 The Meson development team
 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,32 +11,39 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 import os.path
 import re
 import subprocess
 import typing as T
 
-from ..mesonlib import (
-    EnvironmentException, MachineChoice, version_compare, OptionKey, is_windows
-)
-
+from .. import mesonlib
+from .. import mlog
 from ..arglist import CompilerArgs
 from ..linkers import RSPFileSyntax
+from ..mesonlib import (
+    EnvironmentException, version_compare, OptionKey, is_windows
+)
+
+from . import compilers
 from .compilers import (
     d_dmd_buildtype_args,
     d_gdc_buildtype_args,
     d_ldc_buildtype_args,
     clike_debug_args,
     Compiler,
+    CompileCheckMode,
 )
 from .mixins.gnu import GnuCompiler
 
 if T.TYPE_CHECKING:
+    from ..dependencies import Dependency
     from ..programs import ExternalProgram
     from ..envconfig import MachineInfo
     from ..environment import Environment
     from ..linkers import DynamicLinker
+    from ..mesonlib import MachineChoice
 
     CompilerMixinBase = Compiler
 else:
@@ -64,7 +71,7 @@ ldc_optimization_args = {'0': [],
                          '1': ['-O1'],
                          '2': ['-O2'],
                          '3': ['-O3'],
-                         's': ['-Os'],
+                         's': ['-Oz'],
                          }  # type: T.Dict[str, T.List[str]]
 
 dmd_optimization_args = {'0': [],
@@ -105,6 +112,8 @@ class DmdLikeCompilerMixin(CompilerMixinBase):
         return ['-of=' + outputname]
 
     def get_include_args(self, path: str, is_system: bool) -> T.List[str]:
+        if path == "":
+            path = "."
         return ['-I=' + path]
 
     def compute_parameters_with_absolute_paths(self, parameter_list: T.List[str],
@@ -249,7 +258,7 @@ class DmdLikeCompilerMixin(CompilerMixinBase):
         return self.linker.import_library_args(implibname)
 
     def build_rpath_args(self, env: 'Environment', build_dir: str, from_dir: str,
-                         rpath_paths: str, build_rpath: str,
+                         rpath_paths: T.Tuple[str, ...], build_rpath: str,
                          install_rpath: str) -> T.Tuple[T.List[str], T.Set[bytes]]:
         if self.info.is_windows():
             return ([], set())
@@ -284,7 +293,7 @@ class DmdLikeCompilerMixin(CompilerMixinBase):
         # see the comment in the "-L" section
         link_expect_arg = False
         link_flags_with_arg = [
-            '-rpath', '-soname', '-compatibility_version', '-current_version',
+            '-rpath', '-rpath-link', '-soname', '-compatibility_version', '-current_version',
         ]
         for arg in args:
             # Translate OS specific arguments first.
@@ -676,11 +685,104 @@ class DCompiler(Compiler):
     def get_crt_link_args(self, crt_val: str, buildtype: str) -> T.List[str]:
         return []
 
+    def _get_compile_extra_args(self, extra_args: T.Union[T.List[str], T.Callable[[CompileCheckMode], T.List[str]], None] = None) -> T.List[str]:
+        args = self._get_target_arch_args()
+        if extra_args:
+            if callable(extra_args):
+                extra_args = extra_args(CompileCheckMode.COMPILE)
+            if isinstance(extra_args, list):
+                args.extend(extra_args)
+            elif isinstance(extra_args, str):
+                args.append(extra_args)
+        return args
+
+    def run(self, code: 'mesonlib.FileOrString', env: 'Environment', *,
+            extra_args: T.Union[T.List[str], T.Callable[[CompileCheckMode], T.List[str]], None] = None,
+            dependencies: T.Optional[T.List['Dependency']] = None) -> compilers.RunResult:
+        need_exe_wrapper = env.need_exe_wrapper(self.for_machine)
+        if need_exe_wrapper and self.exe_wrapper is None:
+            raise compilers.CrossNoRunException('Can not run test applications in this cross environment.')
+        extra_args = self._get_compile_extra_args(extra_args)
+        with self._build_wrapper(code, env, extra_args, dependencies, mode='link', want_output=True) as p:
+            if p.returncode != 0:
+                mlog.debug(f'Could not compile test file {p.input_name}: {p.returncode}\n')
+                return compilers.RunResult(False)
+            if need_exe_wrapper:
+                cmdlist = self.exe_wrapper.get_command() + [p.output_name]
+            else:
+                cmdlist = [p.output_name]
+            try:
+                pe, so, se = mesonlib.Popen_safe(cmdlist)
+            except Exception as e:
+                mlog.debug(f'Could not run: {cmdlist} (error: {e})\n')
+                return compilers.RunResult(False)
+
+        mlog.debug('Program stdout:\n')
+        mlog.debug(so)
+        mlog.debug('Program stderr:\n')
+        mlog.debug(se)
+        return compilers.RunResult(True, pe.returncode, so, se)
+
+    def sizeof(self, typename: str, prefix: str, env: 'Environment', *,
+               extra_args: T.Union[None, T.List[str], T.Callable[[CompileCheckMode], T.List[str]]] = None,
+               dependencies: T.Optional[T.List['Dependency']] = None) -> int:
+        if extra_args is None:
+            extra_args = []
+        t = f'''
+        import std.stdio : writeln;
+        {prefix}
+        void main() {{
+            writeln(({typename}).sizeof);
+        }}
+        '''
+        res = self.run(t, env, extra_args=extra_args,
+                       dependencies=dependencies)
+        if not res.compiled:
+            return -1
+        if res.returncode != 0:
+            raise mesonlib.EnvironmentException('Could not run sizeof test binary.')
+        return int(res.stdout)
+
+    def alignment(self, typename: str, prefix: str, env: 'Environment', *,
+                  extra_args: T.Optional[T.List[str]] = None,
+                  dependencies: T.Optional[T.List['Dependency']] = None) -> int:
+        if extra_args is None:
+            extra_args = []
+        t = f'''
+        import std.stdio : writeln;
+        {prefix}
+        void main() {{
+            writeln(({typename}).alignof);
+        }}
+        '''
+        res = self.run(t, env, extra_args=extra_args,
+                       dependencies=dependencies)
+        if not res.compiled:
+            raise mesonlib.EnvironmentException('Could not compile alignment test.')
+        if res.returncode != 0:
+            raise mesonlib.EnvironmentException('Could not run alignment test binary.')
+        align = int(res.stdout)
+        if align == 0:
+            raise mesonlib.EnvironmentException(f'Could not determine alignment of {typename}. Sorry. You might want to file a bug.')
+        return align
+
+    def has_header(self, hname: str, prefix: str, env: 'Environment', *,
+                   extra_args: T.Union[None, T.List[str], T.Callable[['CompileCheckMode'], T.List[str]]] = None,
+                   dependencies: T.Optional[T.List['Dependency']] = None,
+                   disable_cache: bool = False) -> T.Tuple[bool, bool]:
+
+        extra_args = self._get_compile_extra_args(extra_args)
+        code = f'''{prefix}
+        import {hname};
+        '''
+        return self.compiles(code, env, extra_args=extra_args,
+                             dependencies=dependencies, mode='compile', disable_cache=disable_cache)
 
 class GnuDCompiler(GnuCompiler, DCompiler):
 
     # we mostly want DCompiler, but that gives us the Compiler.LINKER_PREFIX instead
     LINKER_PREFIX = GnuCompiler.LINKER_PREFIX
+    id = 'gcc'
 
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice,
                  info: 'MachineInfo', arch: str, *,
@@ -692,7 +794,6 @@ class GnuDCompiler(GnuCompiler, DCompiler):
                            exe_wrapper=exe_wrapper, linker=linker,
                            full_version=full_version, is_cross=is_cross)
         GnuCompiler.__init__(self, {})
-        self.id = 'gcc'
         default_warn_args = ['-Wall', '-Wdeprecated']
         self.warn_args = {'0': [],
                           '1': default_warn_args,
@@ -760,6 +861,8 @@ def find_ldc_dmd_frontend_version(version_output: T.Optional[str]) -> T.Optional
 
 class LLVMDCompiler(DmdLikeCompilerMixin, DCompiler):
 
+    id = 'llvm'
+
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice,
                  info: 'MachineInfo', arch: str, *,
                  exe_wrapper: T.Optional['ExternalProgram'] = None,
@@ -770,7 +873,6 @@ class LLVMDCompiler(DmdLikeCompilerMixin, DCompiler):
                            exe_wrapper=exe_wrapper, linker=linker,
                            full_version=full_version, is_cross=is_cross)
         DmdLikeCompilerMixin.__init__(self, dmd_frontend_version=find_ldc_dmd_frontend_version(version_output))
-        self.id = 'llvm'
         self.base_options = {OptionKey(o) for o in ['b_coverage', 'b_colorout', 'b_vscrt', 'b_ndebug']}
 
     def get_colorout_args(self, colortype: str) -> T.List[str]:
@@ -803,7 +905,7 @@ class LLVMDCompiler(DmdLikeCompilerMixin, DCompiler):
         return ldc_optimization_args[optimization_level]
 
     @classmethod
-    def use_linker_args(cls, linker: str) -> T.List[str]:
+    def use_linker_args(cls, linker: str, version: str) -> T.List[str]:
         return [f'-linker={linker}']
 
     def get_linker_always_args(self) -> T.List[str]:
@@ -824,6 +926,8 @@ class LLVMDCompiler(DmdLikeCompilerMixin, DCompiler):
 
 class DmdDCompiler(DmdLikeCompilerMixin, DCompiler):
 
+    id = 'dmd'
+
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice,
                  info: 'MachineInfo', arch: str, *,
                  exe_wrapper: T.Optional['ExternalProgram'] = None,
@@ -834,7 +938,6 @@ class DmdDCompiler(DmdLikeCompilerMixin, DCompiler):
                            exe_wrapper=exe_wrapper, linker=linker,
                            full_version=full_version, is_cross=is_cross)
         DmdLikeCompilerMixin.__init__(self, version)
-        self.id = 'dmd'
         self.base_options = {OptionKey(o) for o in ['b_coverage', 'b_colorout', 'b_vscrt', 'b_ndebug']}
 
     def get_colorout_args(self, colortype: str) -> T.List[str]:

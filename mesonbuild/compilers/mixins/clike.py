@@ -1,4 +1,4 @@
-# Copyright 2012-2017 The Meson development team
+# Copyright 2012-2022 The Meson development team
 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -187,8 +187,8 @@ class CLikeCompiler(Compiler):
     def get_no_optimization_args(self) -> T.List[str]:
         return ['-O0']
 
-    def get_output_args(self, target: str) -> T.List[str]:
-        return ['-o', target]
+    def get_output_args(self, outputname: str) -> T.List[str]:
+        return ['-o', outputname]
 
     def get_werror_args(self) -> T.List[str]:
         return ['-Werror']
@@ -270,8 +270,8 @@ class CLikeCompiler(Compiler):
     def get_pch_use_args(self, pch_dir: str, header: str) -> T.List[str]:
         return ['-include', os.path.basename(header)]
 
-    def get_pch_name(self, header_name: str) -> str:
-        return os.path.basename(header_name) + '.' + self.get_pch_suffix()
+    def get_pch_name(self, name: str) -> str:
+        return os.path.basename(name) + '.' + self.get_pch_suffix()
 
     def get_default_include_dirs(self) -> T.List[str]:
         return []
@@ -346,7 +346,7 @@ class CLikeCompiler(Compiler):
                      extra_args: T.Union[None, T.List[str], T.Callable[['CompileCheckMode'], T.List[str]]] = None,
                      dependencies: T.Optional[T.List['Dependency']] = None) -> T.Tuple[bool, bool]:
         code = f'''{prefix}
-        #include <{hname}>\n'''
+        #include <{hname}>'''
         return self.compiles(code, env, extra_args=extra_args,
                              dependencies=dependencies)
 
@@ -361,7 +361,7 @@ class CLikeCompiler(Compiler):
          #endif
         #else
          #include <{hname}>
-        #endif\n'''
+        #endif'''
         return self.compiles(code, env, extra_args=extra_args,
                              dependencies=dependencies, mode='preprocess', disable_cache=disable_cache)
 
@@ -377,7 +377,7 @@ class CLikeCompiler(Compiler):
                 {symbol};
             #endif
             return 0;
-        }}\n'''
+        }}'''
         return self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)
 
@@ -410,7 +410,7 @@ class CLikeCompiler(Compiler):
         if mode is CompileCheckMode.LINK:
             ld_value = env.lookup_binary_entry(self.for_machine, self.language + '_ld')
             if ld_value is not None:
-                largs += self.use_linker_args(ld_value[0])
+                largs += self.use_linker_args(ld_value[0], self.version)
 
             # Add LDFLAGS from the env
             sys_ld_args = env.coredata.get_external_link_args(self.for_machine, self.language)
@@ -437,7 +437,7 @@ class CLikeCompiler(Compiler):
             dependencies = []
         elif not isinstance(dependencies, collections.abc.Iterable):
             # TODO: we want to ensure the front end does the listifing here
-            dependencies = [dependencies]  # type: ignore
+            dependencies = [dependencies]
         # Collect compiler arguments
         cargs = self.compiler_args()  # type: arglist.CompilerArgs
         largs = []  # type: T.List[str]
@@ -493,7 +493,7 @@ class CLikeCompiler(Compiler):
                      dependencies: T.Optional[T.List['Dependency']]) -> bool:
         t = f'''#include <stdio.h>
         {prefix}
-        int main(void) {{ static int a[1-2*!({expression})]; a[0]=0; return 0; }}\n'''
+        int main(void) {{ static int a[1-2*!({expression})]; a[0]=0; return 0; }}'''
         return self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)[0]
 
@@ -580,7 +580,7 @@ class CLikeCompiler(Compiler):
         int main(void) {{
             {typename} something;
             return 0;
-        }}\n'''
+        }}'''
         if not self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)[0]:
             return -1
@@ -618,7 +618,7 @@ class CLikeCompiler(Compiler):
         int main(void) {{
             {typename} something;
             return 0;
-        }}\n'''
+        }}'''
         if not self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)[0]:
             return -1
@@ -825,7 +825,7 @@ class CLikeCompiler(Compiler):
             head, main = self._have_prototype_templ()
         else:
             head, main = self._no_prototype_templ()
-        templ = head + stubs_fail + main + '\n'
+        templ = head + stubs_fail + main
 
         res, cached = self.links(templ.format(**fargs), env, extra_args=extra_args,
                                  dependencies=dependencies)
@@ -868,7 +868,7 @@ class CLikeCompiler(Compiler):
             {__builtin_}{func};
         #endif
         return 0;
-        }}\n'''
+        }}'''
         return self.links(t.format(**fargs), env, extra_args=extra_args,
                           dependencies=dependencies)
 
@@ -886,7 +886,7 @@ class CLikeCompiler(Compiler):
         void bar(void) {{
             {typename} foo;
             {members}
-        }}\n'''
+        }}'''
         return self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)
 
@@ -896,13 +896,14 @@ class CLikeCompiler(Compiler):
         t = f'''{prefix}
         void bar(void) {{
             sizeof({typename});
-        }}\n'''
+        }}'''
         return self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)
 
-    def symbols_have_underscore_prefix(self, env: 'Environment') -> bool:
+    def _symbols_have_underscore_prefix_searchbin(self, env: 'Environment') -> bool:
         '''
-        Check if the compiler prefixes an underscore to global C symbols
+        Check if symbols have underscore prefix by compiling a small test binary
+        and then searching the binary for the string,
         '''
         symbol_name = b'meson_uscore_prefix'
         code = '''#ifdef __cplusplus
@@ -914,10 +915,10 @@ class CLikeCompiler(Compiler):
         #endif
         '''
         args = self.get_compiler_check_args(CompileCheckMode.COMPILE)
-        n = 'symbols_have_underscore_prefix'
+        n = '_symbols_have_underscore_prefix_searchbin'
         with self._build_wrapper(code, env, extra_args=args, mode='compile', want_output=True, temp_dir=env.scratch_dir) as p:
             if p.returncode != 0:
-                raise RuntimeError(f'BUG: Unable to compile {n!r} check: {p.stdout}')
+                raise RuntimeError(f'BUG: Unable to compile {n!r} check: {p.stderr}')
             if not os.path.isfile(p.output_name):
                 raise RuntimeError(f'BUG: Can\'t find compiled test code for {n!r} check')
             with open(p.output_name, 'rb') as o:
@@ -925,13 +926,79 @@ class CLikeCompiler(Compiler):
                     # Check if the underscore form of the symbol is somewhere
                     # in the output file.
                     if b'_' + symbol_name in line:
-                        mlog.debug("Symbols have underscore prefix: YES")
+                        mlog.debug("Underscore prefix check found prefixed function in binary")
                         return True
                     # Else, check if the non-underscored form is present
                     elif symbol_name in line:
-                        mlog.debug("Symbols have underscore prefix: NO")
+                        mlog.debug("Underscore prefix check found non-prefixed function in binary")
                         return False
-        raise RuntimeError(f'BUG: {n!r} check failed unexpectedly')
+        raise RuntimeError(f'BUG: {n!r} check did not find symbol string in binary')
+
+    def _symbols_have_underscore_prefix_define(self, env: 'Environment') -> T.Optional[bool]:
+        '''
+        Check if symbols have underscore prefix by querying the
+        __USER_LABEL_PREFIX__ define that most compilers provide
+        for this. Return if functions have underscore prefix or None
+        if it was not possible to determine, like when the compiler
+        does not set the define or the define has an unexpected value.
+        '''
+        delim = '"MESON_HAVE_UNDERSCORE_DELIMITER" '
+        code = f'''
+        #ifndef __USER_LABEL_PREFIX__
+        #define MESON_UNDERSCORE_PREFIX unsupported
+        #else
+        #define MESON_UNDERSCORE_PREFIX __USER_LABEL_PREFIX__
+        #endif
+        {delim}MESON_UNDERSCORE_PREFIX
+        '''
+        with self._build_wrapper(code, env, mode='preprocess', want_output=False, temp_dir=env.scratch_dir) as p:
+            if p.returncode != 0:
+                raise RuntimeError(f'BUG: Unable to preprocess _symbols_have_underscore_prefix_define check: {p.stdout}')
+            symbol_prefix = p.stdout.partition(delim)[-1].rstrip()
+
+            mlog.debug(f'Queried compiler for function prefix: __USER_LABEL_PREFIX__ is "{symbol_prefix!s}"')
+            if symbol_prefix == '_':
+                return True
+            elif symbol_prefix == '':
+                return False
+            else:
+                return None
+
+    def _symbols_have_underscore_prefix_list(self, env: 'Environment') -> T.Optional[bool]:
+        '''
+        Check if symbols have underscore prefix by consulting a hardcoded
+        list of cases where we know the results.
+        Return if functions have underscore prefix or None if unknown.
+        '''
+        m = env.machines[self.for_machine]
+        # Darwin always uses the underscore prefix, not matter what
+        if m.is_darwin():
+            return True
+        # Windows uses the underscore prefix on x86 (32bit) only
+        if m.is_windows() or m.is_cygwin():
+            return m.cpu_family == 'x86'
+        return None
+
+
+    def symbols_have_underscore_prefix(self, env: 'Environment') -> bool:
+        '''
+        Check if the compiler prefixes an underscore to global C symbols
+        '''
+        # First, try to query the compiler directly
+        result = self._symbols_have_underscore_prefix_define(env)
+        if result is not None:
+            return result
+
+        # Else, try to consult a hardcoded list of cases we know
+        # absolutely have an underscore prefix
+        result = self._symbols_have_underscore_prefix_list(env)
+        if result is not None:
+            return result
+
+        # As a last resort, try search in a compiled binary, which is the
+        # most unreliable way of checking this, see #5482
+        return self._symbols_have_underscore_prefix_searchbin(env)
+
 
     def _get_patterns(self, env: 'Environment', prefixes: T.List[str], suffixes: T.List[str], shared: bool = False) -> T.List[str]:
         patterns = []  # type: T.List[str]

@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 """This is a helper script for IDE developers. It allows you to
 extract information such as list of targets, files, compiler flags,
@@ -21,19 +22,21 @@ project files and don't need this info."""
 
 import collections
 import json
-from . import build, coredata as cdata
-from . import mesonlib
-from .ast import IntrospectionInterpreter, build_target_functions, AstConditionLevel, AstIDGenerator, AstIndentationGenerator, AstJSONPrinter
-from . import mlog
-from .backend import backends
-from .mparser import BaseNode, FunctionNode, ArrayNode, ArgumentNode, StringNode
-from .interpreter import Interpreter
+import os
 from pathlib import Path, PurePath
 import typing as T
-import os
-import argparse
 
+from . import build, mesonlib, mlog, coredata as cdata
+from .ast import IntrospectionInterpreter, BUILD_TARGET_FUNCTIONS, AstConditionLevel, AstIDGenerator, AstIndentationGenerator, AstJSONPrinter
+from .backend import backends
 from .mesonlib import OptionKey
+from .mparser import FunctionNode, ArrayNode, ArgumentNode, StringNode
+
+if T.TYPE_CHECKING:
+    import argparse
+
+    from .interpreter import Interpreter
+    from .mparser import BaseNode
 
 def get_meson_info_file(info_dir: str) -> str:
     return os.path.join(info_dir, 'meson-info.json')
@@ -107,9 +110,6 @@ def list_installed(installdata: backends.InstallData) -> T.Dict[str, str]:
         for t in installdata.targets:
             res[os.path.join(installdata.build_dir, t.fname)] = \
                 os.path.join(installdata.prefix, t.outdir, os.path.basename(t.fname))
-            for alias in t.aliases.keys():
-                res[os.path.join(installdata.build_dir, alias)] = \
-                    os.path.join(installdata.prefix, t.outdir, os.path.basename(alias))
         for i in installdata.data:
             res[i.path] = os.path.join(installdata.prefix, i.install_path)
         for i in installdata.headers:
@@ -118,6 +118,9 @@ def list_installed(installdata: backends.InstallData) -> T.Dict[str, str]:
             res[i.path] = os.path.join(installdata.prefix, i.install_path)
         for i in installdata.install_subdirs:
             res[i.path] = os.path.join(installdata.prefix, i.install_path)
+        for s in installdata.symlinks:
+            basename = os.path.basename(s.name)
+            res[basename] = os.path.join(installdata.prefix, s.install_path, basename)
     return res
 
 def list_install_plan(installdata: backends.InstallData) -> T.Dict[str, T.Dict[str, T.Dict[str, T.Optional[str]]]]:
@@ -166,7 +169,7 @@ def list_targets_from_source(intr: IntrospectionInterpreter) -> T.List[T.Dict[st
             args = []  # type: T.List[BaseNode]
             if isinstance(n, FunctionNode):
                 args = list(n.args.arguments)
-                if n.func_name in build_target_functions:
+                if n.func_name in BUILD_TARGET_FUNCTIONS:
                     args.pop(0)
             elif isinstance(n, ArrayNode):
                 args = n.args.arguments
@@ -216,9 +219,17 @@ def list_targets(builddata: build.Build, installdata: backends.InstallData, back
     # Fast lookup table for installation files
     install_lookuptable = {}
     for i in installdata.targets:
-        out = [os.path.join(installdata.prefix, i.outdir, os.path.basename(i.fname))]
-        out += [os.path.join(installdata.prefix, i.outdir, os.path.basename(x)) for x in i.aliases]
-        install_lookuptable[os.path.basename(i.fname)] = [str(PurePath(x)) for x in out]
+        basename = os.path.basename(i.fname)
+        install_lookuptable[basename] = [str(PurePath(installdata.prefix, i.outdir, basename))]
+    for s in installdata.symlinks:
+        # Symlink's target must already be in the table. They share the same list
+        # to support symlinks to symlinks recursively, such as .so -> .so.0 -> .so.1.2.3
+        basename = os.path.basename(s.name)
+        try:
+            install_lookuptable[basename] = install_lookuptable[os.path.basename(s.target)]
+            install_lookuptable[basename].append(str(PurePath(installdata.prefix, s.install_path, basename)))
+        except KeyError:
+            pass
 
     for (idname, target) in builddata.get_targets().items():
         if not isinstance(target, build.Target):
@@ -258,9 +269,9 @@ def list_buildoptions(coredata: cdata.CoreData, subprojects: T.Optional[T.List[s
     test_option_names = {OptionKey('errorlogs'),
                          OptionKey('stdsplit')}
 
-    dir_options: 'cdata.KeyedOptionDictType' = {}
-    test_options: 'cdata.KeyedOptionDictType' = {}
-    core_options: 'cdata.KeyedOptionDictType' = {}
+    dir_options: 'cdata.MutableKeyedOptionDictType' = {}
+    test_options: 'cdata.MutableKeyedOptionDictType' = {}
+    core_options: 'cdata.MutableKeyedOptionDictType' = {}
     for k, v in coredata.options.items():
         if k in dir_option_names:
             dir_options[k] = v
@@ -318,7 +329,7 @@ def find_buildsystem_files_list(src_dir: str) -> T.List[str]:
 
 def list_buildsystem_files(builddata: build.Build, interpreter: Interpreter) -> T.List[str]:
     src_dir = builddata.environment.get_source_dir()
-    filelist = interpreter.get_build_def_files()  # type: T.List[str]
+    filelist = list(interpreter.get_build_def_files())
     filelist = [PurePath(src_dir, x).as_posix() for x in filelist]
     return filelist
 

@@ -53,16 +53,17 @@ index.md
 			Qt4-module.md
 			Qt5-module.md
 			Qt6-module.md
-			RPM-module.md
 			Rust-module.md
 			Simd-module.md
 			SourceSet-module.md
 			Windows-module.md
 			i18n-module.md
+			Wayland-module.md
 		Java.md
 		Vala.md
 		D.md
 		Cython.md
+		Rust.md
 		IDE-integration.md
 		Custom-build-targets.md
 		Build-system-converters.md
@@ -86,8 +87,10 @@ index.md
 		Using-wraptool.md
 		Wrap-best-practices-and-tips.md
 		Shipping-prebuilt-binaries-as-wraps.md
-		fallback-wraptool.md
 	Release-notes.md
+		Release-notes-for-0.63.0.md
+		Release-notes-for-0.62.0.md
+		Release-notes-for-0.61.0.md
 		Release-notes-for-0.60.0.md
 		Release-notes-for-0.59.0.md
 		Release-notes-for-0.58.0.md

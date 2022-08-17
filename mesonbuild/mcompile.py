@@ -22,11 +22,12 @@ import shutil
 import typing as T
 from collections import defaultdict
 from pathlib import Path
+from time import sleep
 
 from . import mlog
 from . import mesonlib
 from . import coredata
-from .mesonlib import MesonException, RealPathAction, setup_vsenv
+from .mesonlib import MesonException, RealPathAction, join_args, setup_vsenv
 from mesonbuild.environment import detect_ninja
 from mesonbuild.coredata import UserArrayOption
 from mesonbuild import build
@@ -118,7 +119,14 @@ def get_target_from_intro_data(target: ParsedTargetName, builddir: Path, introsp
     if not found_targets:
         raise MesonException(f'Can\'t invoke target `{target.full_name}`: target not found')
     elif len(found_targets) > 1:
-        raise MesonException(f'Can\'t invoke target `{target.full_name}`: ambiguous name. Add target type and/or path: `PATH/NAME:TYPE`')
+        suggestions: T.List[str] = []
+        for i in found_targets:
+            p = Path(i['filename'][0]).relative_to(resolved_bdir)
+            t = i['type'].replace(' ', '_')
+            suggestions.append(f'- ./{p}:{t}')
+        suggestions_str = '\n'.join(suggestions)
+        raise MesonException(f'Can\'t invoke target `{target.full_name}`: ambiguous name.' \
+                             f'Add target type and/or path:\n{suggestions_str}')
 
     return found_targets[0]
 
@@ -322,22 +330,23 @@ def add_arguments(parser: 'argparse.ArgumentParser') -> None:
     )
 
 def run(options: 'argparse.Namespace') -> int:
-    cdata = coredata.load(options.wd)
     bdir = Path(options.wd)
-    buildfile = bdir / 'meson-private' / 'build.dat'
-    if not buildfile.is_file():
-        raise MesonException(f'Directory {options.wd!r} does not seem to be a Meson build directory.')
+    validate_builddir(bdir)
+    if options.targets and options.clean:
+        raise MesonException('`TARGET` and `--clean` can\'t be used simultaneously')
+
+    cdata = coredata.load(options.wd)
     b = build.load(options.wd)
-    setup_vsenv(b.need_vsenv)
+    vsenv_active = setup_vsenv(b.need_vsenv)
+    if vsenv_active:
+        mlog.log(mlog.green('INFO:'), 'automatically activated MSVC compiler environment')
 
     cmd = []    # type: T.List[str]
     env = None  # type: T.Optional[T.Dict[str, str]]
 
-    if options.targets and options.clean:
-        raise MesonException('`TARGET` and `--clean` can\'t be used simultaneously')
-
     backend = cdata.get_option(mesonlib.OptionKey('backend'))
     assert isinstance(backend, str)
+    mlog.log(mlog.green('INFO:'), 'autodetecting backend as', backend)
     if backend == 'ninja':
         cmd, env = get_parsed_args_ninja(options, bdir)
     elif backend.startswith('vs'):
@@ -348,6 +357,8 @@ def run(options: 'argparse.Namespace') -> int:
         raise MesonException(
             f'Backend `{backend}` is not yet supported by `compile`. Use generated project files directly instead.')
 
+    mlog.log(mlog.green('INFO:'), 'calculating backend command to run:', join_args(cmd))
+    sleep(2)
     p, *_ = mesonlib.Popen_safe(cmd, stdout=sys.stdout.buffer, stderr=sys.stderr.buffer, env=env)
 
     return p.returncode

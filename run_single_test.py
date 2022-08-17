@@ -13,7 +13,7 @@ import pathlib
 import typing as T
 
 from mesonbuild import mlog
-from run_project_tests import TestDef, load_test_json, run_test, BuildStep
+from run_project_tests import TestDef, load_test_json, run_test, BuildStep, test_emits_skip_msg
 from run_project_tests import setup_commands, detect_system_compiler, print_tool_versions
 
 if T.TYPE_CHECKING:
@@ -26,11 +26,14 @@ if T.TYPE_CHECKING:
         case: pathlib.Path
         subtests: T.List[int]
         backend: str
+        extra_args: T.List[str]
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument('case', type=pathlib.Path, help='The test case to run')
+    parser.add_argument('extra_args', nargs='*',
+                        help='arguments that are passed directly to Meson (remember to have -- before these).')
     parser.add_argument('--subtest', type=int, action='append', dest='subtests', help='which subtests to run')
     parser.add_argument('--backend', action='store', help="Which backend to use")
     parser.add_argument('--cross-file', action='store', help='File describing cross compilation environment.')
@@ -47,10 +50,33 @@ def main() -> None:
     if args.subtests:
         tests = [t for i, t in enumerate(tests) if i in args.subtests]
 
-    results = [run_test(t, t.args, '', True) for t in tests]
+    def should_fail(path: pathlib.Path) -> str:
+        dir_ = path.parent.stem
+        # FIXME: warning tets might not be handled correctly still…
+        if dir_.startswith(('failing', 'warning')):
+            if ' ' in dir_:
+                return dir_.split(' ')[1]
+            return 'meson'
+        return ''
+
+    results = [run_test(t, t.args + args.extra_args, should_fail(t.path), args.use_tmpdir) for t in tests]
     failed = False
     for test, result in zip(tests, results):
-        if (result is None) or ('MESON_SKIP_TEST' in result.stdo):
+        if result is None:
+            is_skipped = True
+            skip_reason = 'not run because preconditions were not met'
+        else:
+            for l in result.stdo.splitlines():
+                if test_emits_skip_msg(l):
+                    is_skipped = True
+                    offset = l.index('MESON_SKIP_TEST') + 16
+                    skip_reason = l[offset:].strip()
+                    break
+            else:
+                is_skipped = False
+                skip_reason = ''
+
+        if is_skipped:
             msg = mlog.yellow('SKIP:')
         elif result.msg:
             msg = mlog.red('FAIL:')
@@ -58,6 +84,8 @@ def main() -> None:
         else:
             msg = mlog.green('PASS:')
         mlog.log(msg, *test.display_name())
+        if skip_reason:
+            mlog.log(mlog.bold('Reason:'), skip_reason)
         if result is not None and result.msg and 'MESON_SKIP_TEST' not in result.stdo:
             mlog.log('reason:', result.msg)
             if result.step is BuildStep.configure:

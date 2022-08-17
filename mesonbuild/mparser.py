@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from dataclasses import dataclass
 import re
 import codecs
-import textwrap
 import types
 import typing as T
 from .mesonlib import MesonException
@@ -87,15 +87,15 @@ class BlockParseException(MesonException):
 
 TV_TokenTypes = T.TypeVar('TV_TokenTypes', int, str, bool)
 
+@dataclass(eq=False)
 class Token(T.Generic[TV_TokenTypes]):
-    def __init__(self, tid: str, filename: str, line_start: int, lineno: int, colno: int, bytespan: T.Tuple[int, int], value: TV_TokenTypes):
-        self.tid = tid                # type: str
-        self.filename = filename      # type: str
-        self.line_start = line_start  # type: int
-        self.lineno = lineno          # type: int
-        self.colno = colno            # type: int
-        self.bytespan = bytespan      # type: T.Tuple[int, int]
-        self.value = value            # type: TV_TokenTypes
+    tid: str
+    filename: str
+    line_start: int
+    lineno: int
+    colno: int
+    bytespan: T.Tuple[int, int]
+    value: TV_TokenTypes
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, str):
@@ -114,6 +114,7 @@ class Lexer:
         self.token_specification = [
             # Need to be sorted longest to shortest.
             ('ignore', re.compile(r'[ \t]')),
+            ('multiline_fstring', re.compile(r"f'''(.|\n)*?'''", re.M)),
             ('fstring', re.compile(r"f'([^'\\]|(\\.))*'")),
             ('id', re.compile('[_a-zA-Z][_0-9a-zA-Z]*')),
             ('number', re.compile(r'0[bB][01]+|0[oO][0-7]+|0[xX][0-9a-fA-F]+|0|[1-9]\d*')),
@@ -193,22 +194,27 @@ class Lexer:
                     elif tid in {'string', 'fstring'}:
                         # Handle here and not on the regexp to give a better error message.
                         if match_text.find("\n") != -1:
-                            mlog.warning(textwrap.dedent("""\
-                                    Newline character in a string detected, use ''' (three single quotes) for multiline strings instead.
-                                    This will become a hard error in a future Meson release.\
-                                """),
-                                self.getline(line_start),
-                                str(lineno),
-                                str(col)
-                            )
+                            msg = ParseException("Newline character in a string detected, use ''' (three single quotes) "
+                                                 "for multiline strings instead.\n"
+                                                 "This will become a hard error in a future Meson release.",
+                                                 self.getline(line_start), lineno, col)
+                            mlog.warning(msg, location=BaseNode(lineno, col, filename))
                         value = match_text[2 if tid == 'fstring' else 1:-1]
                         try:
                             value = ESCAPE_SEQUENCE_SINGLE_RE.sub(decode_match, value)
                         except MesonUnicodeDecodeError as err:
                             raise MesonException(f"Failed to parse escape sequence: '{err.match}' in string:\n  {match_text}")
-                    elif tid == 'multiline_string':
-                        tid = 'string'
-                        value = match_text[3:-3]
+                    elif tid in {'multiline_string', 'multiline_fstring'}:
+                        # For multiline strings, parse out the value and pass
+                        # through the normal string logic.
+                        # For multiline format strings, we have to emit a
+                        # different AST node so we can add a feature check,
+                        # but otherwise, it follows the normal fstring logic.
+                        if tid == 'multiline_string':
+                            value = match_text[3:-3]
+                            tid = 'string'
+                        else:
+                            value = match_text[4:-3]
                         lines = match_text.split('\n')
                         if len(lines) > 1:
                             lineno += len(lines) - 1
@@ -237,13 +243,19 @@ class Lexer:
             if not matched:
                 raise ParseException('lexer', self.getline(line_start), lineno, col)
 
+@dataclass(eq=False)
 class BaseNode:
-    def __init__(self, lineno: int, colno: int, filename: str, end_lineno: T.Optional[int] = None, end_colno: T.Optional[int] = None):
-        self.lineno = lineno      # type: int
-        self.colno = colno        # type: int
-        self.filename = filename  # type: str
-        self.end_lineno = end_lineno if end_lineno is not None else self.lineno
-        self.end_colno = end_colno if end_colno is not None else self.colno
+    lineno: int
+    colno: int
+    filename: str
+    end_lineno: T.Optional[int] = None
+    end_colno: T.Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if self.end_lineno is None:
+            self.end_lineno = self.lineno
+        if self.end_colno is None:
+            self.end_colno = self.colno
 
         # Attributes for the visitors
         self.level = 0            # type: int
@@ -295,7 +307,11 @@ class FormatStringNode(ElementaryNode[str]):
         assert isinstance(self.value, str)
 
     def __str__(self) -> str:
-        return "Format string node: '{self.value}' ({self.lineno}, {self.colno})."
+        return f"Format string node: '{self.value}' ({self.lineno}, {self.colno})."
+
+class MultilineFormatStringNode(FormatStringNode):
+    def __str__(self) -> str:
+        return f"Multiline Format string node: '{self.value}' ({self.lineno}, {self.colno})."
 
 class ContinueNode(ElementaryNode):
     pass
@@ -682,6 +698,8 @@ class Parser:
             return StringNode(t)
         if self.accept('fstring'):
             return FormatStringNode(t)
+        if self.accept('multiline_fstring'):
+            return MultilineFormatStringNode(t)
         return EmptyNode(self.current.lineno, self.current.colno, self.current.filename)
 
     def key_values(self) -> ArgumentNode:

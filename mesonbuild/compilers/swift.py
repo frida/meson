@@ -11,11 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 import subprocess, os.path
 import typing as T
 
-from ..mesonlib import EnvironmentException, MachineChoice
+from ..mesonlib import EnvironmentException
 
 from .compilers import Compiler, swift_buildtype_args, clike_debug_args
 
@@ -23,6 +24,7 @@ if T.TYPE_CHECKING:
     from ..envconfig import MachineInfo
     from ..environment import Environment
     from ..linkers import DynamicLinker
+    from ..mesonlib import MachineChoice
 
 swift_optimization_args = {
     '0': [],
@@ -37,6 +39,7 @@ class SwiftCompiler(Compiler):
 
     LINKER_PREFIX = ['-Xlinker']
     language = 'swift'
+    id = 'llvm'
 
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice,
                  is_cross: bool, info: 'MachineInfo', full_version: T.Optional[str] = None,
@@ -45,7 +48,6 @@ class SwiftCompiler(Compiler):
                          is_cross=is_cross, full_version=full_version,
                          linker=linker)
         self.version = version
-        self.id = 'llvm'
 
     def needs_static_linker(self) -> bool:
         return True

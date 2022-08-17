@@ -27,17 +27,15 @@ if T.TYPE_CHECKING:
     from ..environment import Environment
     from .factory import DependencyFactory, WrappedFactoryFunc, DependencyGenerator
 
+    TV_DepIDEntry = T.Union[str, bool, int, T.Tuple[str, ...]]
+    TV_DepID = T.Tuple[T.Tuple[str, TV_DepIDEntry], ...]
+
 # These must be defined in this file to avoid cyclical references.
 packages: T.Dict[
     str,
     T.Union[T.Type[ExternalDependency], 'DependencyFactory', 'WrappedFactoryFunc']
 ] = {}
 _packages_accept_language: T.Set[str] = set()
-
-if T.TYPE_CHECKING:
-    TV_DepIDEntry = T.Union[str, bool, int, T.Tuple[str, ...]]
-    TV_DepID = T.Tuple[T.Tuple[str, TV_DepIDEntry], ...]
-
 
 def get_dep_identifier(name: str, kwargs: T.Dict[str, T.Any]) -> 'TV_DepID':
     identifier: 'TV_DepID' = (('name', name), )
@@ -59,12 +57,12 @@ def get_dep_identifier(name: str, kwargs: T.Dict[str, T.Any]) -> 'TV_DepID':
             continue
         # All keyword arguments are strings, ints, or lists (or lists of lists)
         if isinstance(value, list):
-            value = frozenset(listify(value))
             for i in value:
                 assert isinstance(i, str)
+            value = tuple(frozenset(listify(value)))
         else:
             assert isinstance(value, (str, bool, int))
-        identifier += (key, value)
+        identifier = (*identifier, (key, value),)
     return identifier
 
 display_name_map = {
@@ -178,13 +176,13 @@ def _build_external_dependency_list(name: str, env: 'Environment', for_machine: 
         # class method, if one exists, otherwise the list just consists of the
         # constructor
         if isinstance(packages[lname], type):
-            entry1 = T.cast(T.Type[ExternalDependency], packages[lname])  # mypy doesn't understand isinstance(..., type)
+            entry1 = T.cast('T.Type[ExternalDependency]', packages[lname])  # mypy doesn't understand isinstance(..., type)
             if issubclass(entry1, ExternalDependency):
                 # TODO: somehow make mypy understand that entry1(env, kwargs) is OK...
                 func: T.Callable[[], 'ExternalDependency'] = lambda: entry1(env, kwargs)  # type: ignore
                 dep = [func]
         else:
-            entry2 = T.cast(T.Union['DependencyFactory', 'WrappedFactoryFunc'], packages[lname])
+            entry2 = T.cast('T.Union[DependencyFactory, WrappedFactoryFunc]', packages[lname])
             dep = entry2(env, for_machine, kwargs)
         return dep
 

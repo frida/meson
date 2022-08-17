@@ -11,17 +11,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
+
+import uuid, os, operator
+import typing as T
 
 from . import backends
 from .. import build
 from .. import dependencies
 from .. import mesonlib
 from .. import mlog
-import uuid, os, operator
-import typing as T
-
 from ..mesonlib import MesonException, OptionKey
-from ..interpreter import Interpreter
+
+if T.TYPE_CHECKING:
+    from ..interpreter import Interpreter
 
 INDENT = '\t'
 XCODETYPEMAP = {'c': 'sourcecode.c.c',
@@ -131,8 +134,8 @@ class PbxDict:
         self.items = []
 
     def add_item(self, key, value, comment=''):
-        item = PbxDictItem(key, value, comment)
         assert key not in self.keys
+        item = PbxDictItem(key, value, comment)
         self.keys.add(key)
         self.items.append(item)
 
@@ -255,9 +258,6 @@ class XCodeBackend(backends.Backend):
         stem = os.path.splitext(os.path.basename(source))[0]
         obj_path = f'{project}.build/{buildtype}/{tname}.build/Objects-normal/{arch}/{stem}.o'
         return obj_path
-
-    def get_extracted_obj_paths(self, target: build.BuildTarget, outputs: T.List[str]) -> T.List[str]:
-        return outputs
 
     def generate(self):
         self.serialize_tests()
@@ -601,7 +601,9 @@ class XCodeBackend(backends.Backend):
                 if isinstance(dep, dependencies.AppleFrameworks):
                     for f in dep.frameworks:
                         fw_dict = PbxDict()
-                        objects_dict.add_item(self.native_frameworks[f], fw_dict, f'{f}.framework in Frameworks')
+                        fwkey = self.native_frameworks[f]
+                        if fwkey not in objects_dict.keys:
+                            objects_dict.add_item(fwkey, fw_dict, f'{f}.framework in Frameworks')
                         fw_dict.add_item('isa', 'PBXBuildFile')
                         fw_dict.add_item('fileRef', self.native_frameworks_fileref[f], f)
 
@@ -822,7 +824,7 @@ class XCodeBackend(backends.Backend):
                 if isinstance(s, mesonlib.File):
                     s = os.path.join(s.subdir, s.fname)
                 elif isinstance(s, str):
-                    s = os.path.joni(t.subdir, s)
+                    s = os.path.join(t.subdir, s)
                 else:
                     continue
                 custom_dict = PbxDict()
@@ -942,7 +944,7 @@ class XCodeBackend(backends.Backend):
                 if isinstance(s, mesonlib.File):
                     s = os.path.join(s.subdir, s.fname)
                 elif isinstance(s, str):
-                    s = os.path.joni(t.subdir, s)
+                    s = os.path.join(t.subdir, s)
                 else:
                     continue
                 source_file_children.add_item(self.fileref_ids[(tname, s)], s)
@@ -975,7 +977,7 @@ class XCodeBackend(backends.Backend):
             if isinstance(s, mesonlib.File):
                 s = os.path.join(s.subdir, s.fname)
             elif isinstance(s, str):
-                s = os.path.joni(t.subdir, s)
+                s = os.path.join(t.subdir, s)
             else:
                 continue
             target_children.add_item(self.fileref_ids[(tid, s)], s)
@@ -1177,7 +1179,8 @@ class XCodeBackend(backends.Backend):
             (srcs, ofilenames, cmd) = self.eval_custom_target_command(t, absolute_outputs=True)
             fixed_cmd, _ = self.as_meson_exe_cmdline(cmd[0],
                                                      cmd[1:],
-                                                     #workdir=None,
+                                                     capture=ofilenames[0] if t.capture else None,
+                                                     feed=srcs[0] if t.feed else None,
                                                      env=t.env)
             custom_dict = PbxDict()
             objects_dict.add_item(self.shell_targets[tname], custom_dict, f'/* Custom target {tname} */')
@@ -1319,7 +1322,7 @@ class XCodeBackend(backends.Backend):
 
         for t in self.custom_targets:
             idval = self.pbx_custom_dep_map[t]
-            targets.append((idval, self.custom_aggregate_targets[t], t, None))#self.containerproxy_map[t]))
+            targets.append((idval, self.custom_aggregate_targets[t], t, None)) # self.containerproxy_map[t]))
 
         # Sort object by ID
         sorted_targets = sorted(targets, key=operator.itemgetter(0))
@@ -1463,7 +1466,7 @@ class XCodeBackend(backends.Backend):
                 # Add extracted objects to the link line by hand.
                 if isinstance(o, build.ExtractedObjects):
                     added_objs = set()
-                    for objname_rel in o.get_outputs(self):
+                    for objname_rel in self.determine_ext_objs(o):
                         objname_abs = os.path.join(self.environment.get_build_dir(), o.target.subdir, objname_rel)
                         if objname_abs not in added_objs:
                             added_objs.add(objname_abs)
@@ -1503,8 +1506,8 @@ class XCodeBackend(backends.Backend):
                 if compiler is None:
                     continue
                 # Start with warning args
-                warn_args = compiler.get_warn_args(self.get_option_for_target(OptionKey('warning_level'), target))
-                copt_proxy = self.get_compiler_options_for_target(target)
+                warn_args = compiler.get_warn_args(target.get_option(OptionKey('warning_level')))
+                copt_proxy = target.get_options()
                 std_args = compiler.get_option_compile_args(copt_proxy)
                 # Add compile args added using add_project_arguments()
                 pargs = self.build.projects_args[target.for_machine].get(target.subproject, {}).get(lang, [])
@@ -1556,9 +1559,9 @@ class XCodeBackend(backends.Backend):
             if target.suffix:
                 suffix = '.' + target.suffix
                 settings_dict.add_item('EXECUTABLE_SUFFIX', suffix)
-            settings_dict.add_item('GCC_GENERATE_DEBUGGING_SYMBOLS', BOOL2XCODEBOOL[self.get_option_for_target(OptionKey('debug'), target)])
+            settings_dict.add_item('GCC_GENERATE_DEBUGGING_SYMBOLS', BOOL2XCODEBOOL[target.get_option(OptionKey('debug'))])
             settings_dict.add_item('GCC_INLINES_ARE_PRIVATE_EXTERN', 'NO')
-            settings_dict.add_item('GCC_OPTIMIZATION_LEVEL', OPT2XCODEOPT[self.get_option_for_target(OptionKey('optimization'), target)])
+            settings_dict.add_item('GCC_OPTIMIZATION_LEVEL', OPT2XCODEOPT[target.get_option(OptionKey('optimization'))])
             if target.has_pch:
                 # Xcode uses GCC_PREFIX_HEADER which only allows one file per target/executable. Precompiling various header files and
                 # applying a particular pch to each source file will require custom scripts (as a build phase) and build flags per each

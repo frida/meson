@@ -22,8 +22,9 @@ from .. import build
 from .. import dependencies
 from .. import mesonlib
 from .. import mlog
+from ..coredata import BUILTIN_DIR_OPTIONS
 from ..dependencies import ThreadDependency
-from ..interpreterbase import permittedKwargs, FeatureNew, FeatureNewKwargs
+from ..interpreterbase import permittedKwargs, FeatureNew, FeatureDeprecated, FeatureNewKwargs
 
 if T.TYPE_CHECKING:
     from . import ModuleState
@@ -100,7 +101,7 @@ class DependenciesHelper:
             else:
                 raise mesonlib.MesonException('requires argument not a string, '
                                               'library with pkgconfig-generated file '
-                                              'or pkgconfig-dependency object, got {obj!r}')
+                                              f'or pkgconfig-dependency object, got {obj!r}')
         return processed_reqs
 
     def add_cflags(self, cflags):
@@ -115,6 +116,8 @@ class DependenciesHelper:
             if hasattr(obj, 'generated_pc'):
                 self._check_generated_pc_deprecation(obj)
                 processed_reqs.append(obj.generated_pc)
+            elif isinstance(obj, dependencies.ValgrindDependency):
+                pass
             elif isinstance(obj, dependencies.PkgConfigDependency):
                 if obj.found():
                     processed_reqs.append(obj.name)
@@ -183,7 +186,8 @@ class DependenciesHelper:
         # lists in case a library is link_with and link_whole at the same time.
         # See remove_dups() below.
         self.link_whole_targets.append(t)
-        self._add_lib_dependencies(t.link_targets, t.link_whole_targets, t.external_deps, public)
+        if isinstance(t, build.BuildTarget):
+            self._add_lib_dependencies(t.link_targets, t.link_whole_targets, t.external_deps, public)
 
     def add_version_reqs(self, name, version_reqs):
         if version_reqs:
@@ -326,8 +330,44 @@ class PkgConfigModule(ExtensionModule):
 
     def _generate_pkgconfig_file(self, state, deps, subdirs, name, description,
                                  url, version, pcfile, conflicts, variables,
-                                 unescaped_variables, uninstalled=False, dataonly=False):
+                                 unescaped_variables, uninstalled=False, dataonly=False,
+                                 pkgroot=None):
         coredata = state.environment.get_coredata()
+        referenced_vars = set()
+        optnames = [x.name for x in BUILTIN_DIR_OPTIONS.keys()]
+
+        if not dataonly:
+            # includedir is always implied, although libdir may not be
+            # needed for header-only libraries
+            referenced_vars |= {'prefix', 'includedir'}
+            if deps.pub_libs or deps.priv_libs:
+                referenced_vars |= {'libdir'}
+        # also automatically infer variables referenced in other variables
+        implicit_vars_warning = False
+        redundant_vars_warning = False
+        varnames = set()
+        varstrings = set()
+        for k, v in variables + unescaped_variables:
+            varnames |= {k}
+            varstrings |= {v}
+        for optname in optnames:
+            optvar = f'${{{optname}}}'
+            if any(x.startswith(optvar) for x in varstrings):
+                if optname in varnames:
+                    redundant_vars_warning = True
+                else:
+                    # these 3 vars were always "implicit"
+                    if dataonly or optname not in {'prefix', 'includedir', 'libdir'}:
+                        implicit_vars_warning = True
+                    referenced_vars |= {'prefix', optname}
+        if redundant_vars_warning:
+            FeatureDeprecated.single_use('pkgconfig.generate variable for builtin directories', '0.62.0',
+                                         state.subproject, 'They will be automatically included when referenced',
+                                         state.current_node)
+        if implicit_vars_warning:
+            FeatureNew.single_use('pkgconfig.generate implicit variable for builtin directories', '0.62.0',
+                                  state.subproject, location=state.current_node)
+
         if uninstalled:
             outdir = os.path.join(state.environment.build_dir, 'meson-uninstalled')
             if not os.path.exists(outdir):
@@ -337,17 +377,26 @@ class PkgConfigModule(ExtensionModule):
         else:
             outdir = state.environment.scratch_dir
             prefix = PurePath(coredata.get_option(mesonlib.OptionKey('prefix')))
-        # These always return paths relative to prefix
-        libdir = PurePath(coredata.get_option(mesonlib.OptionKey('libdir')))
-        incdir = PurePath(coredata.get_option(mesonlib.OptionKey('includedir')))
+            if pkgroot:
+                pkgroot = PurePath(pkgroot)
+                if not pkgroot.is_absolute():
+                    pkgroot = prefix / pkgroot
+                elif prefix not in pkgroot.parents:
+                    raise mesonlib.MesonException('Pkgconfig prefix cannot be outside of the prefix '
+                                                  'when pkgconfig.relocatable=true. '
+                                                  f'Pkgconfig prefix is {pkgroot.as_posix()}.')
+                prefix = PurePath('${pcfiledir}', os.path.relpath(prefix, pkgroot))
         fname = os.path.join(outdir, pcfile)
         with open(fname, 'w', encoding='utf-8') as ofile:
-            if not dataonly:
-                ofile.write('prefix={}\n'.format(self._escape(prefix)))
-                if uninstalled:
-                    ofile.write('srcdir={}\n'.format(self._escape(srcdir)))
-                ofile.write('libdir={}\n'.format(self._escape('${prefix}' / libdir)))
-                ofile.write('includedir={}\n'.format(self._escape('${prefix}' / incdir)))
+            for optname in optnames:
+                if optname in referenced_vars - varnames:
+                    if optname == 'prefix':
+                        ofile.write('prefix={}\n'.format(self._escape(prefix)))
+                    else:
+                        dirpath = PurePath(coredata.get_option(mesonlib.OptionKey(optname)))
+                        ofile.write('{}={}\n'.format(optname, self._escape('${prefix}' / dirpath)))
+            if uninstalled and not dataonly:
+                ofile.write('srcdir={}\n'.format(self._escape(srcdir)))
             if variables or unescaped_variables:
                 ofile.write('\n')
             for k, v in variables:
@@ -487,6 +536,7 @@ class PkgConfigModule(ExtensionModule):
             blocked_vars = ['libraries', 'libraries_private', 'require_private', 'extra_cflags', 'subdirs']
             if any(k in kwargs for k in blocked_vars):
                 raise mesonlib.MesonException(f'Cannot combine dataonly with any of {blocked_vars}')
+            default_install_dir = os.path.join(state.environment.get_datadir(), 'pkgconfig')
 
         subdirs = mesonlib.stringlistify(kwargs.get('subdirs', default_subdirs))
         version = kwargs.get('version', default_version)
@@ -553,9 +603,11 @@ class PkgConfigModule(ExtensionModule):
                 pkgroot_name = os.path.join('{libdir}', 'pkgconfig')
         if not isinstance(pkgroot, str):
             raise mesonlib.MesonException('Install_dir must be a string.')
+        relocatable = state.get_option('relocatable', module='pkgconfig')
         self._generate_pkgconfig_file(state, deps, subdirs, name, description, url,
                                       version, pcfile, conflicts, variables,
-                                      unescaped_variables, False, dataonly)
+                                      unescaped_variables, False, dataonly,
+                                      pkgroot=pkgroot if relocatable else None)
         res = build.Data([mesonlib.File(True, state.environment.get_scratch_dir(), pcfile)], pkgroot, pkgroot_name, None, state.subproject, install_tag='devel')
         variables = self.interpreter.extract_variables(kwargs, argname='uninstalled_variables', dict_new=True)
         variables = parse_variable_list(variables)

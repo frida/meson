@@ -17,6 +17,7 @@ from ..interpreterbase import (ObjectHolder, noPosargs, noKwargs,
                                FeatureNew, disablerIfNotFound,
                                InterpreterException)
 from ..interpreterbase.decorators import ContainerTypeInfo, typed_kwargs, KwargInfo, typed_pos_args
+from ..mesonlib import OptionKey
 from .interpreterobjects import (extract_required_kwarg, extract_search_dirs)
 from .type_checking import REQUIRED_KW, in_set_validator, NoneType
 
@@ -189,8 +190,7 @@ class CompilerHolder(ObjectHolder['Compiler']):
     def compiler(self) -> 'Compiler':
         return self.held_object
 
-    @staticmethod
-    def _dep_msg(deps: T.List['dependencies.Dependency'], endl: str) -> str:
+    def _dep_msg(self, deps: T.List['dependencies.Dependency'], endl: str) -> str:
         msg_single = 'with dependency {}'
         msg_many = 'with dependencies {}'
         if not deps:
@@ -200,6 +200,8 @@ class CompilerHolder(ObjectHolder['Compiler']):
         names = []
         for d in deps:
             if isinstance(d, dependencies.InternalDependency):
+                FeatureNew.single_use('compiler method "dependencies" kwarg with internal dep', '0.57.0', self.subproject,
+                                      location=self.current_node)
                 continue
             if isinstance(d, dependencies.ExternalLibrary):
                 name = '-l' + d.name
@@ -222,9 +224,9 @@ class CompilerHolder(ObjectHolder['Compiler']):
         return self.compiler.exelist
 
     def _determine_args(self, nobuiltins: bool,
-                       incdirs: T.List[build.IncludeDirs],
-                       extra_args: T.List[str],
-                       mode: CompileCheckMode = CompileCheckMode.LINK) -> T.List[str]:
+                        incdirs: T.List[build.IncludeDirs],
+                        extra_args: T.List[str],
+                        mode: CompileCheckMode = CompileCheckMode.LINK) -> T.List[str]:
         args: T.List[str] = []
         for i in incdirs:
             for idir in i.to_string_list(self.environment.get_source_dir()):
@@ -238,20 +240,7 @@ class CompilerHolder(ObjectHolder['Compiler']):
         return args
 
     def _determine_dependencies(self, deps: T.List['dependencies.Dependency'], endl: str = ':') -> T.Tuple[T.List['dependencies.Dependency'], str]:
-        if deps:
-            final_deps = []
-            while deps:
-                next_deps = []
-                for d in mesonlib.listify(deps):
-                    if not isinstance(d, dependencies.Dependency) or d.is_built():
-                        raise InterpreterException('Dependencies must be external dependencies')
-                    final_deps.append(d)
-                    next_deps.extend(d.ext_deps)
-                deps = next_deps
-            deps = final_deps
-        else:
-            # Ensure that we always return a new instance
-            deps = deps.copy()
+        deps = dependencies.get_leaf_external_dependencies(deps)
         return deps, self._dep_msg(deps, endl)
 
     @typed_pos_args('compiler.alignment', str)
@@ -275,6 +264,7 @@ class CompilerHolder(ObjectHolder['Compiler']):
     def run_method(self, args: T.Tuple['mesonlib.FileOrString'], kwargs: 'CompileKW') -> 'RunResult':
         code = args[0]
         if isinstance(code, mesonlib.File):
+            self.interpreter.add_build_def_file(code)
             code = mesonlib.File.from_absolute_file(
                 code.rel_to_builddir(self.environment.source_dir))
         testname = kwargs['name']
@@ -434,11 +424,12 @@ class CompilerHolder(ObjectHolder['Compiler']):
     def compiles_method(self, args: T.Tuple['mesonlib.FileOrString'], kwargs: 'CompileKW') -> bool:
         code = args[0]
         if isinstance(code, mesonlib.File):
+            self.interpreter.add_build_def_file(code)
             code = mesonlib.File.from_absolute_file(
                 code.rel_to_builddir(self.environment.source_dir))
         testname = kwargs['name']
         extra_args = functools.partial(self._determine_args, kwargs['no_builtin_args'], kwargs['include_directories'], kwargs['args'])
-        deps, msg = self._determine_dependencies(kwargs['dependencies'])
+        deps, msg = self._determine_dependencies(kwargs['dependencies'], endl=None)
         result, cached = self.compiler.compiles(code, self.environment,
                                                 extra_args=extra_args,
                                                 dependencies=deps)
@@ -457,6 +448,7 @@ class CompilerHolder(ObjectHolder['Compiler']):
         code = args[0]
         compiler = None
         if isinstance(code, mesonlib.File):
+            self.interpreter.add_build_def_file(code)
             code = mesonlib.File.from_absolute_file(
                 code.rel_to_builddir(self.environment.source_dir))
             suffix = code.suffix
@@ -541,7 +533,7 @@ class CompilerHolder(ObjectHolder['Compiler']):
         hname, symbol = args
         disabled, required, feature = extract_required_kwarg(kwargs, self.subproject, default=False)
         if disabled:
-            mlog.log(f'Header <{hname}> has symbol', mlog.bold(symbol, True), 'skipped: feature', mlog.bold(feature), 'disabled')
+            mlog.log('Header', mlog.bold(hname, True), 'has symbol', mlog.bold(symbol, True), 'skipped: feature', mlog.bold(feature), 'disabled')
             return False
         extra_args = functools.partial(self._determine_args, kwargs['no_builtin_args'], kwargs['include_directories'], kwargs['args'])
         deps, msg = self._determine_dependencies(kwargs['dependencies'])
@@ -555,7 +547,7 @@ class CompilerHolder(ObjectHolder['Compiler']):
         else:
             h = mlog.red('NO')
         cached_msg = mlog.blue('(cached)') if cached else ''
-        mlog.log(f'Header <{hname}> has symbol', mlog.bold(symbol, True), msg, h, cached_msg)
+        mlog.log('Header', mlog.bold(hname, True), 'has symbol', mlog.bold(symbol, True), msg, h, cached_msg)
         return haz
 
     def notfound_library(self, libname: str) -> 'dependencies.ExternalLibrary':
@@ -601,10 +593,13 @@ class CompilerHolder(ObjectHolder['Compiler']):
 
         search_dirs = extract_search_dirs(kwargs)
 
+        prefer_static = self.environment.coredata.get_option(OptionKey('prefer_static'))
         if kwargs['static'] is True:
             libtype = mesonlib.LibType.STATIC
         elif kwargs['static'] is False:
             libtype = mesonlib.LibType.SHARED
+        elif prefer_static:
+            libtype = mesonlib.LibType.PREFER_STATIC
         else:
             libtype = mesonlib.LibType.PREFER_SHARED
         linkargs = self.compiler.find_library(libname, self.environment, search_dirs, libtype)

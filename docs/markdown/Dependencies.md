@@ -45,7 +45,7 @@ non-found dependencies.
 
 Meson also allows to get variables that are defined in the
 `pkg-config` file. This can be done by using the
-`get_pkgconfig_variable` function.
+[[dep.get_pkgconfig_variable]] function.
 
 ```meson
 zdep_prefix = zdep.get_pkgconfig_variable('prefix')
@@ -89,6 +89,28 @@ does not provide an argument for the type of dependency, one of the
 following will happen: If 'default_value' was provided that value will
 be returned, if 'default_value' was not provided then an error will be
 raised.
+
+## Dependencies that provide resource files
+
+Sometimes a dependency provides installable files which other projects then
+need to use. For example, wayland-protocols XML files.
+
+```meson
+foo_dep = dependency('foo')
+foo_datadir = foo_dep.get_variable('pkgdatadir')
+custom_target(
+    'foo-generated.c',
+    input: foo_datadir / 'prototype.xml',
+    output: 'foo-generated.c',
+    command: [generator, '@INPUT@', '@OUTPUT@']
+)
+```
+
+*Since 0.63.0* these actually work as expected, even when they come from a
+(well-formed) internal dependency. This only works when treating the files to
+be obtained as interchangeable with a system dependency -- e.g. only public
+files may be used, and leaving the directory pointed to by the dependency is
+not allowed.
 
 # Declaring your own
 
@@ -166,7 +188,7 @@ no pkg-config on macOS and Windows.
 In these cases Meson provides convenience wrappers in the form of `system`
 dependencies. Internally these dependencies do exactly what a user would do
 in the build system DSL or with a script, likely calling
-`compiler.find_library()`, setting `link_with` and `include_directories`. By
+[[compiler.find_library]], setting `link_with` and `include_directories`. By
 putting these in Meson upstream the barrier of using them is lowered, as
 projects using Meson don't have to re-implement the logic.
 
@@ -239,7 +261,7 @@ to be using the same compiler. This can be achieved using Dub's
 variable when running Meson.
 ```
 dub build urld --compiler=dmd
-DC="dmd" meson builddir
+DC="dmd" meson setup builddir
 ```
 
 ## Config tool
@@ -322,7 +344,7 @@ boost_dep = dependency('boost', modules : ['thread', 'utility'])
 exe = executable('myprog', 'file.cc', dependencies : boost_dep)
 ```
 
-You can call `dependency` multiple times with different modules and
+You can call [[dependency]] multiple times with different modules and
 use those to link against your targets.
 
 If your boost headers or libraries are in non-standard locations you
@@ -392,6 +414,17 @@ foreach h : check_headers
   endif
 endforeach
 ```
+
+## dl (libdl)
+
+*(added 0.62.0)*
+
+Provides access to the dynamic link interface (functions: dlopen,
+dlclose, dlsym and others). On systems where this is not built
+into libc (mostly glibc < 2.34), tries to find an external library
+providing them instead.
+
+`method` may be `auto`, `builtin` or `system`.
 
 ## Fortran Coarrays
 
@@ -471,6 +504,45 @@ is not built into libc, tries to find an external library providing them
 instead.
 
 `method` may be `auto`, `builtin` or `system`.
+
+## JDK
+
+*(added 0.58.0)*
+*(deprecated 0.62.0)*
+
+Deprecated name for JNI. `dependency('jdk')` instead of `dependency('jni')`.
+
+## JNI
+
+*(added 0.62.0)*
+
+`modules` is an optional list of strings containing any of `jvm` and `awt`.
+
+Provides access to compiling with the Java Native Interface (JNI). The lookup
+will first check if `JAVA_HOME` is set in the environment, and if not will use
+the resolved path of `javac`. Systems will usually link your preferred JDK to
+well known paths like `/usr/bin/javac` on Linux for instance. Using the path
+from `JAVA_HOME` or the resolved `javac`, this dependency will place the JDK
+installation's `include` directory and its platform-dependent subdirectory on
+the compiler's include path. If `modules` is non-empty, then the proper linker
+arguments will also be added.
+
+```meson
+dep = dependency('jni', version: '>= 1.8.0', modules: ['jvm'])
+```
+
+**Note**: Due to usage of a resolved path, upgrading the JDK may cause the
+various paths to not be found. In that case, please reconfigure the build
+directory. One workaround is to explicitly set `JAVA_HOME` instead of relying on
+the fallback `javac` resolved path behavior.
+
+**Note**: Include paths might be broken on platforms other than `linux`,
+`windows`, `darwin`, and `sunos`. Please submit a PR or open an issue in this
+case.
+
+**Note**: Use of the `modules` argument on a JDK `<= 1.8` may be broken if your
+system is anything other than `x86_64`. Please submit a PR or open an issue in
+this case.
 
 ## libgcrypt
 
@@ -575,6 +647,12 @@ for OpenMP support.
 
 The `language` keyword may used.
 
+## OpenSSL
+
+*(added 0.62.0)*
+
+`method` may be `auto`, `pkg-config`, `system` or `cmake`.
+
 ## pcap
 
 *(added 0.42.0)*
@@ -653,11 +731,17 @@ or as an OSX framework.
 
 *(added 0.51.0)*
 
-Shaderc currently does not ship with any means of detection.
-Nevertheless, Meson can try to detect it using `pkg-config`, but will
-default to looking for the appropriate library manually. If the
-`static` keyword argument is `true`, `shaderc_combined` is preferred.
-Otherwise, `shaderc_shared` is preferred. Note that it is not possible
+Meson will first attempt to find shaderc using `pkg-config`. Upstream
+currently ships three different `pkg-config` files and by default will
+check them in this order: `shaderc`, `shaderc_combined`, and
+`shaderc_static`. If the `static` keyword argument is `true`, then
+Meson instead checks in this order: `shaderc_combined`, `shaderc_static`,
+and `shaderc`.
+
+If no `pkg-config` file is found, then Meson will try to detect the
+library manually. In this case, it will try to link against either
+`-lshaderc_shared` or `-lshaderc_combined`, preferring the latter
+if the static keyword argument is true. Note that it is not possible
 to obtain the shaderc version using this method.
 
 `method` may be `auto`, `pkg-config` or `system`.

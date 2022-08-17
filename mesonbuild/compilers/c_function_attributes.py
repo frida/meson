@@ -88,6 +88,14 @@ C_FUNC_ATTRIBUTES = {
         'int foo(void) __attribute__((pure));',
     'returns_nonnull':
         'int *foo(void) __attribute__((returns_nonnull));',
+    'section': '''
+        #if defined(__APPLE__) && defined(__MACH__)
+            extern int foo __attribute__((section("__BAR,__bar")));
+        #else
+            extern int foo __attribute__((section(".bar")));
+        #endif''',
+    'sentinel':
+        'int foo(const char *bar, ...) __attribute__((sentinel));',
     'unused':
         'int foo(void) __attribute__((unused));',
     'used':
@@ -113,6 +121,7 @@ C_FUNC_ATTRIBUTES = {
     'weakref': '''
         static int foo(void) { return 0; }
         static int var(void) __attribute__((weakref("foo")));''',
+    'retain': '__attribute__((retain)) int x;',
 }
 
 CXX_FUNC_ATTRIBUTES = {

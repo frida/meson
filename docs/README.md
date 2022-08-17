@@ -13,8 +13,8 @@ Instructions on how to install hotdoc are [here](https://hotdoc.github.io/instal
 From the Meson repository root dir:
 ```
 $ cd docs/
-$ meson built_docs
-$ ninja -C built_docs/ upload
+$ meson setup built_docs/
+$ ninja -C built_docs/
 ```
 Now you should be able to open the documentation locally
 ```
@@ -29,12 +29,4 @@ removes the html pages and replaces with the new content.
 You can simply run:
 ```
 $ ninja -C built_docs/ upload
-```
-
-## Contributing to the documentation
-
-Commits that only change documentation should have `[skip ci]` in their commit message, so CI is not run (it is quite slow).
-For example:
-```
-A commit message [skip ci]
 ```

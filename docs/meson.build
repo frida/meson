@@ -15,10 +15,12 @@ docs_gen = custom_target(
     build_by_default: true,
     install: false)
 
+sitemap = files('sitemap.txt')
+
 genrefman = find_program('./genrefman.py')
 refman_binary = custom_target(
     'gen_refman_bin',
-    input: files('sitemap.txt'),
+    input: sitemap,
     output: 'reference_manual.bin',
     depfile: 'reman_dep.d',
     command: [
@@ -39,7 +41,7 @@ refman_md = custom_target(
         genrefman,
         '-l', 'pickle',
         '-g', 'md',
-        '-s', files('sitemap.txt'),
+        '-s', sitemap,
         '-i', '@INPUT@',
         '-o', '@OUTPUT0@',
         '--link-defs', '@OUTPUT1@',
@@ -47,6 +49,7 @@ refman_md = custom_target(
         '--no-modules',
     ],
 )
+sitemap = refman_md[0]
 
 refman_json = custom_target(
     'gen_refman_json',
@@ -63,6 +66,34 @@ refman_json = custom_target(
     ],
 )
 
+refman_man = custom_target(
+    'gen_refman_man',
+    build_by_default: true,
+    input: refman_binary,
+    output: 'meson-reference.3',
+    command: [
+        genrefman,
+        '-l', 'pickle',
+        '-g', 'man',
+        '-i', '@INPUT@',
+        '-o', '@OUTPUT@',
+        '--force-color',
+        '--no-modules',
+    ],
+)
+
+genrelnotes = custom_target(
+    output: ['sitemap-genrelnotes.txt'],
+    build_always_stale: true,
+    command: [find_program('genrelnotes.py'),
+        '--input-sitemap', sitemap,
+        '--output-sitemap', '@OUTPUT0@',
+        '--output-dir', meson.current_build_dir(),
+        '--source-dir', meson.current_source_dir(),
+    ]
+)
+sitemap = genrelnotes[0]
+
 test('validate_docs', find_program('./jsonvalidator.py'), args: [refman_json])
 
 hotdoc_prog = find_program('hotdoc', version: '>=0.13.7')
@@ -70,7 +101,7 @@ hotdoc_prog = find_program('hotdoc', version: '>=0.13.7')
 hotdoc = import('hotdoc')
 documentation = hotdoc.generate_doc(meson.project_name(),
     project_version: meson.project_version(),
-    sitemap: refman_md[0],
+    sitemap: sitemap,
     build_by_default: true,
     depends: docs_gen,
     index: 'markdown/index.md',
@@ -93,4 +124,5 @@ run_target('upload',
       '--git-upload',
       '-vv',
     ],
+    depends: documentation,
 )

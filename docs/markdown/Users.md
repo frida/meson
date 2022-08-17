@@ -13,16 +13,19 @@ here. Some additional projects are listed in the [`meson` GitHub
 topic](https://github.com/topics/meson).
 
  - [2048.cpp](https://github.com/plibither8/2048.cpp), a fully featured terminal version of the game "2048" written in C++
+ - [Adwaita Manager](https://github.com/AdwCustomizerTeam/AdwCustomizer), change the look of Adwaita, with ease
  - [Aravis](https://github.com/AravisProject/aravis), a glib/gobject based library for video acquisition using Genicam cameras
  - [Akira](https://github.com/akiraux/Akira), a native Linux app for UI and UX design built in Vala and Gtk
  - [AQEMU](https://github.com/tobimensch/aqemu), a Qt GUI for QEMU virtual machines, since version 0.9.3
  - [Arduino sample project](https://github.com/jpakkane/mesonarduino)
  - [bolt](https://gitlab.freedesktop.org/bolt/bolt), userspace daemon to enable security levels for Thunderbolt™ 3 on Linux
+ - [Bubblewrap](https://github.com/containers/bubblewrap), unprivileged sandboxing tool
  - [Budgie Desktop](https://github.com/budgie-desktop/budgie-desktop), a desktop environment built on GNOME technologies
  - [Bzip2](https://gitlab.com/federicomenaquintero/bzip2), the bzip2 compressor/decompressor
  - [Cage](https://github.com/Hjdskes/cage), a Wayland kiosk
  - [canfigger](https://github.com/andy5995/canfigger), simple configuration file parser library
  - [casync](https://github.com/systemd/casync), Content-Addressable Data Synchronization Tool
+ - [cglm](https://github.com/recp/cglm), a highly optimized graphics math library for C
  - [cinnamon-desktop](https://github.com/linuxmint/cinnamon-desktop), the cinnamon desktop library
  - [Cozy](https://github.com/geigi/cozy), a modern audio book player for Linux and macOS using GTK+ 3
  - [dav1d](https://code.videolan.org/videolan/dav1d), an AV1 decoder
@@ -89,21 +92,27 @@ lookup based on OpenStreetMap data
  - [libratbag](https://github.com/libratbag/libratbag), provides a DBus daemon to configure input devices, mainly gaming mice.
  - [libspng](https://github.com/randy408/libspng), a C library for reading and writing Portable Network Graphics (PNG)
 format files
+ - [libSRTP](https://github.com/cisco/libsrtp) (from Cisco Systems), a library for SRTP (Secure Realtime Transport Protocol)
  - [libui](https://github.com/andlabs/libui), a simple and portable (but not inflexible) GUI library in C that uses the native GUI technologies of each platform it supports
  - [Libva](https://github.com/intel/libva), an implementation for the VA (VIdeo Acceleration) API
+ - [libvips](https://github.com/libvips/libvips), a fast image processing library with low memory needs
  - [Libvirt](https://libvirt.org), a toolkit to manage virtualization platforms
  - [Libzim](https://github.com/openzim/libzim), the reference implementation for the ZIM file format
+ - [LXC](https://github.com/lxc/lxc), Linux container runtime
  - [Marker](https://github.com/fabiocolacio/Marker), a GTK-3 markdown editor
- - [Mesa](https://gitlab.freedesktop.org/mesa/mesa/), an open source graphics driver project
+ - [Mesa](https://mesa3d.org/), an open source graphics driver project
+ - [Miniz](https://github.com/richgel999/miniz), a zlib replacement library
  - [MiracleCast](https://github.com/albfan/miraclecast), connect external monitors to your system via Wifi-Display specification aka Miracast
  - [mpv](https://github.com/mpv-player/mpv), a free, open source, and cross-platform media player
  - [mrsh](https://github.com/emersion/mrsh), a minimal POSIX shell
  - [Nautilus](https://gitlab.gnome.org/GNOME/nautilus), the GNOME file manager
  - [Nemo](https://github.com/linuxmint/nemo), the file manager for the Cinnamon desktop environment
+ - [nvme-cli](https://github.com/linux-nvme/nvme-cli), NVMe management command line interface
  - [OcherBook](https://github.com/ccoffing/OcherBook), an open source book reader for Kobo devices
  - [oomd](https://github.com/facebookincubator/oomd), a userspace Out-Of-Memory (OOM) killer for Linux systems
  - [OpenH264](https://github.com/cisco/openh264), open source H.264 codec
  - [OpenHMD](https://github.com/OpenHMD/OpenHMD), a free and open source API and drivers for immersive technology, such as head mounted displays with built in head tracking
+ - [OpenRC](https://github.com/OpenRC/openrc), an init system for Unix-like operating systems
  - [OpenTitan](https://github.com/lowRISC/opentitan), an open source silicon Root of Trust (RoT) project.
  - [Orc](https://gitlab.freedesktop.org/gstreamer/orc), the Optimized Inner Loop Runtime Compiler
  - [OTS](https://github.com/khaledhosny/ots), the OpenType Sanitizer, parses and serializes OpenType files (OTF, TTF) and WOFF and WOFF2 font files, validating and sanitizing them as it goes. Used by Chromium and Firefox
@@ -116,8 +125,10 @@ format files
  - [PicoLibc](https://github.com/keith-packard/picolibc), a standard C library for small embedded systems with limited RAM
  - [PipeWire](https://github.com/PipeWire/pipewire), a framework for video and audio for containerized applications
  - [Paper Rock Scissors](https://github.com/michaelbrockus/paper_rock_scissors), a game with weapons themed at home paper rock scissors style.
+ - [Pistache](https://github.com/pistacheio/pistache), a high performance REST toolkit written in C++
  - [Pithos](https://github.com/pithos/pithos), a Pandora Radio client
  - [Pitivi](https://github.com/pitivi/pitivi/), a nonlinear video editor
+ - [Planner](https://github.com/alainm23/planner), task manager with Todoist support designed for GNU/Linux
  - [Playerctl](https://github.com/acrisci/playerctl), mpris command-line controller and library for spotify, vlc, audacious, bmp, cmus, and others
  - [Polari](https://gitlab.gnome.org/GNOME/polari), an IRC client
  - [qboot](https://github.com/bonzini/qboot), a minimal x86 firmware for booting Linux kernels
@@ -126,9 +137,11 @@ format files
  - [Rizin](https://rizin.re), Free and Open Source Reverse Engineering Framework
  - [QEMU](https://qemu.org), a processor emulator and virtualizer
  - [RxDock](https://gitlab.com/rxdock/rxdock), a protein-ligand docking software designed for high throughput virtual screening (fork of rDock)
+ - [SciPy](https://scipy.org/), an open-source software for mathematics, science, and engineering
  - [scrcpy](https://github.com/Genymobile/scrcpy), a cross platform application that provides display and control of Android devices connected on USB or over TCP/IP
  - [Sequeler](https://github.com/Alecaddd/sequeler), a friendly SQL client for Linux, built with Vala and Gtk
  - [Siril](https://gitlab.com/free-astro/siril), an image processing software for amateur astronomy
+ - [Spot](https://github.com/xou816/spot), Rust based Spotify client for the GNOME desktop
  - [SSHFS](https://github.com/libfuse/sshfs), allows you to mount a remote filesystem using SFTP
  - [sway](https://github.com/swaywm/sway), i3-compatible Wayland compositor
  - [Sysprof](https://git.gnome.org/browse/sysprof), a profiling tool
@@ -142,16 +155,16 @@ format files
  - [Vala Language Server](https://github.com/benwaffle/vala-language-server), code intelligence engine for the Vala and Genie programming languages
  - [Valum](https://github.com/valum-framework/valum), a micro web framework written in Vala
  - [Venom](https://github.com/naxuroqa/Venom), a modern Tox client for the GNU/Linux desktop
+ - [vkQuake](https://github.com/Novum/vkQuake), a port of id Software's Quake using Vulkan instead of OpenGL for rendering
  - [VMAF](https://github.com/Netflix/vmaf) (by Netflix), a perceptual video quality assessment based on multi-method fusion
  - [Wayland](https://github.com/wayland-project/wayland) and [Weston](https://github.com/wayland-project/weston), a next generation display server
  - [wlroots](https://github.com/swaywm/wlroots), a modular Wayland compositor library
- - [wxFormBuilder](https://github.com/wxFormBuilder/wxFormBuilder), RAD tool for wxWidgets GUI design
  - [xi-gtk](https://github.com/eyelash/xi-gtk), a GTK+ front-end for the Xi editor
  - [Xorg](https://gitlab.freedesktop.org/xorg/xserver), the X.org display server (not the default yet)
  - [X Test Suite](https://gitlab.freedesktop.org/xorg/test/xts), The X.org test suite
  - [zathura](https://github.com/pwmt/zathura), a highly customizable and functional document viewer based on the
 girara user interface library and several document libraries
- - [Zrythm](https://git.zrythm.org/cgit/zrythm), a cross-platform digital audio workstation using GTK+ 3
+ - [Zrythm](https://git.sr.ht/~alextee/zrythm), a cross-platform digital audio workstation written in C using GTK4
  - [ZStandard](https://github.com/facebook/zstd/commit/4dca56ed832c6a88108a2484a8f8ff63d8d76d91), a compression algorithm developed at Facebook (not used by default)
 
 Note that a more up-to-date list of GNOME projects that use Meson can

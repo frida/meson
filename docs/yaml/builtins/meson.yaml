@@ -34,26 +34,23 @@ methods:
 
     posargs:
       script_name:
-        type: str | file | external_program | exe | custom_tgt | custom_idx
+        type: str | file | external_program
         description: |
           The script to execute.
 
-          *(since 0.55.0)* The output of [[configure_file]], [[files]], and [[find_program]]
-          as well as strings are accepted.
+          *(since 0.55.0)* The output of [[find_program]] as well as strings are accepted.
 
           *(since 0.57.0)* [[@file]] objects and the output of [[configure_file]] may be used.
 
     varargs:
       name: arg
-      type: str | file | external_program | exe | custom_tgt | custom_idx
+      type: str | file | external_program
       since: 0.49.0
       description: |
         Additional arguments
 
         *(since 0.55.0)* The output of [[configure_file]], [[files]], and [[find_program]]
         as well as strings are accepted.
-
-        *(since 0.57.0)* [[@file]] objects and the output of [[configure_file]] may be used.
 
   - name: add_install_script
     returns: void
@@ -89,8 +86,26 @@ methods:
       shell would. If your script uses Python, `shlex.split()` is the
       easiest correct way to do this.
 
-    posargs_inherit: meson.add_dist_script
-    varargs_inherit: meson.add_dist_script
+    posargs:
+      script_name:
+        type: str | file | external_program | exe | custom_tgt | custom_idx
+        description: |
+          The script to execute.
+
+          *(since 0.55.0)* The output of [[find_program]], [[executable]],
+          [[custom_target]], as well as strings are accepted.
+
+          *(since 0.57.0)* [[@file]] objects and the output of [[configure_file]] may be used.
+
+    varargs:
+      name: arg
+      type: str | file | external_program | exe | custom_tgt | custom_idx
+      since: 0.49.0
+      description: |
+        Additional arguments
+
+        *(since 0.55.0)* The output of [[find_program]], [[executable]],
+        [[custom_target]], as well as strings are accepted.
 
     kwargs:
       skip_if_destdir:
@@ -244,6 +259,7 @@ methods:
 
       This method is replaced by [[meson.get_external_property]].
 
+    arg_flattening: false
     posargs_inherit: meson.get_external_property
     optargs_inherit: meson.get_external_property
 
@@ -253,6 +269,8 @@ methods:
     description: |
       Returns the given property from a native or cross file.
       The optional fallback_value is returned if the given property is not found.
+
+    arg_flattening: false
 
     posargs:
       propname:
@@ -403,7 +421,7 @@ methods:
       to the list of environments that will be applied when using [`meson devenv`](Commands.md#devenv)
       command line.
 
-      This is useful for developpers who wish to use the project without
+      This is useful for developers who wish to use the project without
       installing it, it is often needed to set for example the path to plugins
       directory, etc. Alternatively, a list or dictionary can be passed as first
       argument.
@@ -429,5 +447,25 @@ methods:
 
     posargs:
       env:
-        type: env
-        description: The [[@env]] object to add.
+        type: env | str | list[str] | dict[str] | dict[list[str]]
+        description: |
+          The [[@env]] object to add.
+          Since *0.62.0* list of strings is allowed in dictionnary values. In that
+          case values are joined using the separator.
+    kwargs:
+      separator:
+        type: str
+        since: 0.62.0
+        description: |
+          The separator to use for the initial values defined in
+          the first positional argument. If not explicitly specified, the default
+          path separator for the host operating system will be used, i.e. ';' for
+          Windows and ':' for UNIX/POSIX systems.
+      method:
+        type: str
+        since: 0.62.0
+        description: |
+          Must be one of 'set', 'prepend', or 'append'
+          (defaults to 'set'). Controls if initial values defined in the first
+          positional argument are prepended, appended or repace the current value
+          of the environment variable.

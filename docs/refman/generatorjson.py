@@ -72,6 +72,7 @@ class GeneratorJSON(GeneratorBase):
             'optargs': {x.name: self._generate_arg(x, True) for x in func.optargs},
             'kwargs': {x.name: self._generate_arg(x) for x in self.sorted_and_filtered(list(func.kwargs.values()))},
             'varargs': self._generate_arg(func.varargs) if func.varargs else None,
+            'arg_flattening': func.arg_flattening,
         }
 
     def _generate_objects(self, obj: Object) -> J.Object:
@@ -91,13 +92,6 @@ class GeneratorJSON(GeneratorBase):
             'extended_by': [x.name for x in self.sorted_and_filtered(obj.extended_by)],
             'methods': {x.name: self._generate_function(x) for x in self.sorted_and_filtered(obj.methods)},
         }
-
-    def _extract_meson_version(self) -> str:
-        # Hack around python relative imports to get to the Meson version
-        import sys
-        sys.path.append(Path(__file__).resolve().parents[2].as_posix())
-        from mesonbuild.coredata import version
-        return version
 
     def generate(self) -> None:
         data: J.Root = {

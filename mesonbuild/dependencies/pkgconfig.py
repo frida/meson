@@ -11,9 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
+
+from pathlib import Path
 
 from .base import ExternalDependency, DependencyException, sort_libpaths, DependencyTypeName
-from ..mesonlib import MachineChoice, OptionKey, OrderedSet, PerMachine, Popen_safe
+from ..mesonlib import OptionKey, OrderedSet, PerMachine, Popen_safe
 from ..programs import find_external_program, ExternalProgram
 from .. import mlog
 from pathlib import PurePath
@@ -24,6 +27,9 @@ import typing as T
 
 if T.TYPE_CHECKING:
     from ..environment import Environment
+    from ..mesonlib import MachineChoice
+    from .._typing import ImmutableListProtocol
+    from ..build import EnvironmentVariables
 
 class PkgConfigDependency(ExternalDependency):
     # The class's copy of the pkg-config path. Avoids having to search for it
@@ -119,36 +125,40 @@ class PkgConfigDependency(ExternalDependency):
         return rc, out, err
 
     @staticmethod
-    def setup_env(env: T.MutableMapping[str, str], environment: 'Environment', for_machine: MachineChoice,
-                  extra_path: T.Optional[str] = None) -> None:
-        extra_paths: T.List[str] = environment.coredata.options[OptionKey('pkg_config_path', machine=for_machine)].value[:]
-        if extra_path and extra_path not in extra_paths:
-            extra_paths.append(extra_path)
+    def get_env(environment: 'Environment', for_machine: MachineChoice,
+                uninstalled: bool = False) -> 'EnvironmentVariables':
+        from ..build import EnvironmentVariables
+        env = EnvironmentVariables()
+        key = OptionKey('pkg_config_path', machine=for_machine)
+        extra_paths: T.List[str] = environment.coredata.options[key].value[:]
+        if uninstalled:
+            uninstalled_path = Path(environment.get_build_dir(), 'meson-uninstalled').as_posix()
+            if uninstalled_path not in extra_paths:
+                extra_paths.append(uninstalled_path)
+        env.set('PKG_CONFIG_PATH', extra_paths)
         sysroot = environment.properties[for_machine].get_sys_root()
         if sysroot:
-            env['PKG_CONFIG_SYSROOT_DIR'] = sysroot
-        new_pkg_config_path = ':'.join([p for p in extra_paths])
-        env['PKG_CONFIG_PATH'] = new_pkg_config_path
-
+            env.set('PKG_CONFIG_SYSROOT_DIR', [sysroot])
         pkg_config_libdir_prop = environment.properties[for_machine].get_pkg_config_libdir()
         if pkg_config_libdir_prop:
-            new_pkg_config_libdir = ':'.join([p for p in pkg_config_libdir_prop])
-            env['PKG_CONFIG_LIBDIR'] = new_pkg_config_libdir
+            env.set('PKG_CONFIG_LIBDIR', pkg_config_libdir_prop)
+        return env
+
+    @staticmethod
+    def setup_env(env: T.MutableMapping[str, str], environment: 'Environment', for_machine: MachineChoice,
+                  uninstalled: bool = False) -> T.Dict[str, str]:
+        envvars = PkgConfigDependency.get_env(environment, for_machine, uninstalled)
+        env = envvars.get_env(env)
         # Dump all PKG_CONFIG environment variables
         for key, value in env.items():
             if key.startswith('PKG_'):
                 mlog.debug(f'env[{key}]: {value}')
+        return env
 
-    def _call_pkgbin(self, args: T.List[str], env: T.Optional[T.Dict[str, str]] = None) -> T.Tuple[int, str, str]:
-        # Always copy the environment since we're going to modify it
-        # with pkg-config variables
-        if env is None:
-            env = os.environ.copy()
-        else:
-            env = env.copy()
-
+    def _call_pkgbin(self, args: T.List[str], env: T.Optional[T.MutableMapping[str, str]] = None) -> T.Tuple[int, str, str]:
         assert isinstance(self.pkgbin, ExternalProgram)
-        PkgConfigDependency.setup_env(env, self.env, self.for_machine)
+        env = env or os.environ
+        env = PkgConfigDependency.setup_env(env, self.env, self.for_machine)
 
         fenv = frozenset(env.items())
         targs = tuple(args)
@@ -295,7 +305,7 @@ class PkgConfigDependency(ExternalDependency):
                         continue
                     else:
                         mlog.warning('Library {!r} not found for dependency {!r}, may '
-                                    'not be successfully linked'.format(libfilename, self.name))
+                                     'not be successfully linked'.format(libfilename, self.name))
                     libs_notfound.append(lib)
                 else:
                     lib = foundname
@@ -380,18 +390,13 @@ class PkgConfigDependency(ExternalDependency):
             raise DependencyException(f'Could not generate libs for {self.name}:\n\n{out_raw}')
         self.link_args, self.raw_link_args = self._search_libs(out, out_raw)
 
-    def get_pkgconfig_variable(self, variable_name: str, kwargs: T.Dict[str, T.Union[str, T.List[str]]]) -> str:
+    def get_pkgconfig_variable(self, variable_name: str,
+                               define_variable: 'ImmutableListProtocol[str]',
+                               default: T.Optional[str]) -> str:
         options = ['--variable=' + variable_name, self.name]
 
-        if 'define_variable' in kwargs:
-            definition = kwargs.get('define_variable', [])
-            if not isinstance(definition, list):
-                raise DependencyException('define_variable takes a list')
-
-            if len(definition) != 2 or not all(isinstance(i, str) for i in definition):
-                raise DependencyException('define_variable must be made up of 2 strings for VARIABLENAME and VARIABLEVALUE')
-
-            options = ['--define-variable=' + '='.join(definition)] + options
+        if define_variable:
+            options = ['--define-variable=' + '='.join(define_variable)] + options
 
         ret, out, err = self._call_pkgbin(options)
         variable = ''
@@ -406,9 +411,8 @@ class PkgConfigDependency(ExternalDependency):
             if not variable:
                 ret, out, _ = self._call_pkgbin(['--print-variables', self.name])
                 if not re.search(r'^' + variable_name + r'$', out, re.MULTILINE):
-                    if 'default' in kwargs:
-                        assert isinstance(kwargs['default'], str)
-                        variable = kwargs['default']
+                    if default is not None:
+                        variable = default
                     else:
                         mlog.warning(f"pkgconfig variable '{variable_name}' not defined for dependency {self.name}.")
 
@@ -481,15 +485,10 @@ class PkgConfigDependency(ExternalDependency):
     def get_variable(self, *, cmake: T.Optional[str] = None, pkgconfig: T.Optional[str] = None,
                      configtool: T.Optional[str] = None, internal: T.Optional[str] = None,
                      default_value: T.Optional[str] = None,
-                     pkgconfig_define: T.Optional[T.List[str]] = None) -> T.Union[str, T.List[str]]:
+                     pkgconfig_define: T.Optional[T.List[str]] = None) -> str:
         if pkgconfig:
-            kwargs: T.Dict[str, T.Union[str, T.List[str]]] = {}
-            if default_value is not None:
-                kwargs['default'] = default_value
-            if pkgconfig_define is not None:
-                kwargs['define_variable'] = pkgconfig_define
             try:
-                return self.get_pkgconfig_variable(pkgconfig, kwargs)
+                return self.get_pkgconfig_variable(pkgconfig, pkgconfig_define or [], default_value)
             except DependencyException:
                 pass
         if default_value is not None:

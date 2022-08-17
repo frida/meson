@@ -31,6 +31,7 @@ a sample output for a simple project.
       install_umask   0022          [preserve, 0000-0777]                                      Default umask to apply on permissions of installed files
       layout          mirror        [mirror, flat]                                             Build directory layout
       optimization    3             [0, g, 1, 2, 3, s]                                         Optimization level
+      prefer_static   false         [true, false]                                              Whether to try static linking before shared linking
       strip           false         [true, false]                                              Strip targets on install
       unity           off           [on, off, subprojects]                                     Unity build
       warning_level   1             [0, 1, 2, 3]                                               Compiler warning level to use
@@ -52,7 +53,7 @@ a sample output for a simple project.
       b_ndebug    false         [true, false, if-release]                                     Disable asserts
       b_pch       true          [true, false]                                                 Use precompiled headers
       b_pgo       off           [off, generate, use]                                          Use profile guided optimization
-      b_sanitize  none          [none, address, thread, undefined, memory, address,undefined] Code sanitizer to use
+      b_sanitize  none          [none, address, thread, undefined, leak, memory, address,undefined] Code sanitizer to use
       b_staticpic true          [true, false]                                                 Build static libraries as position independent
 
     Compiler options:

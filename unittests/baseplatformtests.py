@@ -32,7 +32,7 @@ import mesonbuild.environment
 import mesonbuild.coredata
 import mesonbuild.modules.gnome
 from mesonbuild.mesonlib import (
-    is_cygwin, windows_proof_rmtree, python_command
+    is_cygwin, join_args, windows_proof_rmtree, python_command
 )
 import mesonbuild.modules.pkgconfig
 
@@ -56,10 +56,10 @@ class BasePlatformTests(TestCase):
         # Get the backend
         self.backend = getattr(Backend, os.environ['MESON_UNIT_TEST_BACKEND'])
         self.meson_args = ['--backend=' + self.backend.name]
-        self.meson_native_file = None
-        self.meson_cross_file = None
+        self.meson_native_files = []
+        self.meson_cross_files = []
         self.meson_command = python_command + [get_meson_script()]
-        self.setup_command = self.meson_command + self.meson_args
+        self.setup_command = self.meson_command + ['setup'] + self.meson_args
         self.mconf_command = self.meson_command + ['configure']
         self.mintro_command = self.meson_command + ['introspect']
         self.wrap_command = self.meson_command + ['wrap']
@@ -143,7 +143,7 @@ class BasePlatformTests(TestCase):
         os.environ.update(self.orig_env)
         super().tearDown()
 
-    def _run(self, command, *, workdir=None, override_envvars: T.Optional[T.Mapping[str, str]] = None):
+    def _run(self, command, *, workdir=None, override_envvars: T.Optional[T.Mapping[str, str]] = None, stderr=True):
         '''
         Run a command while printing the stdout and stderr to stdout,
         and also return a copy of it
@@ -158,10 +158,16 @@ class BasePlatformTests(TestCase):
             env.update(override_envvars)
 
         p = subprocess.run(command, stdout=subprocess.PIPE,
-                           stderr=subprocess.STDOUT, env=env,
+                           stderr=subprocess.STDOUT if stderr else subprocess.PIPE,
+                           env=env,
                            encoding='utf-8',
-                           universal_newlines=True, cwd=workdir, timeout=60 * 5)
+                           text=True, cwd=workdir, timeout=60 * 5)
+        print('$', join_args(command))
+        print('stdout:')
         print(p.stdout)
+        if not stderr:
+            print('stderr:')
+            print(p.stderr)
         if p.returncode != 0:
             if 'MESON_SKIP_TEST' in p.stdout:
                 raise SkipTest('Project requested skipping.')
@@ -192,14 +198,14 @@ class BasePlatformTests(TestCase):
             args += ['--prefix', self.prefix]
             if self.libdir:
                 args += ['--libdir', self.libdir]
-            if self.meson_native_file:
-                args += ['--native-file', self.meson_native_file]
-            if self.meson_cross_file:
-                args += ['--cross-file', self.meson_cross_file]
+            for f in self.meson_native_files:
+                args += ['--native-file', f]
+            for f in self.meson_cross_files:
+                args += ['--cross-file', f]
         self.privatedir = os.path.join(self.builddir, 'meson-private')
         if inprocess:
             try:
-                returncode, out, err = run_configure_inprocess(self.meson_args + args + extra_args, override_envvars)
+                returncode, out, err = run_configure_inprocess(['setup'] + self.meson_args + args + extra_args, override_envvars)
             except Exception as e:
                 if not allow_fail:
                     self._print_meson_log()
@@ -235,13 +241,13 @@ class BasePlatformTests(TestCase):
                 out = self._get_meson_log()  # best we can do here
         return out
 
-    def build(self, target=None, *, extra_args=None, override_envvars=None):
+    def build(self, target=None, *, extra_args=None, override_envvars=None, stderr=True):
         if extra_args is None:
             extra_args = []
         # Add arguments for building the target (if specified),
         # and using the build dir (if required, with VS)
         args = get_builddir_target_args(self.backend, self.builddir, target)
-        return self._run(self.build_command + args + extra_args, workdir=self.builddir, override_envvars=override_envvars)
+        return self._run(self.build_command + args + extra_args, workdir=self.builddir, override_envvars=override_envvars, stderr=stderr)
 
     def clean(self, *, override_envvars=None):
         dir_args = get_builddir_target_args(self.backend, self.builddir, None)
@@ -249,10 +255,10 @@ class BasePlatformTests(TestCase):
 
     def run_tests(self, *, inprocess=False, override_envvars=None):
         if not inprocess:
-            self._run(self.test_command, workdir=self.builddir, override_envvars=override_envvars)
+            return self._run(self.test_command, workdir=self.builddir, override_envvars=override_envvars)
         else:
             with mock.patch.dict(os.environ, override_envvars):
-                run_mtest_inprocess(['-C', self.builddir])
+                return run_mtest_inprocess(['-C', self.builddir])[1]
 
     def install(self, *, use_destdir=True, override_envvars=None):
         if self.backend is not Backend.ninja:
@@ -263,7 +269,7 @@ class BasePlatformTests(TestCase):
                 override_envvars = destdir
             else:
                 override_envvars.update(destdir)
-        self._run(self.install_command, workdir=self.builddir, override_envvars=override_envvars)
+        return self._run(self.install_command, workdir=self.builddir, override_envvars=override_envvars)
 
     def uninstall(self, *, override_envvars=None):
         self._run(self.uninstall_command, workdir=self.builddir, override_envvars=override_envvars)
@@ -379,7 +385,7 @@ class BasePlatformTests(TestCase):
 
     def assertReconfiguredBuildIsNoop(self):
         'Assert that we reconfigured and then there was nothing to do'
-        ret = self.build()
+        ret = self.build(stderr=False)
         self.assertIn('The Meson build system', ret)
         if self.backend is Backend.ninja:
             for line in ret.split('\n'):
@@ -401,7 +407,7 @@ class BasePlatformTests(TestCase):
             raise RuntimeError(f'Invalid backend: {self.backend.name!r}')
 
     def assertBuildIsNoop(self):
-        ret = self.build()
+        ret = self.build(stderr=False)
         if self.backend is Backend.ninja:
             self.assertIn(ret.split('\n')[-2], self.no_rebuild_stdout)
         elif self.backend is Backend.vs:

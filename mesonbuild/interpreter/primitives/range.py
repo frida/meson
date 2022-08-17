@@ -10,8 +10,11 @@ from ...interpreterbase import (
     InvalidArguments,
 )
 
+if T.TYPE_CHECKING:
+    from ...interpreterbase import SubProject
+
 class RangeHolder(MesonInterpreterObject, IterableObject):
-    def __init__(self, start: int, stop: int, step: int, *, subproject: str) -> None:
+    def __init__(self, start: int, stop: int, step: int, *, subproject: 'SubProject') -> None:
         super().__init__(subproject=subproject)
         self.range = range(start, stop, step)
         self.operators.update({
@@ -21,7 +24,7 @@ class RangeHolder(MesonInterpreterObject, IterableObject):
     def op_index(self, other: int) -> int:
         try:
             return self.range[other]
-        except:
+        except IndexError:
             raise InvalidArguments(f'Index {other} out of bounds of range.')
 
     def iter_tuple_size(self) -> None:

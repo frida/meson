@@ -1,4 +1,4 @@
-# Copyright 2012-2021 The Meson development team
+# Copyright 2012-2022 The Meson development team
 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@ from .mesonlib import (
     MesonException, EnvironmentException, MachineChoice, PerMachine,
     PerMachineDefaultable, default_libdir, default_libexecdir,
     default_prefix, split_args, OptionKey, OptionType, stringlistify,
+    pickle_load, replace_if_different
 )
 from .wrap import WrapMode
 import ast
@@ -35,16 +36,24 @@ import typing as T
 if T.TYPE_CHECKING:
     from . import dependencies
     from .compilers.compilers import Compiler, CompileResult
+    from .dependencies.detect import TV_DepID
     from .environment import Environment
     from .mesonlib import OptionOverrideProxy, FileOrString
     from .cmake.traceparser import CMakeCacheEntry
 
     OptionDictType = T.Union[T.Dict[str, 'UserOption[T.Any]'], OptionOverrideProxy]
-    KeyedOptionDictType = T.Union[T.Dict['OptionKey', 'UserOption[T.Any]'], OptionOverrideProxy]
+    MutableKeyedOptionDictType = T.Dict['OptionKey', 'UserOption[T.Any]']
+    KeyedOptionDictType = T.Union[MutableKeyedOptionDictType, OptionOverrideProxy]
     CompilerCheckCacheKey = T.Tuple[T.Tuple[str, ...], str, FileOrString, T.Tuple[str, ...], str]
 
+    # typeshed
+    StrOrBytesPath = T.Union[str, bytes, os.PathLike[str], os.PathLike[bytes]]
+
 # Check major_versions_differ() if changing versioning scheme.
-version = '0.60.99'
+#
+# Pip requires that RCs are named like this: '0.1.0.rc1'
+# But the corresponding Git tag needs to be '0.1.0rc1'
+version = '0.63.99'
 
 backendlist = ['ninja', 'vs', 'vs2010', 'vs2012', 'vs2013', 'vs2015', 'vs2017', 'vs2019', 'vs2022', 'xcode']
 
@@ -73,7 +82,7 @@ class UserOption(T.Generic[_T], HoldableObject):
         if not isinstance(yielding, bool):
             raise MesonException('Value of "yielding" must be a boolean.')
         self.yielding = yielding
-        self.deprecated: T.Union[bool, T.Dict[str, str], T.List[str]] = False
+        self.deprecated: T.Union[bool, str, T.Dict[str, str], T.List[str]] = False
 
     def listify(self, value: T.Any) -> T.List[T.Any]:
         return [value]
@@ -234,7 +243,7 @@ class UserArrayOption(UserOption[T.List[str]]):
         elif isinstance(value, list):
             newvalue = value
         else:
-            raise MesonException(f'"{newvalue}" should be a string array, but it is not')
+            raise MesonException(f'"{value}" should be a string array, but it is not')
         return newvalue
 
     def validate_value(self, value: T.Union[str, T.List[str]], user_input: bool = True) -> T.List[str]:
@@ -275,9 +284,6 @@ class UserFeatureOption(UserComboOption):
 
     def is_auto(self) -> bool:
         return self.value == 'auto'
-
-if T.TYPE_CHECKING:
-    from .dependencies.detect import TV_DepID
 
 
 class DependencyCacheType(enum.Enum):
@@ -437,7 +443,7 @@ class CoreData:
         self.meson_command = meson_command
         self.target_guids = {}
         self.version = version
-        self.options: 'KeyedOptionDictType' = {}
+        self.options: 'MutableKeyedOptionDictType' = {}
         self.cross_files = self.__load_config_files(options, scratch_dir, 'cross')
         self.compilers = PerMachine(OrderedDict(), OrderedDict())  # type: PerMachine[T.Dict[str, Compiler]]
 
@@ -546,14 +552,13 @@ class CoreData:
 
     def sanitize_dir_option_value(self, prefix: str, option: OptionKey, value: T.Any) -> T.Any:
         '''
-        If the option is an installation directory option and the value is an
-        absolute path, check that it resides within prefix and return the value
-        as a path relative to the prefix.
+        If the option is an installation directory option, the value is an
+        absolute path and resides within prefix, return the value
+        as a path relative to the prefix. Otherwise, return it as is.
 
-        This way everyone can do f.ex, get_option('libdir') and be sure to get
-        the library directory relative to prefix.
-
-        .as_posix() keeps the posix-like file separators Meson uses.
+        This way everyone can do f.ex, get_option('libdir') and usually get
+        the library directory relative to prefix, even though it really
+        should not be relied upon.
         '''
         try:
             value = PurePath(value)
@@ -561,21 +566,20 @@ class CoreData:
             return value
         if option.name.endswith('dir') and value.is_absolute() and \
            option not in BULITIN_DIR_NOPREFIX_OPTIONS:
-            # Value must be a subdir of the prefix
-            # commonpath will always return a path in the native format, so we
-            # must use pathlib.PurePath to do the same conversion before
-            # comparing.
-            msg = ('The value of the \'{!s}\' option is \'{!s}\' which must be a '
-                   'subdir of the prefix {!r}.\nNote that if you pass a '
-                   'relative path, it is assumed to be a subdir of prefix.')
-            # os.path.commonpath doesn't understand case-insensitive filesystems,
-            # but PurePath().relative_to() does.
             try:
+                # Try to relativize the path.
                 value = value.relative_to(prefix)
             except ValueError:
-                raise MesonException(msg.format(option, value, prefix))
-            if '..' in str(value):
-                raise MesonException(msg.format(option, value, prefix))
+                # Path is not relative, let’s keep it as is.
+                pass
+            if '..' in value.parts:
+                raise MesonException(
+                    f'The value of the \'{option}\' option is \'{value}\' but '
+                    'directory options are not allowed to contain \'..\'.\n'
+                    f'If you need a path outside of the {prefix!r} prefix, '
+                    'please use an absolute path.'
+                )
+        # .as_posix() keeps the posix-like file separators Meson uses.
         return value.as_posix()
 
     def init_builtins(self, subproject: str) -> None:
@@ -587,7 +591,7 @@ class CoreData:
                 self.add_builtin_option(self.options, key.evolve(subproject=subproject, machine=for_machine), opt)
 
     @staticmethod
-    def add_builtin_option(opts_map: 'KeyedOptionDictType', key: OptionKey,
+    def add_builtin_option(opts_map: 'MutableKeyedOptionDictType', key: OptionKey,
                            opt: 'BuiltinOption') -> None:
         if key.subproject:
             if opt.yielding:
@@ -609,7 +613,7 @@ class CoreData:
                 'Default project to execute in Visual Studio',
                 '')
 
-    def get_option(self, key: OptionKey) -> T.Union[str, int, bool, WrapMode]:
+    def get_option(self, key: OptionKey) -> T.Union[T.List[str], str, int, bool, WrapMode]:
         try:
             v = self.options[key].value
             if key.name == 'wrap_mode':
@@ -657,6 +661,19 @@ class CoreData:
                 return v
             newvalue = [replace(v) for v in opt.listify(value)]
             value = ','.join(newvalue)
+        elif isinstance(opt.deprecated, str):
+            # Option is deprecated and replaced by another. Note that a project
+            # option could be replaced by a built-in or module option, which is
+            # why we use OptionKey.from_string(newname) instead of
+            # key.evolve(newname). We set the value on both the old and new names,
+            # assuming they accept the same value. That could for example be
+            # achieved by adding the values from old option as deprecated on the
+            # new option, for example in the case of boolean option is replaced
+            # by a feature option with a different name.
+            newname = opt.deprecated
+            newkey = OptionKey.from_string(newname).evolve(subproject=key.subproject)
+            mlog.deprecation(f'Option {key.name!r} is replaced by {newname!r}')
+            self.set_option(newkey, value)
 
         opt.set_value(value)
 
@@ -746,7 +763,7 @@ class CoreData:
     def get_external_link_args(self, for_machine: MachineChoice, lang: str) -> T.Union[str, T.List[str]]:
         return self.options[OptionKey('link_args', machine=for_machine, lang=lang)].value
 
-    def update_project_options(self, options: 'KeyedOptionDictType') -> None:
+    def update_project_options(self, options: 'MutableKeyedOptionDictType') -> None:
         for key, value in options.items():
             if not key.is_project():
                 continue
@@ -815,13 +832,16 @@ class CoreData:
             self.copy_build_options_from_regular_ones()
 
     def set_default_options(self, default_options: T.MutableMapping[OptionKey, str], subproject: str, env: 'Environment') -> None:
+        # Main project can set default options on subprojects, but subprojects
+        # can only set default options on themself.
         # Preserve order: if env.options has 'buildtype' it must come after
         # 'optimization' if it is in default_options.
-        options: T.MutableMapping[OptionKey, T.Any]
-        if not subproject:
-            options = OrderedDict(default_options)
-            options.update(env.options)
-            env.options = options
+        options: T.MutableMapping[OptionKey, T.Any] = OrderedDict()
+        for k, v in default_options.items():
+            if not subproject or k.subproject == subproject:
+                options[k] = v
+        options.update(env.options)
+        env.options = options
 
         # Create a subset of options, keeping only project and builtin
         # options for this subproject.
@@ -830,7 +850,7 @@ class CoreData:
         # to know which backend we'll use).
         options = OrderedDict()
 
-        for k, v in chain(default_options.items(), env.options.items()):
+        for k, v in env.options.items():
             # If this is a subproject, don't use other subproject options
             if k.subproject and k.subproject != subproject:
                 continue
@@ -849,7 +869,7 @@ class CoreData:
 
         self.set_options(options, subproject=subproject)
 
-    def add_compiler_options(self, options: 'KeyedOptionDictType', lang: str, for_machine: MachineChoice,
+    def add_compiler_options(self, options: 'MutableKeyedOptionDictType', lang: str, for_machine: MachineChoice,
                              env: 'Environment') -> None:
         for k, o in options.items():
             value = env.options.get(k)
@@ -893,6 +913,9 @@ class CmdLineFileParser(configparser.ConfigParser):
         # We don't want ':' as key delimiter, otherwise it would break when
         # storing subproject options like "subproject:option=value"
         super().__init__(delimiters=['='], interpolation=None)
+
+    def read(self, filenames: T.Union['StrOrBytesPath', T.Iterable['StrOrBytesPath']], encoding: str = 'utf-8') -> T.List[str]:
+        return super().read(filenames, encoding)
 
     def optionxform(self, option: str) -> str:
         # Don't call str.lower() on keys
@@ -1025,22 +1048,10 @@ def major_versions_differ(v1: str, v2: str) -> bool:
 
 def load(build_dir: str) -> CoreData:
     filename = os.path.join(build_dir, 'meson-private', 'coredata.dat')
-    load_fail_msg = f'Coredata file {filename!r} is corrupted. Try with a fresh build tree.'
-    try:
-        with open(filename, 'rb') as f:
-            obj = pickle.load(f)
-    except (pickle.UnpicklingError, EOFError):
-        raise MesonException(load_fail_msg)
-    except (ModuleNotFoundError, AttributeError):
-        raise MesonException(
-            f"Coredata file {filename!r} references functions or classes that don't "
-            "exist. This probably means that it was generated with an old "
-            "version of meson.")
-    if not isinstance(obj, CoreData):
-        raise MesonException(load_fail_msg)
-    if major_versions_differ(obj.version, version):
-        raise MesonVersionMismatchException(obj.version, version)
+    obj = pickle_load(filename, 'Coredata', CoreData)
+    assert isinstance(obj, CoreData), 'for mypy'
     return obj
+
 
 def save(obj: CoreData, build_dir: str) -> str:
     filename = os.path.join(build_dir, 'meson-private', 'coredata.dat')
@@ -1055,7 +1066,7 @@ def save(obj: CoreData, build_dir: str) -> str:
         pickle.dump(obj, f)
         f.flush()
         os.fsync(f.fileno())
-    os.replace(tempfilename, filename)
+    replace_if_different(filename, tempfilename)
     return filename
 
 
@@ -1179,7 +1190,7 @@ class BuiltinOption(T.Generic[_T, _U]):
 
 # Update `docs/markdown/Builtin-options.md` after changing the options below
 # Also update mesonlib._BUILTIN_NAMES. See the comment there for why this is required.
-BUILTIN_DIR_OPTIONS: 'KeyedOptionDictType' = OrderedDict([
+BUILTIN_DIR_OPTIONS: 'MutableKeyedOptionDictType' = OrderedDict([
     (OptionKey('prefix'),          BuiltinOption(UserStringOption, 'Installation prefix', default_prefix())),
     (OptionKey('bindir'),          BuiltinOption(UserStringOption, 'Executable directory', 'bin')),
     (OptionKey('datadir'),         BuiltinOption(UserStringOption, 'Data file directory', 'share')),
@@ -1195,18 +1206,19 @@ BUILTIN_DIR_OPTIONS: 'KeyedOptionDictType' = OrderedDict([
     (OptionKey('sysconfdir'),      BuiltinOption(UserStringOption, 'Sysconf data directory', 'etc')),
 ])
 
-BUILTIN_CORE_OPTIONS: 'KeyedOptionDictType' = OrderedDict([
+BUILTIN_CORE_OPTIONS: 'MutableKeyedOptionDictType' = OrderedDict([
     (OptionKey('auto_features'),   BuiltinOption(UserFeatureOption, "Override value of all 'auto' features", 'auto')),
     (OptionKey('backend'),         BuiltinOption(UserComboOption, 'Backend to use', 'ninja', choices=backendlist)),
     (OptionKey('buildtype'),       BuiltinOption(UserComboOption, 'Build type to use', 'debug',
                                                  choices=['plain', 'debug', 'debugoptimized', 'release', 'minsize', 'custom'])),
-    (OptionKey('debug'),           BuiltinOption(UserBooleanOption, 'Debug', True)),
+    (OptionKey('debug'),           BuiltinOption(UserBooleanOption, 'Enable debug symbols and other information', True)),
     (OptionKey('default_library'), BuiltinOption(UserComboOption, 'Default library type', 'shared', choices=['shared', 'static', 'both'],
                                                  yielding=False)),
     (OptionKey('errorlogs'),       BuiltinOption(UserBooleanOption, "Whether to print the logs from failing tests", True)),
     (OptionKey('install_umask'),   BuiltinOption(UserUmaskOption, 'Default umask to apply on permissions of installed files', '022')),
     (OptionKey('layout'),          BuiltinOption(UserComboOption, 'Build directory layout', 'mirror', choices=['mirror', 'flat'])),
     (OptionKey('optimization'),    BuiltinOption(UserComboOption, 'Optimization level', '0', choices=['0', 'g', '1', '2', '3', 's'])),
+    (OptionKey('prefer_static'),   BuiltinOption(UserBooleanOption, 'Whether to try static linking before shared linking', False)),
     (OptionKey('stdsplit'),        BuiltinOption(UserBooleanOption, 'Split stdout and stderr in test logs', True)),
     (OptionKey('strip'),           BuiltinOption(UserBooleanOption, 'Strip targets on install', False)),
     (OptionKey('unity'),           BuiltinOption(UserComboOption, 'Unity build', 'off', choices=['on', 'off', 'subprojects'])),
@@ -1216,7 +1228,13 @@ BUILTIN_CORE_OPTIONS: 'KeyedOptionDictType' = OrderedDict([
     (OptionKey('wrap_mode'),       BuiltinOption(UserComboOption, 'Wrap mode', 'default', choices=['default', 'nofallback', 'nodownload', 'forcefallback', 'nopromote'])),
     (OptionKey('force_fallback_for'), BuiltinOption(UserArrayOption, 'Force fallback for those subprojects', [])),
 
+    # Pkgconfig module
+    (OptionKey('relocatable', module='pkgconfig'),
+     BuiltinOption(UserBooleanOption, 'Generate pkgconfig files as relocatable', False)),
+
     # Python module
+    (OptionKey('install_env', module='python'),
+     BuiltinOption(UserComboOption, 'Which python environment to install to', 'prefix', choices=['auto', 'prefix', 'system', 'venv'])),
     (OptionKey('platlibdir', module='python'),
      BuiltinOption(UserStringOption, 'Directory for site-specific, platform-specific files.', '')),
     (OptionKey('purelibdir', module='python'),
@@ -1225,7 +1243,7 @@ BUILTIN_CORE_OPTIONS: 'KeyedOptionDictType' = OrderedDict([
 
 BUILTIN_OPTIONS = OrderedDict(chain(BUILTIN_DIR_OPTIONS.items(), BUILTIN_CORE_OPTIONS.items()))
 
-BUILTIN_OPTIONS_PER_MACHINE: 'KeyedOptionDictType' = OrderedDict([
+BUILTIN_OPTIONS_PER_MACHINE: 'MutableKeyedOptionDictType' = OrderedDict([
     (OptionKey('pkg_config_path'), BuiltinOption(UserArrayOption, 'List of additional paths for pkg-config to search', [])),
     (OptionKey('cmake_prefix_path'), BuiltinOption(UserArrayOption, 'List of additional prefixes for cmake to search', [])),
 ])

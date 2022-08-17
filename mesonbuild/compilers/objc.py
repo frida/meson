@@ -11,11 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 import typing as T
 
 from .. import coredata
-from ..mesonlib import MachineChoice, OptionKey
+from ..mesonlib import OptionKey
 
 from .compilers import Compiler
 from .mixins.clike import CLikeCompiler
@@ -27,6 +28,7 @@ if T.TYPE_CHECKING:
     from ..envconfig import MachineInfo
     from ..environment import Environment
     from ..linkers import DynamicLinker
+    from ..mesonlib import MachineChoice
 
 
 class ObjCCompiler(CLikeCompiler, Compiler):
@@ -85,7 +87,7 @@ class ClangObjCCompiler(ClangCompiler, ObjCCompiler):
                           '2': default_warn_args + ['-Wextra'],
                           '3': default_warn_args + ['-Wextra', '-Wpedantic']}
 
-    def get_options(self) -> 'coredata.KeyedOptionDictType':
+    def get_options(self) -> 'coredata.MutableKeyedOptionDictType':
         opts = super().get_options()
         opts.update({
             OptionKey('std', machine=self.for_machine, lang='c'): coredata.UserComboOption(

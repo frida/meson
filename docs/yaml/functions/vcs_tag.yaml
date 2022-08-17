@@ -22,13 +22,17 @@ description: |
 
 kwargs:
   command:
-    type: list[str]
+    type: list[exe | external_program | custom_tgt | file | str]
     description: |
       The command to execute, see [[custom_target]] for details
       on how this command must be specified.
 
       This parameter is optional. If it is absent, Meson will try
       its best to find a suitable default command.
+
+      *(since 0.62.0)* [[@file]] is accepted.
+
+      *(since 0.63.0)* [[@custom_tgt]], [[@exe]], and [[@external_program]] are accepted.
 
   input:
     type: str

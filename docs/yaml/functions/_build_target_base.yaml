@@ -39,7 +39,7 @@ warnings:
 
 kwargs:
   <lang>_pch:
-    type: str | file
+    type: str
     description: precompiled header file to use for the given language
 
   <lang>_args:
@@ -49,7 +49,7 @@ kwargs:
       eg: `cpp_args` for C++
 
   sources:
-    type: str | file | custom_tgt | custom_idx | generated_list
+    type: str | file | custom_tgt | custom_idx | generated_list | structured_src
     description: Additional source files. Same as the source varargs.
 
   build_by_default:
@@ -161,10 +161,10 @@ kwargs:
   install_dir:
     type: str
     description: |
-      override install directory for this file. The value is
-      relative to the `prefix` specified. F.ex, if you want to install
-      plugins into a subdir, you'd use something like this: `install_dir :
-      get_option('libdir') / 'projectname-1.0'`.
+      override install directory for this file. If the value is a relative path,
+      it will be considered relative the `prefix` option.
+      For example, if you want to install plugins into a subdir, you'd use
+      something like this: `install_dir : get_option('libdir') / 'projectname-1.0'`.
 
   install_mode:
     type: list[str | int]
@@ -253,12 +253,14 @@ kwargs:
     description: When set to true, the D modules are compiled in debug mode.
 
   d_module_versions:
-    type: list[str]
+    type: list[str | int]
     description: List of module version identifiers set when compiling D sources.
 
   d_debug:
     type: list[str]
-    description: List of module debug identifiers set when compiling D sources.
+    description: |
+      The [D version identifiers](https://dlang.org/spec/version.html#version) to add
+      during the compilation of D source files.
 
   native:
     type: bool
@@ -276,3 +278,23 @@ kwargs:
       version specification such as `windows,6.0`. See [MSDN
       documentation](https://docs.microsoft.com/en-us/cpp/build/reference/subsystem-specify-subsystem)
       for the full list.
+
+  rust_crate_type:
+    type: str
+    since: 0.41.0
+    description: |
+      Set the specific type of rust crate to compile (when compiling rust).
+
+      If the target is an [[executable]] this defaults to "bin", the only
+      allowed value.
+
+      If it is a [[static_library]] it defaults to "lib", and may be "lib",
+      "staticlib", or "rlib". If "lib" then Rustc will pick a default, "staticlib"
+      means a C ABI library, "rlib" means a Rust ABI.
+
+      If it is a [[shared_library]] it defaults to "lib", and may be "lib",
+      "dylib", "cdylib", or "proc-macro". If "lib" then Rustc will pick a
+      default, "cdylib" means a C ABI library, "dylib" means a Rust ABI, and
+      "proc-macro" is a special rust proceedural macro crate.
+
+      "proc-macro" is new in 0.62.0.

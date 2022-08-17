@@ -18,7 +18,7 @@ from .hdf5 import hdf5_factory
 from .base import Dependency, InternalDependency, ExternalDependency, NotFoundDependency
 from .base import (
         ExternalLibrary, DependencyException, DependencyMethods,
-        BuiltinDependency, SystemDependency)
+        BuiltinDependency, SystemDependency, get_leaf_external_dependencies)
 from .cmake import CMakeDependency
 from .configtool import ConfigToolDependency
 from .dub import DubDependency
@@ -27,7 +27,7 @@ from .pkgconfig import PkgConfigDependency
 from .factory import DependencyFactory
 from .detect import find_external_dependency, get_dep_identifier, packages, _packages_accept_language
 from .dev import (
-    ValgrindDependency, JDKSystemDependency, gmock_factory, gtest_factory,
+    ValgrindDependency, JNISystemDependency, JDKSystemDependency, gmock_factory, gtest_factory,
     llvm_factory, zlib_factory)
 from .coarrays import coarray_factory
 from .mpi import mpi_factory
@@ -36,6 +36,7 @@ from .misc import (
     BlocksDependency, OpenMPDependency, cups_factory, curses_factory, gpgme_factory,
     libgcrypt_factory, libwmf_factory, netcdf_factory, pcap_factory, python3_factory,
     shaderc_factory, threads_factory, ThreadDependency, iconv_factory, intl_factory,
+    dl_factory, openssl_factory, libcrypto_factory, libssl_factory,
 )
 from .platform import AppleFrameworks
 from .qt import qt4_factory, qt5_factory, qt6_factory
@@ -64,6 +65,7 @@ __all__ = [
 
     'find_external_dependency',
     'get_dep_identifier',
+    'get_leaf_external_dependencies',
 ]
 
 """Dependency representations and discovery logic.
@@ -140,8 +142,8 @@ There are a couple of things about this that still aren't ideal. For one, we
 don't want to be reading random environment variables at this point. Those
 should actually be added to `envconfig.Properties` and read in
 `environment.Environment._set_default_properties_from_env` (see how
-`BOOST_ROOT` is handled). We can also handle the `static` keyword. So
-now that becomes:
+`BOOST_ROOT` is handled). We can also handle the `static` keyword and the
+`prefer_static` built-in option. So now that becomes:
 
 ```python
 class FooSystemDependency(ExternalDependency):
@@ -154,7 +156,9 @@ class FooSystemDependency(ExternalDependency):
             self.is_found = False
             return
 
-        static = Mesonlib.LibType.STATIC if kwargs.get('static', False) else Mesonlib.LibType.SHARED
+        get_option = environment.coredata.get_option
+        static_opt = kwargs.get('static', get_option(Mesonlib.OptionKey('prefer_static'))
+        static = Mesonlib.LibType.STATIC if static_opt else Mesonlib.LibType.SHARED
         lib = self.clib_compiler.find_library(
             'foo', environment, [os.path.join(root, 'lib')], libtype=static)
         if lib is None:
@@ -228,6 +232,7 @@ packages.update({
     'llvm': llvm_factory,
     'valgrind': ValgrindDependency,
     'zlib': zlib_factory,
+    'jni': JNISystemDependency,
     'jdk': JDKSystemDependency,
 
     'boost': BoostDependency,
@@ -254,6 +259,10 @@ packages.update({
     'shaderc': shaderc_factory,
     'iconv': iconv_factory,
     'intl': intl_factory,
+    'dl': dl_factory,
+    'openssl': openssl_factory,
+    'libcrypto': libcrypto_factory,
+    'libssl': libssl_factory,
 
     # From platform:
     'appleframeworks': AppleFrameworks,

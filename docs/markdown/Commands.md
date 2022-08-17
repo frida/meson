@@ -150,6 +150,35 @@ Create a project in `sourcedir`:
 meson init -C sourcedir
 ```
 
+### env2mfile
+
+*This command is experimental and subject to change.*
+
+*{Since 0.62.0}*
+
+{{ env2mfile_usage.inc }}
+
+Create native and cross files from the current environment, typically
+by sniffing environment variables like `CC` and `CFLAGS`.
+
+{{ env2mfile_arguments.inc }}
+
+#### Examples:
+
+Autodetect the current cross build environment:
+
+```
+meson env2mfile --cross -o current_cross.txt --cpu=arm7a --cpu-family=arm --system=linux
+```
+
+Generate a cross build using Debian system information:
+
+```
+meson env2mfile --cross --debarch=armhf -o deb_arm_cross.txt
+```
+
+
+
 ### introspect
 
 {{ introspect_usage.inc }}
@@ -211,7 +240,9 @@ See [the Meson file rewriter documentation](Rewriter.md) for more info.
 
 Configures a build directory for the Meson project.
 
-This is the default Meson command (invoked if there was no COMMAND supplied).
+*Deprecated since 0.64.0*: This is the default Meson command (invoked if there
+was no COMMAND supplied). However, supplying the command is necessary to avoid
+clashes with future added commands, so "setup" should be used explicitly.
 
 {{ setup_arguments.inc }}
 
@@ -292,7 +323,7 @@ fi
 ...
 ```
 
-These variables are set in environment in addition to those set using `meson.add_devenv()`:
+These variables are set in environment in addition to those set using [[meson.add_devenv]]:
 - `MESON_DEVENV` is defined to `'1'`.
 - `MESON_PROJECT_NAME` is defined to the main project's name.
 - `PKG_CONFIG_PATH` includes the directory where Meson generates `-uninstalled.pc`
@@ -311,5 +342,21 @@ These variables are set in environment in addition to those set using `meson.add
   schemas is compiled. This is automatically set when using `gnome.compile_schemas()`.
   Note that this requires GLib >= 2.64 when `gnome.compile_schemas()` is used in
   more than one directory.
+
+Since *Since 0.62.0* if bash-completion scripts are being installed and the
+shell is bash, they will be automatically sourced.
+
+Since *Since 0.62.0* when GDB helper scripts (*-gdb.py, *-gdb.gdb, and *-gdb.csm)
+are installed with a library name that matches one being built, Meson adds the
+needed auto-load commands into `<builddir>/.gdbinit` file. When running gdb from
+top build directory, that file is loaded by gdb automatically. In the case of
+python scripts that needs to load other python modules, `PYTHONPATH` may need
+to be modified using `meson.add_devenv()`.
+
+Since *Since 0.63.0* when cross compiling for Windows `WINEPATH` is used instead
+of `PATH` which allows running Windows executables using wine. Note that since
+`WINEPATH` size is currently limited to 1024 characters, paths relative to the
+root of build directory are used. That means current workdir must be the root of
+build directory when running wine.
 
 {{ devenv_arguments.inc }}

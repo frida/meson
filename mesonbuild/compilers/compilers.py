@@ -1,4 +1,4 @@
-# Copyright 2012-2019 The Meson development team
+# Copyright 2012-2022 The Meson development team
 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 import abc
 import contextlib, os.path, re
@@ -24,7 +25,7 @@ from .. import mlog
 from .. import mesonlib
 from ..mesonlib import (
     HoldableObject,
-    EnvironmentException, MachineChoice, MesonException,
+    EnvironmentException, MesonException,
     Popen_safe, LibType, TemporaryDirectoryWinProof, OptionKey,
 )
 
@@ -32,10 +33,11 @@ from ..arglist import CompilerArgs
 
 if T.TYPE_CHECKING:
     from ..build import BuildTarget
-    from ..coredata import KeyedOptionDictType
+    from ..coredata import MutableKeyedOptionDictType, KeyedOptionDictType
     from ..envconfig import MachineInfo
     from ..environment import Environment
     from ..linkers import DynamicLinker, RSPFileSyntax
+    from ..mesonlib import MachineChoice
     from ..dependencies import Dependency
 
     CompilerType = T.TypeVar('CompilerType', bound='Compiler')
@@ -278,7 +280,7 @@ base_options: 'KeyedOptionDictType' = {
                                                       ['default', 'thin'],
                                                       'default'),
     OptionKey('b_sanitize'): coredata.UserComboOption('Code sanitizer to use',
-                                                      ['none', 'address', 'thread', 'undefined', 'memory', 'address,undefined'],
+                                                      ['none', 'address', 'thread', 'undefined', 'memory', 'leak', 'address,undefined'],
                                                       'none'),
     OptionKey('b_lundef'): coredata.UserBooleanOption('Use -Wl,--no-undefined when linking', True),
     OptionKey('b_asneeded'): coredata.UserBooleanOption('Use -Wl,--as-needed when linking', True),
@@ -618,7 +620,7 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
         """
         return []
 
-    def get_options(self) -> 'KeyedOptionDictType':
+    def get_options(self) -> 'MutableKeyedOptionDictType':
         return {}
 
     def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
@@ -875,7 +877,7 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
         return None
 
     def build_rpath_args(self, env: 'Environment', build_dir: str, from_dir: str,
-                         rpath_paths: str, build_rpath: str,
+                         rpath_paths: T.Tuple[str, ...], build_rpath: str,
                          install_rpath: str) -> T.Tuple[T.List[str], T.Set[bytes]]:
         return self.linker.build_rpath_args(
             env, build_dir, from_dir, rpath_paths, build_rpath, install_rpath)
@@ -1007,7 +1009,7 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
         return dep.get_link_args()
 
     @classmethod
-    def use_linker_args(cls, linker: str) -> T.List[str]:
+    def use_linker_args(cls, linker: str, version: str) -> T.List[str]:
         """Get a list of arguments to pass to the compiler to set the linker.
         """
         return []
@@ -1224,7 +1226,7 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
                 yield r
 
     def compiles(self, code: 'mesonlib.FileOrString', env: 'Environment', *,
-                extra_args: T.Union[None, T.List[str], CompilerArgs, T.Callable[[CompileCheckMode], T.List[str]]] = None,
+                 extra_args: T.Union[None, T.List[str], CompilerArgs, T.Callable[[CompileCheckMode], T.List[str]]] = None,
                  dependencies: T.Optional[T.List['Dependency']] = None,
                  mode: str = 'compile',
                  disable_cache: bool = False) -> T.Tuple[bool, bool]:
@@ -1269,6 +1271,9 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
     def get_no_warn_args(self) -> T.List[str]:
         """Arguments to completely disable warnings."""
         return []
+
+    def needs_static_linker(self) -> bool:
+        raise NotImplementedError(f'There is no static linker for {self.language}')
 
 
 def get_global_options(lang: str,

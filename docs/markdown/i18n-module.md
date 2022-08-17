@@ -46,9 +46,12 @@ This function also defines targets for maintainers to use:
 ### i18n.merge_file()
 
 This merges translations into a text file using `msgfmt`. See
-[[@custom_tgt]]
+[[custom_target]]
 for normal keywords. In addition it accepts these keywords:
 
+* `output`: same as `custom_target` but only accepts one item
+* `install_dir`: same as `custom_target` but only accepts one item
+* `install_tag`: same as `custom_target` but only accepts one item
 * `data_dirs`: (*Added 0.41.0*) list of directories for its files (See
   also `i18n.gettext()`)
 * `po_dir`: directory containing translations, relative to current directory
@@ -56,3 +59,18 @@ for normal keywords. In addition it accepts these keywords:
 * `args`: (*Added 0.51.0*) list of extra arguments to pass to `msgfmt`
 
 *Added 0.37.0*
+
+### i18n.itstool_join()
+
+This joins translations into a XML file using `itstool`. See
+[[custom_target]]
+for normal keywords. In addition it accepts these keywords:
+
+* `output`: same as `custom_target` but only accepts one item
+* `install_dir`: same as `custom_target` but only accepts one item
+* `install_tag`: same as `custom_target` but only accepts one item
+* `its_files`: filenames of ITS files that should be used explicitly
+  (XML translation rules are autodetected otherwise).
+* `mo_targets` *required*: mo file generation targets as returned by `i18n.gettext()`.
+
+*Added 0.62.0*

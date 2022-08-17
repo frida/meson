@@ -14,6 +14,7 @@
 
 from .. import mlog
 import contextlib
+from dataclasses import dataclass
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -25,14 +26,16 @@ import stat
 import subprocess
 import sys
 import configparser
+import time
 import typing as T
 import textwrap
 
 from pathlib import Path
 from . import WrapMode
 from .. import coredata
-from ..mesonlib import quiet_git, GIT, ProgressBar, MesonException
+from ..mesonlib import quiet_git, GIT, ProgressBar, MesonException, windows_proof_rmtree, Popen_safe
 from ..interpreterbase import FeatureNew
+from ..interpreterbase import SubProject
 from .. import mesonlib
 
 if T.TYPE_CHECKING:
@@ -52,6 +55,8 @@ WHITELIST_SUBDOMAIN = 'wrapdb.mesonbuild.com'
 
 ALL_TYPES = ['file', 'git', 'hg', 'svn']
 
+PATCH = shutil.which('patch')
+
 def whitelist_wrapdb(urlstr: str) -> urllib.parse.ParseResult:
     """ raises WrapException if not whitelisted subdomain """
     url = urllib.parse.urlparse(urlstr)
@@ -63,21 +68,36 @@ def whitelist_wrapdb(urlstr: str) -> urllib.parse.ParseResult:
         raise WrapException(f'WrapDB did not have expected SSL https url, instead got {urlstr}')
     return url
 
-def open_wrapdburl(urlstring: str) -> 'http.client.HTTPResponse':
-    global SSL_WARNING_PRINTED
+def open_wrapdburl(urlstring: str, allow_insecure: bool = False, have_opt: bool = False) -> 'http.client.HTTPResponse':
+    if have_opt:
+        insecure_msg = '\n\n    To allow connecting anyway, pass `--allow-insecure`.'
+    else:
+        insecure_msg = ''
 
     url = whitelist_wrapdb(urlstring)
     if has_ssl:
         try:
             return T.cast('http.client.HTTPResponse', urllib.request.urlopen(urllib.parse.urlunparse(url), timeout=REQ_TIMEOUT))
         except urllib.error.URLError as excp:
-            raise WrapException(f'WrapDB connection failed to {urlstring} with error {excp}')
+            msg = f'WrapDB connection failed to {urlstring} with error {excp}.'
+            if isinstance(excp.reason, ssl.SSLCertVerificationError):
+                if allow_insecure:
+                    mlog.warning(f'{msg}\n\n    Proceeding without authentication.')
+                else:
+                    raise WrapException(f'{msg}{insecure_msg}')
+            else:
+                raise WrapException(msg)
+    elif not allow_insecure:
+        raise WrapException(f'SSL module not available in {sys.executable}: Cannot contact the WrapDB.{insecure_msg}')
+    else:
+        # following code is only for those without Python SSL
+        global SSL_WARNING_PRINTED
+        if not SSL_WARNING_PRINTED:
+            mlog.warning(f'SSL module not available in {sys.executable}: WrapDB traffic not authenticated.')
+            SSL_WARNING_PRINTED = True
 
-    # following code is only for those without Python SSL
+    # If we got this far, allow_insecure was manually passed
     nossl_url = url._replace(scheme='http')
-    if not SSL_WARNING_PRINTED:
-        mlog.warning(f'SSL module not available in {sys.executable}: WrapDB traffic not authenticated.')
-        SSL_WARNING_PRINTED = True
     try:
         return T.cast('http.client.HTTPResponse', urllib.request.urlopen(urllib.parse.urlunparse(nossl_url), timeout=REQ_TIMEOUT))
     except urllib.error.URLError as excp:
@@ -93,11 +113,12 @@ class WrapNotFoundException(WrapException):
 class PackageDefinition:
     def __init__(self, fname: str, subproject: str = ''):
         self.filename = fname
-        self.subproject = subproject
+        self.subproject = SubProject(subproject)
         self.type = None  # type: T.Optional[str]
         self.values = {} # type: T.Dict[str, str]
         self.provided_deps = {} # type: T.Dict[str, T.Optional[str]]
         self.provided_programs = [] # type: T.List[str]
+        self.diff_files = [] # type: T.List[Path]
         self.basename = os.path.basename(fname)
         self.has_wrap = self.basename.endswith('.wrap')
         self.name = self.basename[:-5] if self.has_wrap else self.basename
@@ -118,7 +139,7 @@ class PackageDefinition:
     def parse_wrap(self) -> None:
         try:
             config = configparser.ConfigParser(interpolation=None)
-            config.read(self.filename)
+            config.read(self.filename, encoding='utf-8')
         except configparser.Error as e:
             raise WrapException(f'Failed to parse {self.basename}: {e!s}')
         self.parse_wrap_section(config)
@@ -159,6 +180,15 @@ class PackageDefinition:
             raise WrapException(f'{self.wrap_section!r} is not a valid first section in {self.basename}')
         self.type = self.wrap_section[5:]
         self.values = dict(config[self.wrap_section])
+        if 'diff_files' in self.values:
+            FeatureNew('Wrap files with diff_files', '0.63.0').use(self.subproject)
+            for s in self.values['diff_files'].split(','):
+                path = Path(s.strip())
+                if path.is_absolute():
+                    raise WrapException('diff_files paths cannot be absolute')
+                if '..' in path.parts:
+                    raise WrapException('diff_files paths cannot contain ".."')
+                self.diff_files.append(path)
 
     def parse_provide_section(self, config: configparser.ConfigParser) -> None:
         if config.has_section('provide'):
@@ -203,13 +233,17 @@ def verbose_git(cmd: T.List[str], workingdir: str, check: bool = False) -> bool:
     except mesonlib.GitException as e:
         raise WrapException(str(e))
 
+@dataclass(eq=False)
 class Resolver:
-    def __init__(self, source_dir: str, subdir: str, subproject: str = '', wrap_mode: WrapMode = WrapMode.default) -> None:
-        self.source_dir = source_dir
-        self.subdir = subdir
-        self.subproject = subproject
-        self.wrap_mode = wrap_mode
-        self.subdir_root = os.path.join(source_dir, subdir)
+    source_dir: str
+    subdir: str
+    subproject: str = ''
+    wrap_mode: WrapMode = WrapMode.default
+    wrap_frontend: bool = False
+    allow_insecure: bool = False
+
+    def __post_init__(self) -> None:
+        self.subdir_root = os.path.join(self.source_dir, self.subdir)
         self.cachedir = os.path.join(self.subdir_root, 'packagecache')
         self.wraps = {} # type: T.Dict[str, PackageDefinition]
         self.provided_deps = {} # type: T.Dict[str, PackageDefinition]
@@ -342,7 +376,12 @@ class Resolver:
                     self.get_svn()
                 else:
                     raise WrapException(f'Unknown wrap type {self.wrap.type!r}')
-            self.apply_patch()
+            try:
+                self.apply_patch()
+                self.apply_diff_files()
+            except Exception:
+                windows_proof_rmtree(self.dirname)
+                raise
 
         # A meson.build or CMakeLists.txt file is required in the directory
         if method == 'meson' and not os.path.exists(meson_file):
@@ -364,12 +403,16 @@ class Resolver:
         # definitely cannot try to conveniently set up a submodule.
         if not GIT:
             return False
+        # Does the directory exist? Even uninitialised submodules checkout an
+        # empty directory to work in
+        if not os.path.isdir(self.dirname):
+            return False
         # Are we in a git repository?
-        ret, out = quiet_git(['rev-parse'], self.subdir_root)
+        ret, out = quiet_git(['rev-parse'], Path(self.dirname).parent)
         if not ret:
             return False
         # Is `dirname` a submodule?
-        ret, out = quiet_git(['submodule', 'status', self.dirname], self.subdir_root)
+        ret, out = quiet_git(['submodule', 'status', '.'], self.dirname)
         if not ret:
             return False
         # Submodule has not been added, add it
@@ -380,11 +423,12 @@ class Resolver:
             raise WrapException('git submodule has merge conflicts')
         # Submodule exists, but is deinitialized or wasn't initialized
         elif out.startswith('-'):
-            if verbose_git(['submodule', 'update', '--init', self.dirname], self.subdir_root):
+            if verbose_git(['submodule', 'update', '--init', '.'], self.dirname):
                 return True
             raise WrapException('git submodule failed to init')
         # Submodule looks fine, but maybe it wasn't populated properly. Do a checkout.
         elif out.startswith(' '):
+            verbose_git(['submodule', 'update', '.'], self.dirname)
             verbose_git(['checkout', '.'], self.dirname)
             # Even if checkout failed, try building it anyway and let the user
             # handle any problems manually.
@@ -437,7 +481,7 @@ class Resolver:
                         verbose_git(['fetch', self.wrap.get('url'), revno], self.dirname, check=True)
                         verbose_git(checkout_cmd, self.dirname, check=True)
             else:
-                verbose_git(['clone', *depth_option, '--branch', revno, self.wrap.get('url'),
+                verbose_git(['-c', 'advice.detachedHead=false', 'clone', *depth_option, '--branch', revno, self.wrap.get('url'),
                              self.directory], self.subdir_root, check=True)
             if self.wrap.values.get('clone-recursive', '').lower() == 'true':
                 verbose_git(['submodule', 'update', '--init', '--checkout', '--recursive', *depth_option],
@@ -477,7 +521,7 @@ class Resolver:
         tmpfile = tempfile.NamedTemporaryFile(mode='wb', dir=self.cachedir, delete=False)
         url = urllib.parse.urlparse(urlstring)
         if url.hostname and url.hostname.endswith(WHITELIST_SUBDOMAIN):
-            resp = open_wrapdburl(urlstring)
+            resp = open_wrapdburl(urlstring, allow_insecure=self.allow_insecure, have_opt=self.wrap_frontend)
         elif WHITELIST_SUBDOMAIN in urlstring:
             raise WrapException(f'{urlstring} may be a WrapDB-impersonating URL')
         else:
@@ -527,12 +571,22 @@ class Resolver:
         if dhash != expected:
             raise WrapException(f'Incorrect hash for {what}:\n {expected} expected\n {dhash} actual.')
 
+    def get_data_with_backoff(self, urlstring: str) -> T.Tuple[str, str]:
+        delays = [1, 2, 4, 8, 16]
+        for d in delays:
+            try:
+                return self.get_data(urlstring)
+            except Exception as e:
+                mlog.warning(f'failed to download with error: {e}. Trying after a delay...', fatal=False)
+                time.sleep(d)
+        return self.get_data(urlstring)
+
     def download(self, what: str, ofname: str, fallback: bool = False) -> None:
         self.check_can_download()
         srcurl = self.wrap.get(what + ('_fallback_url' if fallback else '_url'))
         mlog.log('Downloading', mlog.bold(self.packagename), what, 'from', mlog.bold(srcurl))
         try:
-            dhash, tmpfile = self.get_data(srcurl)
+            dhash, tmpfile = self.get_data_with_backoff(srcurl)
             expected = self.wrap.get(what + '_hash').lower()
             if dhash != expected:
                 os.remove(tmpfile)
@@ -584,8 +638,31 @@ class Resolver:
             patch_dir = self.wrap.values['patch_directory']
             src_dir = os.path.join(self.wrap.filesdir, patch_dir)
             if not os.path.isdir(src_dir):
-                raise WrapException(f'patch directory does not exists: {patch_dir}')
+                raise WrapException(f'patch directory does not exist: {patch_dir}')
             self.copy_tree(src_dir, self.dirname)
+
+    def apply_diff_files(self) -> None:
+        for filename in self.wrap.diff_files:
+            mlog.log(f'Applying diff file "{filename}"')
+            path = Path(self.wrap.filesdir) / filename
+            if not path.exists():
+                raise WrapException(f'Diff file "{path}" does not exist')
+            relpath = os.path.relpath(str(path), self.dirname)
+            if PATCH:
+                cmd = [PATCH, '-f', '-p1', '-i', relpath]
+            elif GIT:
+                # If the `patch` command is not available, fall back to `git
+                # apply`. The `--work-tree` is necessary in case we're inside a
+                # Git repository: by default, Git will try to apply the patch to
+                # the repository root.
+                cmd = [GIT, '--work-tree', '.', 'apply', '-p1', relpath]
+            else:
+                raise WrapException('Missing "patch" or "git" commands to apply diff files')
+
+            p, out, _ = Popen_safe(cmd, cwd=self.dirname, stderr=subprocess.STDOUT)
+            if p.returncode != 0:
+                mlog.log(out.strip())
+                raise WrapException(f'Failed to apply diff file "{filename}"')
 
     def copy_tree(self, root_src_dir: str, root_dst_dir: str) -> None:
         """

@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
 import copy
+import itertools
 import os
 import xml.dom.minidom
 import xml.etree.ElementTree as ET
@@ -25,11 +27,13 @@ from .. import build
 from .. import dependencies
 from .. import mlog
 from .. import compilers
-from ..interpreter import Interpreter
 from ..mesonlib import (
     File, MesonException, replace_if_different, OptionKey, version_compare, MachineChoice
 )
 from ..environment import Environment, build_filename
+
+if T.TYPE_CHECKING:
+    from ..interpreter import Interpreter
 
 
 def autodetect_vs_version(build: T.Optional[build.Build], interpreter: T.Optional[Interpreter]) -> backends.Backend:
@@ -98,6 +102,8 @@ class Vs2010Backend(backends.Backend):
         super().__init__(build, interpreter)
         self.name = 'vs2010'
         self.project_file_version = '10.0.30319.1'
+        self.sln_file_version = '11.00'
+        self.sln_version_comment = '2010'
         self.platform_toolset = None
         self.vs_version = '2010'
         self.windows_target_platform_version = None
@@ -268,12 +274,15 @@ class Vs2010Backend(backends.Backend):
                 result[o.target.get_id()] = o.target
         return result.items()
 
-    def get_target_deps(self, t, recursive=False):
-        all_deps = {}
+    def get_target_deps(self, t: T.Dict[T.Any, build.Target], recursive=False):
+        all_deps: T.Dict[str, build.Target] = {}
         for target in t.values():
             if isinstance(target, build.CustomTarget):
                 for d in target.get_target_dependencies():
-                    all_deps[d.get_id()] = d
+                    # FIXME: this isn't strictly correct, as the target doesn't
+                    # Get dependencies on non-targets, such as Files
+                    if isinstance(d, build.Target):
+                        all_deps[d.get_id()] = d
             elif isinstance(target, build.RunTarget):
                 for d in target.get_dependencies():
                     all_deps[d.get_id()] = d
@@ -313,11 +322,13 @@ class Vs2010Backend(backends.Backend):
                     gen_exe = generator.get_exe()
                     if isinstance(gen_exe, build.Executable):
                         all_deps[gen_exe.get_id()] = gen_exe
-                    for d in generator.depends:
+                    for d in itertools.chain(generator.depends, gendep.depends):
                         if isinstance(d, build.CustomTargetIndex):
                             all_deps[d.get_id()] = d.target
-                        else:
+                        elif isinstance(d, build.Target):
                             all_deps[d.get_id()] = d
+                        # FIXME: we don't handle other kinds of deps correctly here, such
+                        # as GeneratedLists, StructuredSources, and generated File.
 
         if not t or not recursive:
             return all_deps
@@ -347,11 +358,13 @@ class Vs2010Backend(backends.Backend):
 
     def generate_solution(self, sln_filename, projlist):
         default_projlist = self.get_build_by_default_targets()
+        default_projlist.update(self.get_testlike_targets())
         sln_filename_tmp = sln_filename + '~'
-        with open(sln_filename_tmp, 'w', encoding='utf-8') as ofile:
-            ofile.write('Microsoft Visual Studio Solution File, Format '
-                        'Version 11.00\n')
-            ofile.write('# Visual Studio ' + self.vs_version + '\n')
+        # Note using the utf-8 BOM requires the blank line, otherwise Visual Studio Version Selector fails.
+        # Without the BOM, VSVS fails if there is a blank line.
+        with open(sln_filename_tmp, 'w', encoding='utf-8-sig') as ofile:
+            ofile.write('\nMicrosoft Visual Studio Solution File, Format Version %s\n' % self.sln_file_version)
+            ofile.write('# Visual Studio %s\n' % self.sln_version_comment)
             prj_templ = 'Project("{%s}") = "%s", "%s", "{%s}"\n'
             for prj in projlist:
                 coredata = self.environment.coredata
@@ -467,7 +480,7 @@ class Vs2010Backend(backends.Backend):
 
         # Put the startup project first in the project list
         if startup_idx:
-            projlist = [projlist[startup_idx]] + projlist[0:startup_idx] + projlist[startup_idx + 1:-1]
+            projlist.insert(0, projlist.pop(startup_idx))
 
         return projlist
 
@@ -648,7 +661,8 @@ class Vs2010Backend(backends.Backend):
                                                    capture=ofilenames[0] if target.capture else None,
                                                    feed=srcs[0] if target.feed else None,
                                                    force_serialize=True,
-                                                   env=target.env)
+                                                   env=target.env,
+                                                   verbose=target.console)
         if target.build_always_stale:
             # Use a nonexistent file to always consider the target out-of-date.
             ofilenames += [self.nonexistent_file(os.path.join(self.environment.get_scratch_dir(),
@@ -864,7 +878,7 @@ class Vs2010Backend(backends.Backend):
         # Prefix to use to access the source tree's subdir from the vcxproj dir
         proj_to_src_dir = os.path.join(proj_to_src_root, self.get_target_dir(target))
         (sources, headers, objects, languages) = self.split_sources(target.sources)
-        if self.is_unity(target):
+        if target.is_unity:
             sources = self.generate_unity_files(target, sources)
         compiler = self._get_cl_compiler(target)
         build_args = compiler.get_buildtype_args(self.buildtype)
@@ -987,7 +1001,7 @@ class Vs2010Backend(backends.Backend):
         for l, comp in target.compilers.items():
             if l in file_args:
                 file_args[l] += compilers.get_base_compile_args(
-                    self.get_base_options_for_target(target), comp)
+                    target.get_options(), comp)
                 file_args[l] += comp.get_option_compile_args(
                     self.environment.coredata.options)
 
@@ -1111,9 +1125,9 @@ class Vs2010Backend(backends.Backend):
         ET.SubElement(clconf, 'PreprocessorDefinitions').text = ';'.join(target_defines)
         ET.SubElement(clconf, 'FunctionLevelLinking').text = 'true'
         # Warning level
-        warning_level = self.get_option_for_target(OptionKey('warning_level'), target)
+        warning_level = target.get_option(OptionKey('warning_level'))
         ET.SubElement(clconf, 'WarningLevel').text = 'Level' + str(1 + int(warning_level))
-        if self.get_option_for_target(OptionKey('werror'), target):
+        if target.get_option(OptionKey('werror')):
             ET.SubElement(clconf, 'TreatWarningAsError').text = 'true'
         # Optimization flags
         o_flags = split_o_flags_args(build_args)
@@ -1298,7 +1312,7 @@ class Vs2010Backend(backends.Backend):
             pdb.text = f'$(OutDir){target_name}.pdb'
         targetmachine = ET.SubElement(link, 'TargetMachine')
         if target.for_machine is MachineChoice.BUILD:
-            targetplatform = platform
+            targetplatform = platform.lower()
         else:
             targetplatform = self.platform.lower()
         if targetplatform == 'win32':

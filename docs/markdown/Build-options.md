@@ -85,7 +85,7 @@ argument of most functions. Currently supported in
 - `auto` is the same as passing `required : false`.
 - `disabled` do not look for the dependency and always return 'not-found'.
 
-When getting the value of this type of option using `get_option()`, a
+When getting the value of this type of option using [[get_option]], a
 special [[@feature]] object is returned instead
 of the string representation of the option's value. This object can be
 passed to `required`:
@@ -147,6 +147,21 @@ option('o4', type: 'feature', deprecated: {'true': 'enabled', 'false': 'disabled
 
 # A feature option has been replaced by a boolean, enabled/disabled/auto values are remapped.
 option('o5', type: 'boolean', deprecated: {'enabled': 'true', 'disabled': 'false', 'auto': 'false'})
+```
+
+Since *0.63.0* the `deprecated` keyword argument can take the name of a new option
+that replace this option. In that case, setting a value on the deprecated option
+will set the value on both the old and new names, assuming they accept the same
+values.
+
+```meson
+# A boolean option has been replaced by a feature with another name, old true/false values
+# are accepted by the new option for backward compatibility.
+option('o6', type: 'boolean', value: 'true', deprecated: 'o7')
+option('o7', type: 'feature', value: 'enabled', deprecated: {'true': 'enabled', 'false': 'disabled'})
+
+# A project option is replaced by a module option
+option('o8', type: 'string', value: '', deprecated: 'python.platlibdir')
 ```
 
 ## Using build options

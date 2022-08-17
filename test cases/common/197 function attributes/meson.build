@@ -49,6 +49,8 @@ attributes = [
   'noreturn',
   'nothrow',
   'pure',
+  'section',
+  'sentinel',
   'unused',
   'used',
   'warn_unused_result',
@@ -79,6 +81,12 @@ if ['gcc', 'intel'].contains(c.get_id())
 
   if c.get_id() == 'gcc' and c.version().version_compare('>= 7.0.0')
     attributes += 'fallthrough'
+  endif
+
+  # XXX(arsen): limited to clang 13+ even though gcc 11 has it, since gcc
+  # detects support for it at compile time based on binutils version
+  if c.get_id() == 'clang' and c.version().version_compare('>= 13.0.0')
+    attributes += 'retain'
   endif
 endif
 

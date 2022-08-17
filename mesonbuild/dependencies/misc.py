@@ -60,6 +60,27 @@ def netcdf_factory(env: 'Environment',
     return candidates
 
 
+class DlBuiltinDependency(BuiltinDependency):
+    def __init__(self, name: str, env: 'Environment', kwargs: T.Dict[str, T.Any]):
+        super().__init__(name, env, kwargs)
+        self.feature_since = ('0.62.0', "consider checking for `dlopen` with and without `find_library('dl')`")
+
+        if self.clib_compiler.has_function('dlopen', '#include <dlfcn.h>', env)[0]:
+            self.is_found = True
+
+
+class DlSystemDependency(SystemDependency):
+    def __init__(self, name: str, env: 'Environment', kwargs: T.Dict[str, T.Any]):
+        super().__init__(name, env, kwargs)
+        self.feature_since = ('0.62.0', "consider checking for `dlopen` with and without `find_library('dl')`")
+
+        h = self.clib_compiler.has_header('dlfcn.h', '', env)
+        self.link_args = self.clib_compiler.find_library('dl', env, [], self.libtype)
+
+        if h[0] and self.link_args:
+            self.is_found = True
+
+
 class OpenMPDependency(SystemDependency):
     # Map date of specification release (which is the macro value) to a version.
     VERSIONS = {
@@ -175,7 +196,6 @@ class Python3DependencySystem(SystemDependency):
             return
 
         self.name = 'python3'
-        self.static = kwargs.get('static', False)
         # We can only be sure that it is Python 3 at this point
         self.version = '3'
         self._find_libpy3_windows(environment)
@@ -451,14 +471,17 @@ class CursesSystemDependency(SystemDependency):
 class IconvBuiltinDependency(BuiltinDependency):
     def __init__(self, name: str, env: 'Environment', kwargs: T.Dict[str, T.Any]):
         super().__init__(name, env, kwargs)
+        self.feature_since = ('0.60.0', "consider checking for `iconv_open` with and without `find_library('iconv')`")
+        code = '''#include <iconv.h>\n\nint main() {\n    iconv_open("","");\n}''' # [ignore encoding] this is C, not python, Mr. Lint
 
-        if self.clib_compiler.has_function('iconv_open', '', env)[0]:
+        if self.clib_compiler.links(code, env)[0]:
             self.is_found = True
 
 
 class IconvSystemDependency(SystemDependency):
     def __init__(self, name: str, env: 'Environment', kwargs: T.Dict[str, T.Any]):
         super().__init__(name, env, kwargs)
+        self.feature_since = ('0.60.0', "consider checking for `iconv_open` with and without find_library('iconv')")
 
         h = self.clib_compiler.has_header('iconv.h', '', env)
         self.link_args = self.clib_compiler.find_library('iconv', env, [], self.libtype)
@@ -470,14 +493,17 @@ class IconvSystemDependency(SystemDependency):
 class IntlBuiltinDependency(BuiltinDependency):
     def __init__(self, name: str, env: 'Environment', kwargs: T.Dict[str, T.Any]):
         super().__init__(name, env, kwargs)
+        self.feature_since = ('0.59.0', "consider checking for `ngettext` with and without `find_library('intl')`")
+        code = '''#include <libintl.h>\n\nint main() {\n    gettext("Hello world");\n}'''
 
-        if self.clib_compiler.has_function('ngettext', '', env)[0]:
+        if self.clib_compiler.links(code, env)[0]:
             self.is_found = True
 
 
 class IntlSystemDependency(SystemDependency):
     def __init__(self, name: str, env: 'Environment', kwargs: T.Dict[str, T.Any]):
         super().__init__(name, env, kwargs)
+        self.feature_since = ('0.59.0', "consider checking for `ngettext` with and without `find_library('intl')`")
 
         h = self.clib_compiler.has_header('libintl.h', '', env)
         self.link_args = self.clib_compiler.find_library('intl', env, [], self.libtype)
@@ -486,9 +512,58 @@ class IntlSystemDependency(SystemDependency):
             self.is_found = True
 
             if self.static:
-                if not self._add_sub_dependency(iconv_factory(env, self.for_machine, {})):
+                if not self._add_sub_dependency(iconv_factory(env, self.for_machine, {'static': True})):
                     self.is_found = False
                     return
+
+
+class OpensslSystemDependency(SystemDependency):
+    def __init__(self, name: str, env: 'Environment', kwargs: T.Dict[str, T.Any]):
+        super().__init__(name, env, kwargs)
+
+        dependency_kwargs = {
+            'method': 'system',
+            'static': self.static,
+        }
+        if not self.clib_compiler.has_header('openssl/ssl.h', '', env)[0]:
+            return
+
+        # openssl >= 3 only
+        self.version = self.clib_compiler.get_define('OPENSSL_VERSION_STR', '#include <openssl/opensslv.h>', env, [], [self])[0]
+        # openssl < 3 only
+        if not self.version:
+            version_hex = self.clib_compiler.get_define('OPENSSL_VERSION_NUMBER', '#include <openssl/opensslv.h>', env, [], [self])[0]
+            if not version_hex:
+                return
+            version_hex = version_hex.rstrip('L')
+            version_ints = [((int(version_hex.rstrip('L'), 16) >> 4 + i) & 0xFF) for i in (24, 16, 8, 0)]
+            # since this is openssl, the format is 1.2.3a in four parts
+            self.version = '.'.join(str(i) for i in version_ints[:3]) + chr(ord('a') + version_ints[3] - 1)
+
+        if name == 'openssl':
+            if self._add_sub_dependency(libssl_factory(env, self.for_machine, dependency_kwargs)) and \
+                    self._add_sub_dependency(libcrypto_factory(env, self.for_machine, dependency_kwargs)):
+                self.is_found = True
+            return
+        else:
+            self.link_args = self.clib_compiler.find_library(name.lstrip('lib'), env, [], self.libtype)
+            if not self.link_args:
+                return
+
+        if not self.static:
+            self.is_found = True
+        else:
+            if name == 'libssl':
+                if self._add_sub_dependency(libcrypto_factory(env, self.for_machine, dependency_kwargs)):
+                    self.is_found = True
+            elif name == 'libcrypto':
+                use_threads = self.clib_compiler.has_header_symbol('openssl/opensslconf.h', 'OPENSSL_THREADS', '', env, dependencies=[self])[0]
+                if not use_threads or self._add_sub_dependency(threads_factory(env, self.for_machine, {})):
+                    self.is_found = True
+                # only relevant on platforms where it is distributed with the libc, in which case it always succeeds
+                sublib = self.clib_compiler.find_library('dl', env, [], self.libtype)
+                if sublib:
+                    self.link_args.extend(sublib)
 
 
 @factory_methods({DependencyMethods.PKGCONFIG, DependencyMethods.CONFIG_TOOL, DependencyMethods.SYSTEM})
@@ -537,7 +612,7 @@ def shaderc_factory(env: 'Environment',
         shared_libs = ['shaderc']
         static_libs = ['shaderc_combined', 'shaderc_static']
 
-        if kwargs.get('static', False):
+        if kwargs.get('static', env.coredata.get_option(mesonlib.OptionKey('prefer_static'))):
             c = [functools.partial(PkgConfigDependency, name, env, kwargs)
                  for name in static_libs + shared_libs]
         else:
@@ -556,6 +631,13 @@ cups_factory = DependencyFactory(
     [DependencyMethods.PKGCONFIG, DependencyMethods.CONFIG_TOOL, DependencyMethods.EXTRAFRAMEWORK, DependencyMethods.CMAKE],
     configtool_class=CupsDependencyConfigTool,
     cmake_name='Cups',
+)
+
+dl_factory = DependencyFactory(
+    'dl',
+    [DependencyMethods.BUILTIN, DependencyMethods.SYSTEM],
+    builtin_class=DlBuiltinDependency,
+    system_class=DlSystemDependency,
 )
 
 gpgme_factory = DependencyFactory(
@@ -613,4 +695,25 @@ intl_factory = DependencyFactory(
     [DependencyMethods.BUILTIN, DependencyMethods.SYSTEM],
     builtin_class=IntlBuiltinDependency,
     system_class=IntlSystemDependency,
+)
+
+openssl_factory = DependencyFactory(
+    'openssl',
+    [DependencyMethods.PKGCONFIG, DependencyMethods.SYSTEM, DependencyMethods.CMAKE],
+    system_class=OpensslSystemDependency,
+    cmake_class=lambda name, env, kwargs: CMakeDependency('OpenSSL', env, dict(kwargs, modules=['OpenSSL::Crypto', 'OpenSSL::SSL'])),
+)
+
+libcrypto_factory = DependencyFactory(
+    'libcrypto',
+    [DependencyMethods.PKGCONFIG, DependencyMethods.SYSTEM, DependencyMethods.CMAKE],
+    system_class=OpensslSystemDependency,
+    cmake_class=lambda name, env, kwargs: CMakeDependency('OpenSSL', env, dict(kwargs, modules=['OpenSSL::Crypto'])),
+)
+
+libssl_factory = DependencyFactory(
+    'libssl',
+    [DependencyMethods.PKGCONFIG, DependencyMethods.SYSTEM, DependencyMethods.CMAKE],
+    system_class=OpensslSystemDependency,
+    cmake_class=lambda name, env, kwargs: CMakeDependency('OpenSSL', env, dict(kwargs, modules=['OpenSSL::SSL'])),
 )

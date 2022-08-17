@@ -198,7 +198,7 @@ The (optional) `test.json` file, in the root of a test case, is used
 for configuring the test. All of the following root entries in the `test.json`
 are independent of each other and can be combined as needed.
 
-Exanple `test.json`:
+Example `test.json`:
 
 ```json
 {
@@ -387,6 +387,7 @@ Each dict contains the following keys:
 
 - `line`
 - `match` (optional)
+- `count` (optional)
 
 Each item in the list is matched, in order, against the remaining
 actual stdout lines, after any previous matches. If the actual stdout
@@ -400,6 +401,10 @@ matched:
 | --------  | ----------------------- |
 | `literal` | Literal match (default) |
 | `re`      | regex match             |
+
+The `count` element determines how many times the line is expected, and allowed,
+to be in the output. If unspecified, it must appear "any number of times, but at
+least once".
 
 #### skip_on_env
 
@@ -445,20 +450,17 @@ To promote consistent naming policy, use:
 ## Documentation
 
 The `docs` directory contains the full documentation that will be used
-to generate [the Meson web site](http://mesonbuild.com). Every change
-in functionality must change the documentation pages. In most cases
-this means updating the reference documentation page but bigger
-changes might need changes in other documentation, too.
+to generate [the Meson web site](http://mesonbuild.com). Line length
+in most cases should not exceed 70 characters (lines containing links
+or examples are usually exempt). Every change in functionality must
+change the documentation pages. In most cases this means updating the
+reference documentation page but bigger changes might need changes in
+other documentation, too.
 
 All new functionality needs to have a mention in the release
 notes. These features should be written in standalone files in the
 `docs/markdown/snippets` directory. The release manager will combine
 them into one page when doing the release.
-
-[Integration tests should be disabled](#skipping-integration-tests) for
-documentation-only commits by putting `[skip ci]` into commit title.
-Reviewers should ask contributors to put `[skip ci]` into the title because
-tests are run again after merge for `master`.
 
 ## Python Coding style
 

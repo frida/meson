@@ -1,4 +1,4 @@
-# Copyright 2019 The meson development team
+# Copyright 2019-2022 The meson development team
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -55,7 +55,7 @@ gnulike_buildtype_args = {
 }  # type: T.Dict[str, T.List[str]]
 
 gnu_optimization_args = {
-    '0': [],
+    '0': ['-O0'],
     'g': ['-Og'],
     '1': ['-O1'],
     '2': ['-O2'],
@@ -106,14 +106,7 @@ def gnulike_default_include_dirs(compiler: T.Tuple[str, ...], lang: str) -> 'Imm
     env = os.environ.copy()
     env["LC_ALL"] = 'C'
     cmd = list(compiler) + [f'-x{lang}', '-E', '-v', '-']
-    p = subprocess.Popen(
-        cmd,
-        stdin=subprocess.DEVNULL,
-        stderr=subprocess.STDOUT,
-        stdout=subprocess.PIPE,
-        env=env
-    )
-    stdout = p.stdout.read().decode('utf-8', errors='replace')
+    _, stdout, _ = mesonlib.Popen_safe(cmd, stderr=subprocess.STDOUT, env=env)
     parse_state = 0
     paths = []  # type: T.List[str]
     for line in stdout.split('\n'):
@@ -197,6 +190,8 @@ class GnuLikeCompiler(Compiler, metaclass=abc.ABCMeta):
         pass
 
     def gnu_symbol_visibility_args(self, vistype: str) -> T.List[str]:
+        if vistype == 'inlineshidden' and self.language not in {'cpp', 'objcpp'}:
+            vistype = 'hidden'
         return gnu_symbol_visibility_args[vistype]
 
     def gen_vs_module_defs_args(self, defsfile: str) -> T.List[str]:
@@ -313,7 +308,7 @@ class GnuLikeCompiler(Compiler, metaclass=abc.ABCMeta):
         return ['-I' + path]
 
     @classmethod
-    def use_linker_args(cls, linker: str) -> T.List[str]:
+    def use_linker_args(cls, linker: str, version: str) -> T.List[str]:
         if linker not in {'gold', 'bfd', 'lld'}:
             raise mesonlib.MesonException(
                 f'Unsupported linker, only bfd, gold, and lld are supported, not {linker}.')
@@ -328,10 +323,10 @@ class GnuCompiler(GnuLikeCompiler):
     GnuCompiler represents an actual GCC in its many incarnations.
     Compilers imitating GCC (Clang/Intel) should use the GnuLikeCompiler ABC.
     """
+    id = 'gcc'
 
     def __init__(self, defines: T.Optional[T.Dict[str, str]]):
         super().__init__()
-        self.id = 'gcc'
         self.defines = defines or {}
         self.base_options.update({OptionKey('b_colorout'), OptionKey('b_lto_threads')})
 
@@ -396,3 +391,9 @@ class GnuCompiler(GnuLikeCompiler):
         elif threads > 0:
             return [f'-flto={threads}']
         return super().get_lto_compile_args(threads=threads)
+
+    @classmethod
+    def use_linker_args(cls, linker: str, version: str) -> T.List[str]:
+        if linker == 'mold' and mesonlib.version_compare(version, '>=12.0.1'):
+            return ['-fuse-ld=mold']
+        return super().use_linker_args(linker, version)

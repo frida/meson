@@ -3,12 +3,16 @@
 
 """Helpers for strict type checking."""
 
+from __future__ import annotations
+import os
 import typing as T
 
 from .. import compilers
-from ..build import EnvironmentVariables, CustomTarget, BuildTarget, CustomTargetIndex, ExtractedObjects, GeneratedList, IncludeDirs
+from ..build import (EnvironmentVariables, EnvInitValueType, CustomTarget, BuildTarget,
+                     CustomTargetIndex, ExtractedObjects, GeneratedList, IncludeDirs,
+                     BothLibraries, SharedLibrary, StaticLibrary, Jar, Executable)
 from ..coredata import UserFeatureOption
-from ..interpreterbase import TYPE_var
+from ..dependencies import Dependency, InternalDependency
 from ..interpreterbase.decorators import KwargInfo, ContainerTypeInfo
 from ..mesonlib import File, FileMode, MachineChoice, listify, has_path_sep, OptionKey
 from ..programs import ExternalProgram
@@ -16,6 +20,10 @@ from ..programs import ExternalProgram
 # Helper definition for type checks that are `Optional[T]`
 NoneType: T.Type[None] = type(None)
 
+if T.TYPE_CHECKING:
+    from typing_extensions import Literal
+
+    from ..interpreterbase import TYPE_var
 
 def in_set_validator(choices: T.Set[str]) -> T.Callable[[str], T.Optional[str]]:
     """Check that the choice given was one of the given set."""
@@ -101,6 +109,37 @@ def _lower_strlist(input: T.List[str]) -> T.List[str]:
     return [i.lower() for i in input]
 
 
+def variables_validator(contents: T.Union[T.List[str], T.Dict[str, str]]) -> T.Optional[str]:
+    if isinstance(contents, dict):
+        variables = contents
+    else:
+        variables = {}
+        for v in contents:
+            try:
+                key, val = v.split('=', 1)
+            except ValueError:
+                return f'variable {v!r} must have a value separated by equals sign.'
+            variables[key.strip()] = val.strip()
+    for k, v in variables.items():
+        if not k:
+            return 'empty variable name'
+        if not v:
+            return 'empty variable value'
+        if any(c.isspace() for c in k):
+            return f'invalid whitespace in variable name {k!r}'
+    return None
+
+
+def variables_convertor(contents: T.Union[T.List[str], T.Dict[str, str]]) -> T.Dict[str, str]:
+    if isinstance(contents, dict):
+        return contents
+    variables = {}
+    for v in contents:
+        key, val = v.split('=', 1)
+        variables[key.strip()] = val.strip()
+    return variables
+
+
 NATIVE_KW = KwargInfo(
     'native', bool,
     default=False,
@@ -129,7 +168,10 @@ REQUIRED_KW: KwargInfo[T.Union[bool, UserFeatureOption]] = KwargInfo(
     # TODO: extract_required_kwarg could be converted to a convertor
 )
 
-def _env_validator(value: T.Union[EnvironmentVariables, T.List['TYPE_var'], T.Dict[str, 'TYPE_var'], str, None]) -> T.Optional[str]:
+DISABLER_KW: KwargInfo[bool] = KwargInfo('disabler', bool, default=False)
+
+def _env_validator(value: T.Union[EnvironmentVariables, T.List['TYPE_var'], T.Dict[str, 'TYPE_var'], str, None],
+                   allow_dict_list: bool = True) -> T.Optional[str]:
     def _splitter(v: str) -> T.Optional[str]:
         split = v.split('=', 1)
         if len(split) == 1:
@@ -150,12 +192,18 @@ def _env_validator(value: T.Union[EnvironmentVariables, T.List['TYPE_var'], T.Di
     elif isinstance(value, dict):
         # We don't need to spilt here, just do the type checking
         for k, dv in value.items():
-            if not isinstance(dv, str):
+            if allow_dict_list:
+                if any(i for i in listify(dv) if not isinstance(i, str)):
+                    return f"Dictionary element {k} must be a string or list of strings not {dv!r}"
+            elif not isinstance(dv, str):
                 return f"Dictionary element {k} must be a string not {dv!r}"
     # We know that otherwise we have an EnvironmentVariables object or None, and
     # we're okay at this point
     return None
 
+def _options_validator(value: T.Union[EnvironmentVariables, T.List['TYPE_var'], T.Dict[str, 'TYPE_var'], str, None]) -> T.Optional[str]:
+    # Reusing the env validator is a littl overkill, but nicer than duplicating the code
+    return _env_validator(value, allow_dict_list=False)
 
 def split_equal_string(input: str) -> T.Tuple[str, str]:
     """Split a string in the form `x=y`
@@ -165,18 +213,25 @@ def split_equal_string(input: str) -> T.Tuple[str, str]:
     a, b = input.split('=', 1)
     return (a, b)
 
+_FullEnvInitValueType = T.Union[EnvironmentVariables, T.List[str], T.List[T.List[str]], EnvInitValueType, str, None]
 
-def _env_convertor(value: T.Union[EnvironmentVariables, T.List[str], T.List[T.List[str]], T.Dict[str, str], str, None]) -> EnvironmentVariables:
+# Split _env_convertor() and env_convertor_with_method() to make mypy happy.
+# It does not want extra arguments in KwargInfo convertor callable.
+def env_convertor_with_method(value: _FullEnvInitValueType,
+                              init_method: Literal['set', 'prepend', 'append'] = 'set',
+                              separator: str = os.pathsep) -> EnvironmentVariables:
     if isinstance(value, str):
-        return EnvironmentVariables(dict([split_equal_string(value)]))
+        return EnvironmentVariables(dict([split_equal_string(value)]), init_method, separator)
     elif isinstance(value, list):
-        return EnvironmentVariables(dict(split_equal_string(v) for v in listify(value)))
+        return EnvironmentVariables(dict(split_equal_string(v) for v in listify(value)), init_method, separator)
     elif isinstance(value, dict):
-        return EnvironmentVariables(value)
+        return EnvironmentVariables(value, init_method, separator)
     elif value is None:
         return EnvironmentVariables()
     return value
 
+def _env_convertor(value: _FullEnvInitValueType) -> EnvironmentVariables:
+    return env_convertor_with_method(value)
 
 ENV_KW: KwargInfo[T.Union[EnvironmentVariables, T.List, T.Dict, str, None]] = KwargInfo(
     'env',
@@ -191,6 +246,7 @@ DEPFILE_KW: KwargInfo[T.Optional[str]] = KwargInfo(
     validator=lambda x: 'Depfile must be a plain filename with a subdirectory' if has_path_sep(x) else None
 )
 
+# TODO: CustomTargetIndex should be supported here as well
 DEPENDS_KW: KwargInfo[T.List[T.Union[BuildTarget, CustomTarget]]] = KwargInfo(
     'depends',
     ContainerTypeInfo(list, (BuildTarget, CustomTarget)),
@@ -227,8 +283,7 @@ OVERRIDE_OPTIONS_KW: KwargInfo[T.List[str]] = KwargInfo(
     ContainerTypeInfo(list, str),
     listify=True,
     default=[],
-    # Reusing the env validator is a littl overkill, but nicer than duplicating the code
-    validator=_env_validator,
+    validator=_options_validator,
     convertor=_override_options_convertor,
 )
 
@@ -241,16 +296,25 @@ def _output_validator(outputs: T.List[str]) -> T.Optional[str]:
             return 'Output must not consist only of whitespace.'
         elif has_path_sep(i):
             return f'Output {i!r} must not contain a path segment.'
+        elif '@INPUT' in i:
+            return f'output {i!r} contains "@INPUT", which is invalid. Did you mean "@PLAINNAME@" or "@BASENAME@?'
 
     return None
 
-CT_OUTPUT_KW: KwargInfo[T.List[str]] = KwargInfo(
+MULTI_OUTPUT_KW: KwargInfo[T.List[str]] = KwargInfo(
     'output',
     ContainerTypeInfo(list, str, allow_empty=False),
     listify=True,
     required=True,
     default=[],
     validator=_output_validator,
+)
+
+OUTPUT_KW: KwargInfo[str] = KwargInfo(
+    'output',
+    str,
+    required=True,
+    validator=lambda x: _output_validator([x])
 )
 
 CT_INPUT_KW: KwargInfo[T.List[T.Union[str, File, ExternalProgram, BuildTarget, CustomTarget, CustomTargetIndex, ExtractedObjects, GeneratedList]]] = KwargInfo(
@@ -266,22 +330,113 @@ CT_INSTALL_TAG_KW: KwargInfo[T.List[T.Union[str, bool]]] = KwargInfo(
     listify=True,
     default=[],
     since='0.60.0',
+    convertor=lambda x: [y if isinstance(y, str) else None for y in x],
 )
+
+INSTALL_TAG_KW: KwargInfo[T.Optional[str]] = KwargInfo('install_tag', (str, NoneType))
 
 INSTALL_KW = KwargInfo('install', bool, default=False)
 
-CT_INSTALL_DIR_KW: KwargInfo[T.List[T.Union[str, bool]]] = KwargInfo(
+CT_INSTALL_DIR_KW: KwargInfo[T.List[T.Union[str, Literal[False]]]] = KwargInfo(
     'install_dir',
     ContainerTypeInfo(list, (str, bool)),
     listify=True,
     default=[],
+    validator=lambda x: 'must be `false` if boolean' if True in x else None,
 )
 
 CT_BUILD_BY_DEFAULT: KwargInfo[T.Optional[bool]] = KwargInfo('build_by_default', (bool, type(None)), since='0.40.0')
 
+CT_BUILD_ALWAYS: KwargInfo[T.Optional[bool]] = KwargInfo(
+    'build_always', (bool, NoneType),
+    deprecated='0.47.0',
+    deprecated_message='combine build_by_default and build_always_stale instead.',
+)
+
+CT_BUILD_ALWAYS_STALE: KwargInfo[T.Optional[bool]] = KwargInfo(
+    'build_always_stale', (bool, NoneType),
+    since='0.47.0',
+)
+
+INSTALL_DIR_KW: KwargInfo[T.Optional[str]] = KwargInfo('install_dir', (str, NoneType))
+
 INCLUDE_DIRECTORIES: KwargInfo[T.List[T.Union[str, IncludeDirs]]] = KwargInfo(
-    'include_dirs',
+    'include_directories',
     ContainerTypeInfo(list, (str, IncludeDirs)),
     listify=True,
     default=[],
 )
+
+# for cases like default_options and override_options
+DEFAULT_OPTIONS: KwargInfo[T.List[str]] = KwargInfo(
+    'default_options',
+    ContainerTypeInfo(list, str),
+    listify=True,
+    default=[],
+    validator=_options_validator,
+)
+
+ENV_METHOD_KW = KwargInfo('method', str, default='set', since='0.62.0',
+    validator=in_set_validator({'set', 'prepend', 'append'}))
+
+ENV_SEPARATOR_KW = KwargInfo('separator', str, default=os.pathsep)
+
+DEPENDENCIES_KW: KwargInfo[T.List[Dependency]] = KwargInfo(
+    'dependencies',
+    # InternalDependency is a subclass of Dependency, but we want to
+    # print it in error messages
+    ContainerTypeInfo(list, (Dependency, InternalDependency)),
+    listify=True,
+    default=[],
+)
+
+D_MODULE_VERSIONS_KW: KwargInfo[T.List[T.Union[str, int]]] = KwargInfo(
+    'd_module_versions',
+    ContainerTypeInfo(list, (str, int)),
+    listify=True,
+    default=[],
+)
+
+_link_with_error = '''can only be self-built targets, external dependencies (including libraries) must go in "dependencies".'''
+
+# Allow Dependency for the better error message? But then in other cases it will list this as one of the allowed types!
+LINK_WITH_KW: KwargInfo[T.List[T.Union[BothLibraries, SharedLibrary, StaticLibrary, CustomTarget, CustomTargetIndex, Jar, Executable]]] = KwargInfo(
+    'link_with',
+    ContainerTypeInfo(list, (BothLibraries, SharedLibrary, StaticLibrary, CustomTarget, CustomTargetIndex, Jar, Executable, Dependency)),
+    listify=True,
+    default=[],
+    validator=lambda x: _link_with_error if isinstance(x, Dependency) else None,
+)
+
+def link_whole_validator(values: T.List[T.Union[StaticLibrary, CustomTarget, CustomTargetIndex, Dependency]]) -> T.Optional[str]:
+    for l in values:
+        if isinstance(l, (CustomTarget, CustomTargetIndex)) and l.links_dynamically():
+            return f'{type(l).__name__} returning a shared library is not allowed'
+        if isinstance(l, Dependency):
+            return _link_with_error
+    return None
+
+LINK_WHOLE_KW: KwargInfo[T.List[T.Union[BothLibraries, StaticLibrary, CustomTarget, CustomTargetIndex]]] = KwargInfo(
+    'link_whole',
+    ContainerTypeInfo(list, (BothLibraries, StaticLibrary, CustomTarget, CustomTargetIndex, Dependency)),
+    listify=True,
+    default=[],
+    validator=link_whole_validator,
+)
+
+SOURCES_KW: KwargInfo[T.List[T.Union[str, File, CustomTarget, CustomTargetIndex, GeneratedList]]] = KwargInfo(
+    'sources',
+    ContainerTypeInfo(list, (str, File, CustomTarget, CustomTargetIndex, GeneratedList)),
+    listify=True,
+    default=[],
+)
+
+VARIABLES_KW: KwargInfo[T.Dict[str, str]] = KwargInfo(
+    'variables',
+    (ContainerTypeInfo(list, str), ContainerTypeInfo(dict, str)),
+    validator=variables_validator,
+    convertor=variables_convertor,
+    default={},
+)
+
+PRESERVE_PATH_KW: KwargInfo[bool] = KwargInfo('preserve_path', bool, default=False, since='0.63.0')

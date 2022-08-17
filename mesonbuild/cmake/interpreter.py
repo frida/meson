@@ -14,26 +14,26 @@
 
 # This class contains the basic functionality needed to run any interpreter
 # or an interpreter-based tool.
+from __future__ import annotations
 
-from .common import CMakeException, CMakeTarget, TargetOptions, CMakeConfiguration, language_map, backend_generator_map, cmake_get_generator_args, check_cmake_args
-from .client import CMakeClient, RequestCMakeInputs, RequestConfigure, RequestCompute, RequestCodeModel, ReplyCMakeInputs, ReplyCodeModel
+from functools import lru_cache
+from os import environ
+from pathlib import Path
+import re
+import typing as T
+
+from .common import CMakeException, CMakeTarget, language_map, cmake_get_generator_args, check_cmake_args
 from .fileapi import CMakeFileAPI
 from .executor import CMakeExecutor
 from .toolchain import CMakeToolchain, CMakeExecScope
-from .traceparser import CMakeTraceParser, CMakeGeneratorTarget
+from .traceparser import CMakeTraceParser
+from .tracetargets import resolve_cmake_trace_targets
 from .. import mlog, mesonlib
-from ..mesonlib import MachineChoice, OrderedSet, version_compare, path_is_in_root, relative_to_if_possible, OptionKey
-from ..mesondata import mesondata
+from ..mesonlib import MachineChoice, OrderedSet, path_is_in_root, relative_to_if_possible, OptionKey
+from ..mesondata import DataFile
 from ..compilers.compilers import assembler_suffixes, lang_suffixes, header_suffixes, obj_suffixes, lib_suffixes, is_header
 from ..programs import ExternalProgram
 from ..coredata import FORBIDDEN_TARGET_NAMES
-from enum import Enum
-from functools import lru_cache
-from pathlib import Path
-import typing as T
-import re
-from os import environ
-
 from ..mparser import (
     Token,
     BaseNode,
@@ -52,6 +52,8 @@ from ..mparser import (
 
 
 if T.TYPE_CHECKING:
+    from .common import CMakeConfiguration, TargetOptions
+    from .traceparser import CMakeGeneratorTarget
     from .._typing import ImmutableListProtocol
     from ..build import Build
     from ..backend.backends import Backend
@@ -342,84 +344,12 @@ class ConverterTarget:
         if tgt:
             self.depends_raw = trace.targets[self.cmake_name].depends
 
-            # TODO refactor this copy paste from CMakeDependency for future releases
-            reg_is_lib = re.compile(r'^(-l[a-zA-Z0-9_]+|-l?pthread)$')
-            to_process = [self.cmake_name]
-            processed = []
-            while len(to_process) > 0:
-                curr = to_process.pop(0)
+            rtgt = resolve_cmake_trace_targets(self.cmake_name, trace, self.env)
+            self.includes            += [Path(x) for x in rtgt.include_directories]
+            self.link_flags          += rtgt.link_flags
+            self.public_compile_opts += rtgt.public_compile_opts
+            self.link_libraries      += rtgt.libraries
 
-                if curr in processed or curr not in trace.targets:
-                    continue
-
-                tgt = trace.targets[curr]
-                cfgs = []
-                cfg = ''
-                otherDeps = []
-                libraries = []
-                mlog.debug(str(tgt))
-
-                if 'INTERFACE_INCLUDE_DIRECTORIES' in tgt.properties:
-                    self.includes += [Path(x) for x in tgt.properties['INTERFACE_INCLUDE_DIRECTORIES'] if x]
-
-                if 'INTERFACE_LINK_OPTIONS' in tgt.properties:
-                    self.link_flags += [x for x in tgt.properties['INTERFACE_LINK_OPTIONS'] if x]
-
-                if 'INTERFACE_COMPILE_DEFINITIONS' in tgt.properties:
-                    self.public_compile_opts += ['-D' + re.sub('^-D', '', x) for x in tgt.properties['INTERFACE_COMPILE_DEFINITIONS'] if x]
-
-                if 'INTERFACE_COMPILE_OPTIONS' in tgt.properties:
-                    self.public_compile_opts += [x for x in tgt.properties['INTERFACE_COMPILE_OPTIONS'] if x]
-
-                if 'IMPORTED_CONFIGURATIONS' in tgt.properties:
-                    cfgs += [x for x in tgt.properties['IMPORTED_CONFIGURATIONS'] if x]
-                    cfg = cfgs[0]
-
-                if 'CONFIGURATIONS' in tgt.properties:
-                    cfgs += [x for x in tgt.properties['CONFIGURATIONS'] if x]
-                    cfg = cfgs[0]
-
-                is_debug = self.env.coredata.get_option(OptionKey('debug'))
-                if is_debug:
-                    if 'DEBUG' in cfgs:
-                        cfg = 'DEBUG'
-                    elif 'RELEASE' in cfgs:
-                        cfg = 'RELEASE'
-                else:
-                    if 'RELEASE' in cfgs:
-                        cfg = 'RELEASE'
-
-                if f'IMPORTED_IMPLIB_{cfg}' in tgt.properties:
-                    libraries += [x for x in tgt.properties[f'IMPORTED_IMPLIB_{cfg}'] if x]
-                elif 'IMPORTED_IMPLIB' in tgt.properties:
-                    libraries += [x for x in tgt.properties['IMPORTED_IMPLIB'] if x]
-                elif f'IMPORTED_LOCATION_{cfg}' in tgt.properties:
-                    libraries += [x for x in tgt.properties[f'IMPORTED_LOCATION_{cfg}'] if x]
-                elif 'IMPORTED_LOCATION' in tgt.properties:
-                    libraries += [x for x in tgt.properties['IMPORTED_LOCATION'] if x]
-
-                if 'LINK_LIBRARIES' in tgt.properties:
-                    otherDeps += [x for x in tgt.properties['LINK_LIBRARIES'] if x]
-
-                if 'INTERFACE_LINK_LIBRARIES' in tgt.properties:
-                    otherDeps += [x for x in tgt.properties['INTERFACE_LINK_LIBRARIES'] if x]
-
-                if f'IMPORTED_LINK_DEPENDENT_LIBRARIES_{cfg}' in tgt.properties:
-                    otherDeps += [x for x in tgt.properties[f'IMPORTED_LINK_DEPENDENT_LIBRARIES_{cfg}'] if x]
-                elif 'IMPORTED_LINK_DEPENDENT_LIBRARIES' in tgt.properties:
-                    otherDeps += [x for x in tgt.properties['IMPORTED_LINK_DEPENDENT_LIBRARIES'] if x]
-
-                for j in otherDeps:
-                    if j in trace.targets:
-                        to_process += [j]
-                    elif reg_is_lib.match(j) or Path(j).exists():
-                        libraries += [j]
-
-                for j in libraries:
-                    if j not in self.link_libraries:
-                        self.link_libraries += [j]
-
-                processed += [curr]
         elif self.type.upper() not in ['EXECUTABLE', 'OBJECT_LIBRARY']:
             mlog.warning('CMake: Target', mlog.bold(self.cmake_name), 'not found in CMake trace. This can lead to build errors')
 
@@ -737,6 +667,7 @@ class ConverterCustomTarget:
         commands = []  # type: T.List[T.List[T.Union[str, ConverterTarget]]]
         for curr_cmd in self._raw_target.command:
             assert isinstance(curr_cmd, list)
+            assert curr_cmd[0] != '', "An empty string is not a valid executable"
             cmd = []  # type: T.List[T.Union[str, ConverterTarget]]
 
             for j in curr_cmd:
@@ -787,7 +718,7 @@ class ConverterCustomTarget:
             # targets, etc. This reduces the chance of misdetecting input files
             # as outputs from other targets.
             # See https://github.com/mesonbuild/meson/issues/6632
-            if not raw.is_absolute() and (self.current_src_dir / raw).exists():
+            if not raw.is_absolute() and (self.current_src_dir / raw).is_file():
                 self.inputs += [(self.current_src_dir / raw).relative_to(root_src_dir).as_posix()]
             elif raw.is_absolute() and raw.exists() and rel_to_root is not None:
                 self.inputs += [rel_to_root.as_posix()]
@@ -833,10 +764,6 @@ class ConverterCustomTarget:
         mlog.log('  -- inputs:       ', mlog.bold(str(self.inputs)))
         mlog.log('  -- depends:      ', mlog.bold(str(self.depends)))
 
-class CMakeAPI(Enum):
-    SERVER = 1
-    FILE = 2
-
 class CMakeInterpreter:
     def __init__(self, build: 'Build', subdir: Path, src_dir: Path, install_prefix: Path, env: 'Environment', backend: 'Backend'):
         self.build          = build
@@ -849,21 +776,19 @@ class CMakeInterpreter:
         self.for_machine    = MachineChoice.HOST # TODO make parameter
         self.backend_name   = backend.name
         self.linkers        = set()  # type: T.Set[str]
-        self.cmake_api      = CMakeAPI.SERVER
-        self.client         = CMakeClient(self.env)
         self.fileapi        = CMakeFileAPI(self.build_dir)
 
         # Raw CMake results
         self.bs_files          = []    # type: T.List[Path]
         self.codemodel_configs = None  # type: T.Optional[T.List[CMakeConfiguration]]
-        self.raw_trace         = None  # type: T.Optional[str]
+        self.cmake_stderr      = None  # type: T.Optional[str]
 
         # Analysed data
         self.project_name      = ''
         self.languages         = []  # type: T.List[str]
         self.targets           = []  # type: T.List[ConverterTarget]
         self.custom_targets    = []  # type: T.List[ConverterCustomTarget]
-        self.trace             = CMakeTraceParser('', Path('.'))  # Will be replaced in analyse
+        self.trace: CMakeTraceParser
         self.output_target_map = OutputTargetMap(self.build_dir)
 
         # Generated meson data
@@ -881,12 +806,12 @@ class CMakeInterpreter:
     def configure(self, extra_cmake_options: T.List[str]) -> CMakeExecutor:
         # Find CMake
         # TODO: Using MachineChoice.BUILD should always be correct here, but also evaluate the use of self.for_machine
-        cmake_exe = CMakeExecutor(self.env, '>=3.7', MachineChoice.BUILD)
+        cmake_exe = CMakeExecutor(self.env, '>=3.14', MachineChoice.BUILD)
         if not cmake_exe.found():
             raise CMakeException('Unable to find CMake')
-        self.trace = CMakeTraceParser(cmake_exe.version(), self.build_dir, permissive=True)
+        self.trace = CMakeTraceParser(cmake_exe.version(), self.build_dir, self.env, permissive=True)
 
-        preload_file = mesondata['cmake/data/preload.cmake'].write_to_private(self.env)
+        preload_file = DataFile('cmake/data/preload.cmake').write_to_private(self.env)
         toolchain = CMakeToolchain(cmake_exe, self.env, self.for_machine, CMakeExecScope.SUBPROJECT, self.build_dir, preload_file)
         toolchain_file = toolchain.write()
 
@@ -900,9 +825,7 @@ class CMakeInterpreter:
         trace_args = self.trace.trace_args()
         cmcmp_args = [f'-DCMAKE_POLICY_WARNING_{x}=OFF' for x in disable_policy_warnings]
 
-        if version_compare(cmake_exe.version(), '>=3.14'):
-            self.cmake_api = CMakeAPI.FILE
-            self.fileapi.setup_request()
+        self.fileapi.setup_request()
 
         # Run CMake
         mlog.log()
@@ -922,62 +845,36 @@ class CMakeInterpreter:
             final_args = cmake_args + trace_args + cmcmp_args + toolchain.get_cmake_args() + [self.src_dir.as_posix()]
 
             cmake_exe.set_exec_mode(print_cmout=True, always_capture_stderr=self.trace.requires_stderr())
-            rc, _, self.raw_trace = cmake_exe.call(final_args, self.build_dir, env=os_env, disable_cache=True)
+            rc, _, self.cmake_stderr = cmake_exe.call(final_args, self.build_dir, env=os_env, disable_cache=True)
 
         mlog.log()
         h = mlog.green('SUCCEEDED') if rc == 0 else mlog.red('FAILED')
         mlog.log('CMake configuration:', h)
         if rc != 0:
-            raise CMakeException('Failed to configure the CMake subproject')
+            # get the last CMake error - We only need the message function for this:
+            self.trace.functions = {'message': self.trace.functions['message']}
+            self.trace.parse(self.cmake_stderr)
+            error = f': {self.trace.errors[-1]}' if self.trace.errors else ''
+            raise CMakeException(f'Failed to configure the CMake subproject{error}')
 
         return cmake_exe
 
     def initialise(self, extra_cmake_options: T.List[str]) -> None:
-        # Run configure the old way because doing it
-        # with the server doesn't work for some reason
-        # Additionally, the File API requires a configure anyway
-        cmake_exe = self.configure(extra_cmake_options)
+        # Configure the CMake project to generate the file API data
+        self.configure(extra_cmake_options)
 
-        # Continue with the file API If supported
-        if self.cmake_api is CMakeAPI.FILE:
-            # Parse the result
-            self.fileapi.load_reply()
+        # Parse the result
+        self.fileapi.load_reply()
 
-            # Load the buildsystem file list
-            cmake_files = self.fileapi.get_cmake_sources()
-            self.bs_files = [x.file for x in cmake_files if not x.is_cmake and not x.is_temp]
-            self.bs_files = [relative_to_if_possible(x, Path(self.env.get_source_dir())) for x in self.bs_files]
-            self.bs_files = [x for x in self.bs_files if not path_is_in_root(x, Path(self.env.get_build_dir()), resolve=True)]
-            self.bs_files = list(OrderedSet(self.bs_files))
-
-            # Load the codemodel configurations
-            self.codemodel_configs = self.fileapi.get_cmake_configurations()
-            return
-
-        with self.client.connect(cmake_exe):
-            generator = backend_generator_map[self.backend_name]
-            self.client.do_handshake(self.src_dir, self.build_dir, generator, 1)
-
-            # Do a second configure to initialise the server
-            self.client.query_checked(RequestConfigure(), 'CMake server configure')
-
-            # Generate the build system files
-            self.client.query_checked(RequestCompute(), 'Generating build system files')
-
-            # Get CMake build system files
-            bs_reply = self.client.query_checked(RequestCMakeInputs(), 'Querying build system files')
-            assert isinstance(bs_reply, ReplyCMakeInputs)
-
-            # Now get the CMake code model
-            cm_reply = self.client.query_checked(RequestCodeModel(), 'Querying the CMake code model')
-            assert isinstance(cm_reply, ReplyCodeModel)
-
-        src_dir = bs_reply.src_dir
-        self.bs_files = [x.file for x in bs_reply.build_files if not x.is_cmake and not x.is_temp]
-        self.bs_files = [relative_to_if_possible(src_dir / x, Path(self.env.get_source_dir()), resolve=True) for x in self.bs_files]
+        # Load the buildsystem file list
+        cmake_files = self.fileapi.get_cmake_sources()
+        self.bs_files = [x.file for x in cmake_files if not x.is_cmake and not x.is_temp]
+        self.bs_files = [relative_to_if_possible(x, Path(self.env.get_source_dir())) for x in self.bs_files]
         self.bs_files = [x for x in self.bs_files if not path_is_in_root(x, Path(self.env.get_build_dir()), resolve=True)]
         self.bs_files = list(OrderedSet(self.bs_files))
-        self.codemodel_configs = cm_reply.configs
+
+        # Load the codemodel configurations
+        self.codemodel_configs = self.fileapi.get_cmake_configurations()
 
     def analyse(self) -> None:
         if self.codemodel_configs is None:
@@ -990,7 +887,7 @@ class CMakeInterpreter:
         self.custom_targets = []
 
         # Parse the trace
-        self.trace.parse(self.raw_trace)
+        self.trace.parse(self.cmake_stderr)
 
         # Find all targets
         added_target_names = []  # type: T.List[str]

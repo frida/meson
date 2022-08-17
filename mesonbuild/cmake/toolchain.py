@@ -11,11 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 from pathlib import Path
 from .traceparser import CMakeTraceParser
 from ..envconfig import CMakeSkipCompilerTest
-from ..mesonlib import MachineChoice
 from ..compilers import VisualStudioLikeCompiler
 from .common import language_map, cmake_get_generator_args
 from .. import mlog
@@ -29,6 +29,7 @@ if T.TYPE_CHECKING:
     from .executor import CMakeExecutor
     from ..environment import Environment
     from ..compilers import Compiler
+    from ..mesonlib import MachineChoice
 
 class CMakeExecScope(Enum):
     SUBPROJECT = 'subproject'
@@ -232,7 +233,7 @@ class CMakeToolchain:
         temp_toolchain_file.write_text(CMakeToolchain._print_vars(self.variables), encoding='utf-8')
 
         # Configure
-        trace = CMakeTraceParser(self.cmakebin.version(), build_dir)
+        trace = CMakeTraceParser(self.cmakebin.version(), build_dir, self.env)
         self.cmakebin.set_exec_mode(print_cmout=False, always_capture_stderr=trace.requires_stderr())
         cmake_args = []
         cmake_args += trace.trace_args()

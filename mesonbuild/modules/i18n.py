@@ -11,16 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 from os import path
-import shutil
 import typing as T
 
 from . import ExtensionModule, ModuleReturnValue
 from .. import build
 from .. import mesonlib
 from .. import mlog
-from ..interpreter.type_checking import CT_BUILD_BY_DEFAULT, CT_INPUT_KW, CT_INSTALL_DIR_KW, CT_INSTALL_TAG_KW, CT_OUTPUT_KW, INSTALL_KW, NoneType, in_set_validator
+from ..interpreter.type_checking import CT_BUILD_BY_DEFAULT, CT_INPUT_KW, INSTALL_TAG_KW, OUTPUT_KW, INSTALL_DIR_KW, INSTALL_KW, NoneType, in_set_validator
 from ..interpreterbase import FeatureNew
 from ..interpreterbase.decorators import ContainerTypeInfo, KwargInfo, noPosargs, typed_kwargs, typed_pos_args
 from ..scripts.gettext import read_linguas
@@ -40,11 +40,11 @@ if T.TYPE_CHECKING:
             str, build.BuildTarget, build.CustomTarget, build.CustomTargetIndex,
             build.ExtractedObjects, build.GeneratedList, ExternalProgram,
             mesonlib.File]]
-        output: T.List[str]
+        output: str
         build_by_default: bool
         install: bool
-        install_dir: T.List[T.Union[str, bool]]
-        install_tag: T.List[str]
+        install_dir: T.Optional[str]
+        install_tag: T.Optional[str]
         args: T.List[str]
         data_dirs: T.List[str]
         po_dir: str
@@ -58,6 +58,20 @@ if T.TYPE_CHECKING:
         install_dir: T.Optional[str]
         languages: T.List[str]
         preset: T.Optional[str]
+
+    class ItsJoinFile(TypedDict):
+
+        input: T.List[T.Union[
+            str, build.BuildTarget, build.CustomTarget, build.CustomTargetIndex,
+            build.ExtractedObjects, build.GeneratedList, ExternalProgram,
+            mesonlib.File]]
+        output: str
+        build_by_default: bool
+        install: bool
+        install_dir: T.Optional[str]
+        install_tag: T.Optional[str]
+        its_files: T.List[str]
+        mo_targets: T.List[T.Union[build.BuildTarget, build.CustomTarget, build.CustomTargetIndex]]
 
 
 _ARGS: KwargInfo[T.List[str]] = KwargInfo(
@@ -115,11 +129,15 @@ class I18nModule(ExtensionModule):
         self.methods.update({
             'merge_file': self.merge_file,
             'gettext': self.gettext,
+            'itstool_join': self.itstool_join,
         })
-
-    @staticmethod
-    def nogettext_warning() -> None:
-        mlog.warning('Gettext not found, all translation targets will be ignored.', once=True)
+        self.tools: T.Dict[str, T.Optional[ExternalProgram]] = {
+            'itstool': None,
+            'msgfmt': None,
+            'msginit': None,
+            'msgmerge': None,
+            'xgettext': None,
+        }
 
     @staticmethod
     def _get_data_dirs(state: 'ModuleState', dirs: T.Iterable[str]) -> T.List[str]:
@@ -133,19 +151,18 @@ class I18nModule(ExtensionModule):
         'i18n.merge_file',
         CT_BUILD_BY_DEFAULT,
         CT_INPUT_KW,
-        CT_INSTALL_DIR_KW,
-        CT_INSTALL_TAG_KW,
-        CT_OUTPUT_KW,
+        KwargInfo('install_dir', (str, NoneType)),
+        INSTALL_TAG_KW,
+        OUTPUT_KW,
         INSTALL_KW,
         _ARGS.evolve(since='0.51.0'),
-        _DATA_DIRS,
+        _DATA_DIRS.evolve(since='0.41.0'),
         KwargInfo('po_dir', str, required=True),
         KwargInfo('type', str, default='xml', validator=in_set_validator({'xml', 'desktop'})),
     )
     def merge_file(self, state: 'ModuleState', args: T.List['TYPE_var'], kwargs: 'MergeFile') -> ModuleReturnValue:
-        if not shutil.which('xgettext'):
-            self.nogettext_warning()
-            return ModuleReturnValue(None, [])
+        if self.tools['msgfmt'] is None or not self.tools['msgfmt'].found():
+            self.tools['msgfmt'] = state.find_program('msgfmt', for_machine=mesonlib.MachineChoice.BUILD)
         podir = path.join(state.build_to_src, state.subdir, kwargs['po_dir'])
 
         ddirs = self._get_data_dirs(state, kwargs['data_dirs'])
@@ -156,11 +173,11 @@ class I18nModule(ExtensionModule):
         command.extend(state.environment.get_build_command())
         command.extend([
             '--internal', 'msgfmthelper',
-            '@INPUT@', '@OUTPUT@', kwargs['type'], podir
+            '--msgfmt=' + self.tools['msgfmt'].get_path(),
         ])
         if datadirs:
             command.append(datadirs)
-
+        command.extend(['@INPUT@', '@OUTPUT@', kwargs['type'], podir])
         if kwargs['args']:
             command.append('--')
             command.extend(kwargs['args'])
@@ -169,28 +186,32 @@ class I18nModule(ExtensionModule):
         if build_by_default is None:
             build_by_default = kwargs['install']
 
-        real_kwargs = {
-            'build_by_default': build_by_default,
-            'command': command,
-            'install': kwargs['install'],
-            'install_dir': kwargs['install_dir'],
-            'output': kwargs['output'],
-            'input': kwargs['input'],
-            'install_tag': kwargs['install_tag'],
-        }
+        install_dir = [kwargs['install_dir']] if kwargs['install_dir'] is not None else None
+        install_tag = [kwargs['install_tag']] if kwargs['install_tag'] is not None else None
 
-        ct = build.CustomTarget('', state.subdir, state.subproject,
-                T.cast(T.Dict[str, T.Any], real_kwargs))
+        ct = build.CustomTarget(
+            '',
+            state.subdir,
+            state.subproject,
+            state.environment,
+            command,
+            kwargs['input'],
+            [kwargs['output']],
+            build_by_default=build_by_default,
+            install=kwargs['install'],
+            install_dir=install_dir,
+            install_tag=install_tag,
+        )
 
         return ModuleReturnValue(ct, [ct])
 
-    @typed_pos_args('i81n.gettex', str)
+    @typed_pos_args('i81n.gettext', str)
     @typed_kwargs(
         'i18n.gettext',
         _ARGS,
-        _DATA_DIRS,
+        _DATA_DIRS.evolve(since='0.36.0'),
         INSTALL_KW.evolve(default=True),
-        KwargInfo('install_dir', (str, NoneType), since='0.50.0'),
+        INSTALL_DIR_KW.evolve(since='0.50.0'),
         KwargInfo('languages', ContainerTypeInfo(list, str), default=[], listify=True),
         KwargInfo(
             'preset',
@@ -200,9 +221,18 @@ class I18nModule(ExtensionModule):
         ),
     )
     def gettext(self, state: 'ModuleState', args: T.Tuple[str], kwargs: 'Gettext') -> ModuleReturnValue:
-        if not shutil.which('xgettext'):
-            self.nogettext_warning()
-            return ModuleReturnValue(None, [])
+        for tool, strict in [('msgfmt', True), ('msginit', False), ('msgmerge', False), ('xgettext', False)]:
+            if self.tools[tool] is None:
+                self.tools[tool] = state.find_program(tool, required=False, for_machine=mesonlib.MachineChoice.BUILD)
+            # still not found?
+            if not self.tools[tool].found():
+                if strict:
+                    mlog.warning('Gettext not found, all translation (po) targets will be ignored.',
+                                 once=True, location=state.current_node)
+                    return ModuleReturnValue(None, [])
+                else:
+                    mlog.warning(f'{tool!r} not found, maintainer targets will not work',
+                                 once=True, fatal=False, location=state.current_node)
         packagename = args[0]
         pkg_arg = f'--pkgname={packagename}'
 
@@ -224,11 +254,17 @@ class I18nModule(ExtensionModule):
         extra_arg = '--extra-args=' + '@@'.join(extra_args) if extra_args else None
 
         potargs = state.environment.get_build_command() + ['--internal', 'gettext', 'pot', pkg_arg]
+        potargs.append(f'--source-root={state.source_root}')
+        if state.subdir:
+            potargs.append(f'--subdir={state.subdir}')
         if datadirs:
             potargs.append(datadirs)
         if extra_arg:
             potargs.append(extra_arg)
-        pottarget = build.RunTarget(packagename + '-pot', potargs, [], state.subdir, state.subproject)
+        if self.tools['xgettext'].found():
+            potargs.append('--xgettext=' + self.tools['xgettext'].get_path())
+        pottarget = build.RunTarget(packagename + '-pot', potargs, [], state.subdir, state.subproject,
+                                    state.environment, default_env=False)
         targets.append(pottarget)
 
         install = kwargs['install']
@@ -239,35 +275,112 @@ class I18nModule(ExtensionModule):
         for l in languages:
             po_file = mesonlib.File.from_source_file(state.environment.source_dir,
                                                      state.subdir, l+'.po')
-            gmo_kwargs = {'command': ['msgfmt', '@INPUT@', '-o', '@OUTPUT@'],
-                          'input': po_file,
-                          'output': packagename+'.mo',
-                          'install': install,
-                          # We have multiple files all installed as packagename+'.mo' in different install subdirs.
-                          # What we really wanted to do, probably, is have a rename: kwarg, but that's not available
-                          # to custom_targets. Crude hack: set the build target's subdir manually.
-                          # Bonus: the build tree has something usable as an uninstalled bindtextdomain() target dir.
-                          'install_dir': path.join(install_dir, l, 'LC_MESSAGES'),
-                          'install_tag': 'i18n',
-                          }
-            gmotarget = build.CustomTarget(f'{packagename}-{l}.mo', path.join(state.subdir, l, 'LC_MESSAGES'), state.subproject, gmo_kwargs)
+            gmotarget = build.CustomTarget(
+                f'{packagename}-{l}.mo',
+                path.join(state.subdir, l, 'LC_MESSAGES'),
+                state.subproject,
+                state.environment,
+                [self.tools['msgfmt'], '@INPUT@', '-o', '@OUTPUT@'],
+                [po_file],
+                [f'{packagename}.mo'],
+                install=install,
+                # We have multiple files all installed as packagename+'.mo' in different install subdirs.
+                # What we really wanted to do, probably, is have a rename: kwarg, but that's not available
+                # to custom_targets. Crude hack: set the build target's subdir manually.
+                # Bonus: the build tree has something usable as an uninstalled bindtextdomain() target dir.
+                install_dir=[path.join(install_dir, l, 'LC_MESSAGES')],
+                install_tag=['i18n'],
+            )
             targets.append(gmotarget)
             gmotargets.append(gmotarget)
 
-        allgmotarget = build.AliasTarget(packagename + '-gmo', gmotargets, state.subdir, state.subproject)
+        allgmotarget = build.AliasTarget(packagename + '-gmo', gmotargets, state.subdir, state.subproject,
+                                         state.environment)
         targets.append(allgmotarget)
 
         updatepoargs = state.environment.get_build_command() + ['--internal', 'gettext', 'update_po', pkg_arg]
+        updatepoargs.append(f'--source-root={state.source_root}')
+        if state.subdir:
+            updatepoargs.append(f'--subdir={state.subdir}')
         if lang_arg:
             updatepoargs.append(lang_arg)
         if datadirs:
             updatepoargs.append(datadirs)
         if extra_arg:
             updatepoargs.append(extra_arg)
-        updatepotarget = build.RunTarget(packagename + '-update-po', updatepoargs, [], state.subdir, state.subproject)
+        for tool in ['msginit', 'msgmerge']:
+            if self.tools[tool].found():
+                updatepoargs.append(f'--{tool}=' + self.tools[tool].get_path())
+        updatepotarget = build.RunTarget(packagename + '-update-po', updatepoargs, [], state.subdir, state.subproject,
+                                         state.environment, default_env=False)
         targets.append(updatepotarget)
 
         return ModuleReturnValue([gmotargets, pottarget, updatepotarget], targets)
+
+    @FeatureNew('i18n.itstool_join', '0.62.0')
+    @noPosargs
+    @typed_kwargs(
+        'i18n.itstool_join',
+        CT_BUILD_BY_DEFAULT,
+        CT_INPUT_KW,
+        KwargInfo('install_dir', (str, NoneType)),
+        INSTALL_TAG_KW,
+        OUTPUT_KW,
+        INSTALL_KW,
+        _ARGS.evolve(),
+        KwargInfo('its_files', ContainerTypeInfo(list, str)),
+        KwargInfo('mo_targets', ContainerTypeInfo(list, build.CustomTarget), required=True),
+    )
+    def itstool_join(self, state: 'ModuleState', args: T.List['TYPE_var'], kwargs: 'ItsJoinFile') -> ModuleReturnValue:
+        if self.tools['itstool'] is None:
+            self.tools['itstool'] = state.find_program('itstool', for_machine=mesonlib.MachineChoice.BUILD)
+        mo_targets = kwargs['mo_targets']
+        its_files = kwargs.get('its_files', [])
+
+        mo_fnames = []
+        for target in mo_targets:
+            mo_fnames.append(path.join(target.get_subdir(), target.get_outputs()[0]))
+
+        command: T.List[T.Union[str, build.BuildTarget, build.CustomTarget,
+                                build.CustomTargetIndex, 'ExternalProgram', mesonlib.File]] = []
+        command.extend(state.environment.get_build_command())
+        command.extend([
+            '--internal', 'itstool', 'join',
+            '-i', '@INPUT@',
+            '-o', '@OUTPUT@',
+            '--itstool=' + self.tools['itstool'].get_path(),
+        ])
+        if its_files:
+            for fname in its_files:
+                if not path.isabs(fname):
+                    fname = path.join(state.environment.source_dir, state.subdir, fname)
+                command.extend(['--its', fname])
+        command.extend(mo_fnames)
+
+        build_by_default = kwargs['build_by_default']
+        if build_by_default is None:
+            build_by_default = kwargs['install']
+
+        install_dir = [kwargs['install_dir']] if kwargs['install_dir'] is not None else None
+        install_tag = [kwargs['install_tag']] if kwargs['install_tag'] is not None else None
+
+        ct = build.CustomTarget(
+            '',
+            state.subdir,
+            state.subproject,
+            state.environment,
+            command,
+            kwargs['input'],
+            [kwargs['output']],
+            build_by_default=build_by_default,
+            extra_depends=mo_targets,
+            install=kwargs['install'],
+            install_dir=install_dir,
+            install_tag=install_tag,
+        )
+
+        return ModuleReturnValue(ct, [ct])
+
 
 def initialize(interp: 'Interpreter') -> I18nModule:
     return I18nModule(interp)

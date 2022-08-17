@@ -11,22 +11,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 import re
+import dataclasses
 import functools
 import typing as T
 from pathlib import Path
 
 from .. import mlog
 from .. import mesonlib
-from ..environment import Environment
 
 from .base import DependencyException, SystemDependency
 from .pkgconfig import PkgConfigDependency
 from .misc import threads_factory
 
 if T.TYPE_CHECKING:
-    from ..environment import Properties
+    from ..environment import Environment, Properties
 
 # On windows 3 directory layouts are supported:
 # * The default layout (versioned) installed:
@@ -82,6 +83,10 @@ if T.TYPE_CHECKING:
 #     2.3 Filter the renaining libraries based on the meson requirements (static/shared, etc.)
 #     2.4 Ensure that all libraries have the same boost tag (and are thus compatible)
 #   3. Select the libraries matching the requested modules
+
+@dataclasses.dataclass(eq=False, order=False)
+class UnknownFileException(Exception):
+    path: Path
 
 @functools.total_ordering
 class BoostIncludeDir():
@@ -152,7 +157,7 @@ class BoostLibraryFile():
         elif self.nvsuffix in ['a', 'lib']:
             self.static = True
         else:
-            raise DependencyException(f'Unable to process library extension "{self.nvsuffix}" ({self.path})')
+            raise UnknownFileException(self.path)
 
         # boost_.lib is the dll import library
         if self.basename.startswith('boost_') and self.nvsuffix == 'lib':
@@ -487,8 +492,8 @@ class BoostDependency(SystemDependency):
                 comp_args += c_args
                 link_args += l_args
 
-            comp_args = list(set(comp_args))
-            link_args = list(set(link_args))
+            comp_args = list(mesonlib.OrderedSet(comp_args))
+            link_args = list(mesonlib.OrderedSet(link_args))
 
             self.modules_found = [x.mod_name for x in selected_modules]
             self.modules_found = [x[6:] for x in self.modules_found]
@@ -623,8 +628,15 @@ class BoostDependency(SystemDependency):
                 continue
             if not any([i.name.startswith(x) for x in ['libboost_', 'boost_']]):
                 continue
+            # Windows binaries from SourceForge ship with PDB files alongside
+            # DLLs (#8325).  Ignore them.
+            if i.name.endswith('.pdb'):
+                continue
 
-            libs.add(BoostLibraryFile(i.resolve()))
+            try:
+                libs.add(BoostLibraryFile(i.resolve()))
+            except UnknownFileException as e:
+                mlog.warning('Boost: ignoring unknown file {} under lib directory'.format(e.path.name))
 
         return [x for x in libs if x.is_boost()]  # Filter out no boost libraries
 
@@ -648,7 +660,7 @@ class BoostDependency(SystemDependency):
         try:
             boost_pc = PkgConfigDependency('boost', self.env, {'required': False})
             if boost_pc.found():
-                boost_root = boost_pc.get_pkgconfig_variable('prefix', {'default': None})
+                boost_root = boost_pc.get_pkgconfig_variable('prefix', [], None)
                 if boost_root:
                     roots += [Path(boost_root)]
         except DependencyException:

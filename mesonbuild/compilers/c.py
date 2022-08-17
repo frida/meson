@@ -23,7 +23,7 @@ from .mixins.clike import CLikeCompiler
 from .mixins.ccrx import CcrxCompiler
 from .mixins.xc16 import Xc16Compiler
 from .mixins.compcert import CompCertCompiler
-from .mixins.c2000 import C2000Compiler
+from .mixins.ti import TICompiler
 from .mixins.arm import ArmCompiler, ArmclangCompiler
 from .mixins.visualstudio import MSVCCompiler, ClangClCompiler
 from .mixins.gnu import GnuCompiler
@@ -39,7 +39,7 @@ from .compilers import (
 )
 
 if T.TYPE_CHECKING:
-    from ..coredata import KeyedOptionDictType
+    from ..coredata import MutableKeyedOptionDictType, KeyedOptionDictType
     from ..dependencies import Dependency
     from ..envconfig import MachineInfo
     from ..environment import Environment
@@ -53,9 +53,7 @@ else:
 
 
 class CCompiler(CLikeCompiler, Compiler):
-
-    @staticmethod
-    def attribute_check_func(name: str) -> str:
+    def attribute_check_func(self, name: str) -> str:
         try:
             return C_FUNC_ATTRIBUTES[name]
         except KeyError:
@@ -96,7 +94,7 @@ class CCompiler(CLikeCompiler, Compiler):
         return self.compiles(t.format(**fargs), env, extra_args=extra_args,
                              dependencies=dependencies)
 
-    def get_options(self) -> 'KeyedOptionDictType':
+    def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = super().get_options()
         opts.update({
             OptionKey('std', machine=self.for_machine, lang=self.language): coredata.UserComboOption(
@@ -120,7 +118,7 @@ class _ClangCStds(CompilerMixinBase):
     _C18_VERSION = '>=8.0.0'
     _C2X_VERSION = '>=9.0.0'
 
-    def get_options(self) -> 'KeyedOptionDictType':
+    def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = super().get_options()
         c_stds = ['c89', 'c99', 'c11']
         g_stds = ['gnu89', 'gnu99', 'gnu11']
@@ -154,7 +152,7 @@ class ClangCCompiler(_ClangCStds, ClangCompiler, CCompiler):
                           '2': default_warn_args + ['-Wextra'],
                           '3': default_warn_args + ['-Wextra', '-Wpedantic']}
 
-    def get_options(self) -> 'KeyedOptionDictType':
+    def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = super().get_options()
         if self.info.is_windows() or self.info.is_cygwin():
             opts.update({
@@ -183,6 +181,11 @@ class ClangCCompiler(_ClangCStds, ClangCompiler, CCompiler):
         return []
 
 
+class ArmLtdClangCCompiler(ClangCCompiler):
+
+    id = 'armltdclang'
+
+
 class AppleClangCCompiler(ClangCCompiler):
 
     """Handle the differences between Apple Clang and Vanilla Clang.
@@ -197,6 +200,9 @@ class AppleClangCCompiler(ClangCCompiler):
 
 
 class EmscriptenCCompiler(EmscriptenMixin, ClangCCompiler):
+
+    id = 'emscripten'
+
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice, is_cross: bool,
                  info: 'MachineInfo', exe_wrapper: T.Optional['ExternalProgram'] = None,
                  linker: T.Optional['DynamicLinker'] = None,
@@ -207,10 +213,13 @@ class EmscriptenCCompiler(EmscriptenMixin, ClangCCompiler):
         ClangCCompiler.__init__(self, exelist, version, for_machine, is_cross,
                                 info, exe_wrapper=exe_wrapper, linker=linker,
                                 defines=defines, full_version=full_version)
-        self.id = 'emscripten'
 
 
 class ArmclangCCompiler(ArmclangCompiler, CCompiler):
+    '''
+    Keil armclang
+    '''
+
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice, is_cross: bool,
                  info: 'MachineInfo', exe_wrapper: T.Optional['ExternalProgram'] = None,
                  linker: T.Optional['DynamicLinker'] = None,
@@ -224,7 +233,7 @@ class ArmclangCCompiler(ArmclangCompiler, CCompiler):
                           '2': default_warn_args + ['-Wextra'],
                           '3': default_warn_args + ['-Wextra', '-Wpedantic']}
 
-    def get_options(self) -> 'KeyedOptionDictType':
+    def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = CCompiler.get_options(self)
         key = OptionKey('std', machine=self.for_machine, lang=self.language)
         opts[key].choices = ['none', 'c90', 'c99', 'c11', 'gnu90', 'gnu99', 'gnu11']
@@ -262,7 +271,7 @@ class GnuCCompiler(GnuCompiler, CCompiler):
                           '2': default_warn_args + ['-Wextra'],
                           '3': default_warn_args + ['-Wextra', '-Wpedantic']}
 
-    def get_options(self) -> 'KeyedOptionDictType':
+    def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = CCompiler.get_options(self)
         c_stds = ['c89', 'c99', 'c11']
         g_stds = ['gnu89', 'gnu99', 'gnu11']
@@ -315,6 +324,9 @@ class PGICCompiler(PGICompiler, CCompiler):
 
 
 class NvidiaHPC_CCompiler(PGICompiler, CCompiler):
+
+    id = 'nvidia_hpc'
+
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice, is_cross: bool,
                  info: 'MachineInfo', exe_wrapper: T.Optional['ExternalProgram'] = None,
                  linker: T.Optional['DynamicLinker'] = None,
@@ -322,7 +334,6 @@ class NvidiaHPC_CCompiler(PGICompiler, CCompiler):
         CCompiler.__init__(self, exelist, version, for_machine, is_cross,
                            info, exe_wrapper, linker=linker, full_version=full_version)
         PGICompiler.__init__(self)
-        self.id = 'nvidia_hpc'
 
 
 class ElbrusCCompiler(ElbrusCompiler, CCompiler):
@@ -335,7 +346,7 @@ class ElbrusCCompiler(ElbrusCompiler, CCompiler):
                            info, exe_wrapper, linker=linker, full_version=full_version)
         ElbrusCompiler.__init__(self)
 
-    def get_options(self) -> 'KeyedOptionDictType':
+    def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = CCompiler.get_options(self)
         stds = ['c89', 'c9x', 'c99', 'gnu89', 'gnu9x', 'gnu99']
         stds += ['iso9899:1990', 'iso9899:199409', 'iso9899:1999']
@@ -378,7 +389,7 @@ class IntelCCompiler(IntelGnuLikeCompiler, CCompiler):
                           '2': default_warn_args + ['-Wextra'],
                           '3': default_warn_args + ['-Wextra']}
 
-    def get_options(self) -> 'KeyedOptionDictType':
+    def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = CCompiler.get_options(self)
         c_stds = ['c89', 'c99']
         g_stds = ['gnu89', 'gnu99']
@@ -399,7 +410,7 @@ class VisualStudioLikeCCompilerMixin(CompilerMixinBase):
 
     """Shared methods that apply to MSVC-like C compilers."""
 
-    def get_options(self) -> 'KeyedOptionDictType':
+    def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = super().get_options()
         opts.update({
             OptionKey('winlibs', machine=self.for_machine, lang=self.language): coredata.UserArrayOption(
@@ -434,7 +445,7 @@ class VisualStudioCCompiler(MSVCCompiler, VisualStudioLikeCCompilerMixin, CCompi
                            full_version=full_version)
         MSVCCompiler.__init__(self, target)
 
-    def get_options(self) -> 'KeyedOptionDictType':
+    def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = super().get_options()
         c_stds = ['c89', 'c99']
         # Need to have these to be compatible with projects
@@ -500,7 +511,7 @@ class IntelClCCompiler(IntelVisualStudioLikeCompiler, VisualStudioLikeCCompilerM
                            full_version=full_version)
         IntelVisualStudioLikeCompiler.__init__(self, target)
 
-    def get_options(self) -> 'KeyedOptionDictType':
+    def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = super().get_options()
         key = OptionKey('std', machine=self.for_machine, lang=self.language)
         opts[key].choices = ['none', 'c89', 'c99', 'c11']
@@ -528,7 +539,7 @@ class ArmCCompiler(ArmCompiler, CCompiler):
                            full_version=full_version)
         ArmCompiler.__init__(self)
 
-    def get_options(self) -> 'KeyedOptionDictType':
+    def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = CCompiler.get_options(self)
         key = OptionKey('std', machine=self.for_machine, lang=self.language)
         opts[key].choices = ['none', 'c89', 'c99', 'c11']
@@ -557,7 +568,7 @@ class CcrxCCompiler(CcrxCompiler, CCompiler):
     def get_always_args(self) -> T.List[str]:
         return ['-nologo']
 
-    def get_options(self) -> 'KeyedOptionDictType':
+    def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = CCompiler.get_options(self)
         key = OptionKey('std', machine=self.for_machine, lang=self.language)
         opts[key].choices = ['none', 'c89', 'c99']
@@ -604,7 +615,7 @@ class Xc16CCompiler(Xc16Compiler, CCompiler):
                            info, exe_wrapper, linker=linker, full_version=full_version)
         Xc16Compiler.__init__(self)
 
-    def get_options(self) -> 'KeyedOptionDictType':
+    def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = CCompiler.get_options(self)
         key = OptionKey('std', machine=self.for_machine, lang=self.language)
         opts[key].choices = ['none', 'c89', 'c99', 'gnu89', 'gnu99']
@@ -649,7 +660,7 @@ class CompCertCCompiler(CompCertCompiler, CCompiler):
                            info, exe_wrapper, linker=linker, full_version=full_version)
         CompCertCompiler.__init__(self)
 
-    def get_options(self) -> 'KeyedOptionDictType':
+    def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = CCompiler.get_options(self)
         key = OptionKey('std', machine=self.for_machine, lang=self.language)
         opts[key].choices = ['none', 'c89', 'c99']
@@ -672,7 +683,7 @@ class CompCertCCompiler(CompCertCompiler, CCompiler):
             path = '.'
         return ['-I' + path]
 
-class C2000CCompiler(C2000Compiler, CCompiler):
+class TICCompiler(TICompiler, CCompiler):
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice,
                  is_cross: bool, info: 'MachineInfo',
                  exe_wrapper: T.Optional['ExternalProgram'] = None,
@@ -680,13 +691,13 @@ class C2000CCompiler(C2000Compiler, CCompiler):
                  full_version: T.Optional[str] = None):
         CCompiler.__init__(self, exelist, version, for_machine, is_cross,
                            info, exe_wrapper, linker=linker, full_version=full_version)
-        C2000Compiler.__init__(self)
+        TICompiler.__init__(self)
 
     # Override CCompiler.get_always_args
     def get_always_args(self) -> T.List[str]:
         return []
 
-    def get_options(self) -> 'KeyedOptionDictType':
+    def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = CCompiler.get_options(self)
         key = OptionKey('std', machine=self.for_machine, lang=self.language)
         opts[key].choices = ['none', 'c89', 'c99', 'c11']
@@ -703,19 +714,6 @@ class C2000CCompiler(C2000Compiler, CCompiler):
             args.append('--' + std.value)
         return args
 
-    def get_compile_only_args(self) -> T.List[str]:
-        return []
-
-    def get_no_optimization_args(self) -> T.List[str]:
-        return ['-Ooff']
-
-    def get_output_args(self, target: str) -> T.List[str]:
-        return [f'--output_file={target}']
-
-    def get_werror_args(self) -> T.List[str]:
-        return ['-change_message=error']
-
-    def get_include_args(self, path: str, is_system: bool) -> T.List[str]:
-        if path == '':
-            path = '.'
-        return ['--include_path=' + path]
+class C2000CCompiler(TICCompiler):
+    # Required for backwards compat with projects created before ti-cgt support existed
+    id = 'c2000'

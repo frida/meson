@@ -35,6 +35,23 @@ project('myapp', 'd')
 executable('myapp', 'app.d', d_debug: [3, 'DebugFeatureA'])
 ```
 
+## In `declare_dependency`
+
+*Since 0.62.0*, when declaring your own dependency using `declare_dependency`,
+it is possible to add parameters for D specific features, e.g. to propagate
+conditional compilation versions:
+
+```meson
+my_dep = declare_dependency(
+    # ...
+    d_module_versions: ['LUA_53'],
+    d_import_dirs: include_directories('my_lua_folder'),
+)
+```
+
+Accepted D specific parameters are `d_module_versions` and `d_import_dirs`
+(DMD `-J` switch).
+
 ## Using embedded unittests
 
 If you are using embedded [unittest
@@ -78,7 +95,7 @@ my_lib = library('mylib',
     install: true,
     version: meson.project_version(),
     soversion: project_soversion,
-    d_module_versions: ['FeatureA', 'featureB']
+    d_module_versions: ['FeatureA', 'featureB', 1]
 )
 
 pkgc = import('pkgconfig')
@@ -87,7 +104,7 @@ pkgc.generate(name: 'mylib',
               subdirs: 'd/mylib',
               version: meson.project_version(),
               description: 'A simple example D library.',
-              d_module_versions: ['FeatureA']
+              d_module_versions: ['FeatureA', 1]
 )
 install_subdir('src/mylib/', install_dir: 'include/d/mylib/')
 ```

@@ -13,9 +13,9 @@ one found in other build systems such as CMake.
 Suppose we have the following Meson snippet:
 
 ```meson
-conf_data = configuration_data()
+conf_data = [[#configuration_data]]
 conf_data.set('version', '1.2.3')
-configure_file(input : 'config.h.in',
+[[#configure_file]](input : 'config.h.in',
                output : 'config.h',
                configuration : conf_data)
 ```
@@ -124,10 +124,10 @@ whenever possible. Supported file encodings are those of python3, see
 
 ## Using dictionaries
 
-Since *0.49.0* `configuration_data()` takes an optional dictionary as
+Since *0.49.0* [[configuration_data]] takes an optional dictionary as
 first argument. If provided, each key/value pair is added into the
 `configuration_data` as if `set()` method was called for each of them.
-`configure_file()`'s `configuration` kwarg also accepts a dictionary
+[[configure_file]]'s `configuration` kwarg also accepts a dictionary
 instead of a configuration_data object.
 
 Example:

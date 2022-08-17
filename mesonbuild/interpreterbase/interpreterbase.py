@@ -14,6 +14,7 @@
 
 # This class contains the basic functionality needed to run any interpreter
 # or an interpreter-based tool.
+from __future__ import annotations
 
 from .. import mparser, mesonlib
 from .. import environment
@@ -27,7 +28,6 @@ from .baseobjects import (
     IterableObject,
 
     TYPE_var,
-    TYPE_kwargs,
 
     HoldableTypes,
 )
@@ -52,6 +52,7 @@ import typing as T
 import textwrap
 
 if T.TYPE_CHECKING:
+    from .baseobjects import SubProject, TYPE_kwargs
     from ..interpreter import Interpreter
 
 HolderMapType = T.Dict[
@@ -73,7 +74,7 @@ FunctionType = T.Dict[
 ]
 
 class InterpreterBase:
-    def __init__(self, source_root: str, subdir: str, subproject: str):
+    def __init__(self, source_root: str, subdir: str, subproject: 'SubProject'):
         self.source_root = source_root
         self.funcs: FunctionType = {}
         self.builtin: T.Dict[str, InterpreterObject] = {}
@@ -216,7 +217,10 @@ class InterpreterBase:
         elif isinstance(cur, mparser.TernaryNode):
             return self.evaluate_ternary(cur)
         elif isinstance(cur, mparser.FormatStringNode):
-            return self.evaluate_fstring(cur)
+            if isinstance(cur, mparser.MultilineFormatStringNode):
+                return self.evaluate_multiline_fstring(cur)
+            else:
+                return self.evaluate_fstring(cur)
         elif isinstance(cur, mparser.ContinueNode):
             raise ContinueRequest()
         elif isinstance(cur, mparser.BreakNode):
@@ -366,6 +370,10 @@ class InterpreterBase:
         else:
             return self.evaluate_statement(node.falseblock)
 
+    @FeatureNew('multiline format strings', '0.63.0')
+    def evaluate_multiline_fstring(self, node: mparser.MultilineFormatStringNode) -> InterpreterObject:
+        return self.evaluate_fstring(node)
+
     @FeatureNew('format strings', '0.58.0')
     def evaluate_fstring(self, node: mparser.FormatStringNode) -> InterpreterObject:
         assert isinstance(node, mparser.FormatStringNode)
@@ -376,7 +384,7 @@ class InterpreterBase:
                 val = _unholder(self.variables[var])
                 if not isinstance(val, (str, int, float, bool)):
                     raise InvalidCode(f'Identifier "{var}" does not name a formattable variable ' +
-                        '(has to be an integer, a string, a floating point number or a boolean).')
+                                      '(has to be an integer, a string, a floating point number or a boolean).')
 
                 return str(val)
             except KeyError:
@@ -524,7 +532,7 @@ class InterpreterBase:
         self.argument_depth += 1
         reduced_pos = [self.evaluate_statement(arg) for arg in args.arguments]
         if any(x is None for x in reduced_pos):
-            raise InvalidArguments(f'At least one value in the arguments is void.')
+            raise InvalidArguments('At least one value in the arguments is void.')
         reduced_kw: T.Dict[str, InterpreterObject] = {}
         for key, val in args.kwargs.items():
             reduced_key = key_resolver(key)

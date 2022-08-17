@@ -15,20 +15,32 @@
 # This class contains the basic functionality needed to run any interpreter
 # or an interpreter-based tool
 
-from .interpreter import AstInterpreter
-from .visitor import AstVisitor
+from __future__ import annotations
+import argparse
+import copy
+import os
+import typing as T
+
 from .. import compilers, environment, mesonlib, optinterpreter
 from .. import coredata as cdata
-from ..mesonlib import MachineChoice, OptionKey
-from ..interpreterbase import InvalidArguments, TYPE_nvar
-from ..build import BuildTarget, Executable, Jar, SharedLibrary, SharedModule, StaticLibrary
-from ..mparser import BaseNode, ArithmeticNode, ArrayNode, ElementaryNode, IdNode, FunctionNode, StringNode
+from ..build import Executable, Jar, SharedLibrary, SharedModule, StaticLibrary
 from ..compilers import detect_compiler_for
-import typing as T
-import os
-import argparse
+from ..interpreterbase import InvalidArguments
+from ..mesonlib import MachineChoice, OptionKey
+from ..mparser import BaseNode, ArithmeticNode, ArrayNode, ElementaryNode, IdNode, FunctionNode, StringNode
+from .interpreter import AstInterpreter
 
-build_target_functions = ['executable', 'jar', 'library', 'shared_library', 'shared_module', 'static_library', 'both_libraries']
+if T.TYPE_CHECKING:
+    from ..build import BuildTarget
+    from ..interpreterbase import TYPE_nvar
+    from .visitor import AstVisitor
+
+
+# TODO: it would be nice to not have to duplicate this
+BUILD_TARGET_FUNCTIONS = [
+    'executable', 'jar', 'library', 'shared_library', 'shared_module',
+    'static_library', 'both_libraries'
+]
 
 class IntrospectionHelper(argparse.Namespace):
     # mimic an argparse namespace
@@ -163,7 +175,14 @@ class IntrospectionInterpreter(AstInterpreter):
         for lang in sorted(langs, key=compilers.sort_clink):
             lang = lang.lower()
             if lang not in self.coredata.compilers[for_machine]:
-                detect_compiler_for(self.environment, lang, for_machine)
+                comp = detect_compiler_for(self.environment, lang, for_machine)
+                if self.subproject:
+                    options = {}
+                    for k in comp.get_options():
+                        v = copy.copy(self.coredata.options[k])
+                        k = k.evolve(subproject=self.subproject)
+                        options[k] = v
+                    self.coredata.add_compiler_options(options, lang, for_machine, self.environment)
 
     def func_dependency(self, node: BaseNode, args: T.List[TYPE_nvar], kwargs: T.Dict[str, TYPE_nvar]) -> None:
         args = self.flatten_args(args)
@@ -230,7 +249,7 @@ class IntrospectionInterpreter(AstInterpreter):
                     continue
                 arg_nodes = arg_node.arguments.copy()
                 # Pop the first element if the function is a build target function
-                if isinstance(curr, FunctionNode) and curr.func_name in build_target_functions:
+                if isinstance(curr, FunctionNode) and curr.func_name in BUILD_TARGET_FUNCTIONS:
                     arg_nodes.pop(0)
                 elemetary_nodes = [x for x in arg_nodes if isinstance(x, (str, StringNode))]
                 inqueue += [x for x in arg_nodes if isinstance(x, (FunctionNode, ArrayNode, IdNode, ArithmeticNode))]
@@ -249,7 +268,10 @@ class IntrospectionInterpreter(AstInterpreter):
         objects = []        # type: T.List[T.Any]
         empty_sources = []  # type: T.List[T.Any]
         # Passing the unresolved sources list causes errors
-        target = targetclass(name, self.subdir, self.subproject, for_machine, empty_sources, objects, self.environment, kwargs_reduced)
+        target = targetclass(name, self.subdir, self.subproject, for_machine, empty_sources, [], objects,
+                             self.environment, self.coredata.compilers[for_machine], kwargs_reduced)
+        target.process_compilers()
+        target.process_compilers_late([])
 
         new_target = {
             'name': target.get_basename(),

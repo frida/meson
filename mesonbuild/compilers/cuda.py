@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 import enum
 import os.path
@@ -20,19 +21,21 @@ import typing as T
 from .. import coredata
 from .. import mlog
 from ..mesonlib import (
-    EnvironmentException, MachineChoice, Popen_safe, OptionOverrideProxy,
+    EnvironmentException, Popen_safe, OptionOverrideProxy,
     is_windows, LibType, OptionKey,
 )
 from .compilers import (Compiler, cuda_buildtype_args, cuda_optimization_args,
-                        cuda_debug_args, CompileCheckMode)
+                        cuda_debug_args)
 
 if T.TYPE_CHECKING:
+    from .compilers import CompileCheckMode
     from ..build import BuildTarget
-    from ..coredata import KeyedOptionDictType
+    from ..coredata import MutableKeyedOptionDictType, KeyedOptionDictType
     from ..dependencies import Dependency
     from ..environment import Environment  # noqa: F401
     from ..envconfig import MachineInfo
     from ..linkers import DynamicLinker
+    from ..mesonlib import MachineChoice
     from ..programs import ExternalProgram
 
 
@@ -173,6 +176,8 @@ class CudaCompiler(Compiler):
     # Reverse map -short to --long options.
     _FLAG_SHORT2LONG_WITHARGS = {v: k for k, v in _FLAG_LONG2SHORT_WITHARGS.items()}
 
+    id = 'nvcc'
+
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice,
                  is_cross: bool, exe_wrapper: T.Optional['ExternalProgram'],
                  host_compiler: Compiler, info: 'MachineInfo',
@@ -182,7 +187,6 @@ class CudaCompiler(Compiler):
         self.exe_wrapper = exe_wrapper
         self.host_compiler = host_compiler
         self.base_options = host_compiler.base_options
-        self.id = 'nvcc'
         self.warn_args = {level: self._to_host_flags(flags) for level, flags in host_compiler.warn_args.items()}
 
     @classmethod
@@ -258,10 +262,13 @@ class CudaCompiler(Compiler):
 
         def is_xcompiler_flag_isolated(flag: str) -> bool:
             return flag == '-Xcompiler'
+
         def is_xcompiler_flag_glued(flag: str) -> bool:
             return flag.startswith('-Xcompiler=')
+
         def is_xcompiler_flag(flag: str) -> bool:
             return is_xcompiler_flag_isolated(flag) or is_xcompiler_flag_glued(flag)
+
         def get_xcompiler_val(flag: str, flagit: T.Iterator[str]) -> str:
             if is_xcompiler_flag_glued(flag):
                 return flag[len('-Xcompiler='):]
@@ -608,7 +615,7 @@ class CudaCompiler(Compiler):
         }}'''
         return self.compiles(t.format_map(fargs), env, extra_args=extra_args, dependencies=dependencies)
 
-    def get_options(self) -> 'KeyedOptionDictType':
+    def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = super().get_options()
         std_key      = OptionKey('std',      machine=self.for_machine, lang=self.language)
         ccbindir_key = OptionKey('ccbindir', machine=self.for_machine, lang=self.language)
@@ -706,7 +713,7 @@ class CudaCompiler(Compiler):
         return self._to_host_flags(self.host_compiler.get_buildtype_linker_args(buildtype), _Phase.LINKER)
 
     def build_rpath_args(self, env: 'Environment', build_dir: str, from_dir: str,
-                         rpath_paths: str, build_rpath: str,
+                         rpath_paths: T.Tuple[str, ...], build_rpath: str,
                          install_rpath: str) -> T.Tuple[T.List[str], T.Set[bytes]]:
         (rpath_args, rpath_dirs_to_remove) = self.host_compiler.build_rpath_args(
             env, build_dir, from_dir, rpath_paths, build_rpath, install_rpath)

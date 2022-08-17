@@ -44,7 +44,7 @@ class LinuxCrossArmTests(BaseLinuxCrossTests):
 
     def setUp(self):
         super().setUp()
-        self.meson_cross_file = os.path.join(self.src_root, 'cross', 'ubuntu-armhf.txt')
+        self.meson_cross_files = [os.path.join(self.src_root, 'cross', 'ubuntu-armhf.txt')]
 
     def test_cflags_cross_environment_pollution(self):
         '''
@@ -66,7 +66,7 @@ class LinuxCrossArmTests(BaseLinuxCrossTests):
         https://github.com/mesonbuild/meson/issues/3089
         '''
         testdir = os.path.join(self.unit_test_dir, '33 cross file overrides always args')
-        self.meson_cross_file = os.path.join(testdir, 'ubuntu-armhf-overrides.txt')
+        self.meson_cross_files = [os.path.join(testdir, 'ubuntu-armhf-overrides.txt')]
         self.init(testdir)
         compdb = self.get_compdb()
         self.assertRegex(compdb[0]['command'], '-D_FILE_OFFSET_BITS=64.*-U_FILE_OFFSET_BITS')
@@ -86,7 +86,7 @@ class LinuxCrossArmTests(BaseLinuxCrossTests):
     def test_cross_libdir_subproject(self):
         # Guard against a regression where calling "subproject"
         # would reset the value of libdir to its default value.
-        testdir = os.path.join(self.unit_test_dir, '76 subdir libdir')
+        testdir = os.path.join(self.unit_test_dir, '75 subdir libdir')
         self.init(testdir, extra_args=['--libdir=fuf'])
         for i in self.introspect('--buildoptions'):
             if i['name'] == 'libdir':
@@ -96,7 +96,7 @@ class LinuxCrossArmTests(BaseLinuxCrossTests):
 
     def test_std_remains(self):
         # C_std defined in project options must be in effect also when cross compiling.
-        testdir = os.path.join(self.unit_test_dir, '51 noncross options')
+        testdir = os.path.join(self.unit_test_dir, '50 noncross options')
         self.init(testdir)
         compdb = self.get_compdb()
         self.assertRegex(compdb[0]['command'], '-std=c99')
@@ -106,7 +106,7 @@ class LinuxCrossArmTests(BaseLinuxCrossTests):
     def test_pkg_config_option(self):
         if not shutil.which('arm-linux-gnueabihf-pkg-config'):
             raise unittest.SkipTest('Cross-pkgconfig not found.')
-        testdir = os.path.join(self.unit_test_dir, '58 pkg_config_path option')
+        testdir = os.path.join(self.unit_test_dir, '57 pkg_config_path option')
         self.init(testdir, extra_args=[
             '-Dbuild.pkg_config_path=' + os.path.join(testdir, 'build_extra_path'),
             '-Dpkg_config_path=' + os.path.join(testdir, 'host_extra_path'),
@@ -117,7 +117,7 @@ class LinuxCrossArmTests(BaseLinuxCrossTests):
         https://github.com/mesonbuild/meson/issues/7997
         check run native test in crossbuild without exe wrapper
         '''
-        testdir = os.path.join(self.unit_test_dir, '88 run native test')
+        testdir = os.path.join(self.unit_test_dir, '87 run native test')
         stamp_file = os.path.join(self.builddir, 'native_test_has_run.stamp')
         self.init(testdir)
         self.build()
@@ -137,7 +137,7 @@ class LinuxCrossMingwTests(BaseLinuxCrossTests):
 
     def setUp(self):
         super().setUp()
-        self.meson_cross_file = os.path.join(self.src_root, 'cross', 'linux-mingw-w64-64bit.txt')
+        self.meson_cross_files = [os.path.join(self.src_root, 'cross', 'linux-mingw-w64-64bit.txt')]
 
     def test_exe_wrapper_behaviour(self):
         '''
@@ -154,7 +154,7 @@ class LinuxCrossMingwTests(BaseLinuxCrossTests):
         self.wipe()
         os.mkdir(self.builddir)
         # Change cross file to use a non-existing exe_wrapper and it should fail
-        self.meson_cross_file = os.path.join(testdir, 'broken-cross.txt')
+        self.meson_cross_files = [os.path.join(testdir, 'broken-cross.txt')]
         # Force tracebacks so we can detect them properly
         env = {'MESON_FORCE_BACKTRACE': '1'}
         error_message = "An exe_wrapper is needed but was not found. Please define one in cross file and check the command and/or add it to PATH."
@@ -185,7 +185,7 @@ class LinuxCrossMingwTests(BaseLinuxCrossTests):
 
     @skipIfNoPkgconfig
     def test_cross_pkg_config_option(self):
-        testdir = os.path.join(self.unit_test_dir, '58 pkg_config_path option')
+        testdir = os.path.join(self.unit_test_dir, '57 pkg_config_path option')
         self.init(testdir, extra_args=[
             '-Dbuild.pkg_config_path=' + os.path.join(testdir, 'build_extra_path'),
             '-Dpkg_config_path=' + os.path.join(testdir, 'host_extra_path'),

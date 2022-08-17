@@ -1,5 +1,6 @@
 # Copyright 2021 The Meson development team
 # SPDX-license-identifier: Apache-2.0
+from __future__ import annotations
 
 import typing as T
 
@@ -15,7 +16,6 @@ from ...interpreterbase import (
     FeatureNew,
 
     TYPE_var,
-    TYPE_kwargs,
 
     InvalidArguments,
 )
@@ -24,6 +24,7 @@ from ...mparser import PlusAssignmentNode
 if T.TYPE_CHECKING:
     # Object holders need the actual interpreter
     from ...interpreter import Interpreter
+    from ...interpreterbase import TYPE_kwargs
 
 class ArrayHolder(ObjectHolder[T.List[TYPE_var]], IterableObject):
     def __init__(self, obj: T.List[TYPE_var], interpreter: 'Interpreter') -> None:
@@ -94,7 +95,8 @@ class ArrayHolder(ObjectHolder[T.List[TYPE_var]], IterableObject):
     def op_plus(self, other: TYPE_var) -> T.List[TYPE_var]:
         if not isinstance(other, list):
             if not isinstance(self.current_node, PlusAssignmentNode):
-                FeatureNew.single_use('list.<plus>', '0.60.0', self.subproject, 'The right hand operand was not a list.')
+                FeatureNew.single_use('list.<plus>', '0.60.0', self.subproject, 'The right hand operand was not a list.',
+                                      location=self.current_node)
             other = [other]
         return self.held_object + other
 

@@ -16,7 +16,6 @@
 # or an interpreter-based tool.
 
 __all__ = [
-    'CMakeClient',
     'CMakeExecutor',
     'CMakeExecScope',
     'CMakeException',
@@ -34,13 +33,16 @@ __all__ = [
     'cmake_get_generator_args',
     'cmake_defines_to_args',
     'check_cmake_args',
+    'cmake_is_debug',
+    'resolve_cmake_trace_targets',
+    'ResolvedTarget',
 ]
 
-from .common import CMakeException, SingleTargetOptions, TargetOptions, cmake_defines_to_args, language_map, backend_generator_map, cmake_get_generator_args, check_cmake_args
-from .client import CMakeClient
+from .common import CMakeException, SingleTargetOptions, TargetOptions, cmake_defines_to_args, language_map, backend_generator_map, cmake_get_generator_args, check_cmake_args, cmake_is_debug
 from .executor import CMakeExecutor
 from .fileapi import CMakeFileAPI
 from .generator import parse_generator_expressions
 from .interpreter import CMakeInterpreter
 from .toolchain import CMakeToolchain, CMakeExecScope
 from .traceparser import CMakeTarget, CMakeTraceLine, CMakeTraceParser
+from .tracetargets import resolve_cmake_trace_targets, ResolvedTarget

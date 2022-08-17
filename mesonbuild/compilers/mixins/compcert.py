@@ -32,7 +32,7 @@ ccomp_buildtype_args = {
     'plain': [''],
     'debug': ['-O0', '-g'],
     'debugoptimized': ['-O0', '-g'],
-    'release': ['-03'],
+    'release': ['-O3'],
     'minsize': ['-Os'],
     'custom': ['-Obranchless'],
 }  # type: T.Dict[str, T.List[str]]
@@ -60,8 +60,9 @@ ccomp_args_to_wul = [
 
 class CompCertCompiler(Compiler):
 
+    id = 'ccomp'
+
     def __init__(self) -> None:
-        self.id = 'ccomp'
         # Assembly
         self.can_compile_suffixes.add('s')
         default_warn_args = []  # type: T.List[str]

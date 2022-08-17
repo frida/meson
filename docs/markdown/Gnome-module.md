@@ -103,10 +103,14 @@ There are several keyword arguments. Many of these map directly to the
 * `header`: *(Added 0.43.0)* name of main c header to include for the library, e.g. `glib.h`
 * `include_directories`: extra include paths to look for gir files
 * `install`: if true, install the generated files
+* `install_gir`: (*Added 0.61.0*) overrides `install`, whether to install the
+  generated gir
 * `install_dir_gir`: (*Added 0.35.0*) which directory to install the
-  gir file into
+  gir file into; (*Deprecated since 0.61.0*) can be false to disable installation
+* `install_typelib`: (*Added 0.61.0*) overrides `install`, whether to install the
+  generated typelib
 * `install_dir_typelib`: (*Added 0.35.0*) which directory to install
-  the typelib file into
+  the typelib file into; (*Deprecated since 0.61.0*) can be false to disable installation
 * `link_with`: list of libraries to link with
 * `symbol_prefix`: the symbol prefix for the gir object, e.g. `gtk`,
   (*Since 0.43.0*) an ordered list of multiple prefixes is allowed
@@ -120,18 +124,21 @@ typelib_target]`
 Generates a marshal file using the `glib-genmarshal` tool. The first
 argument is the basename of the output files.
 
-* `extra_args`: (*Added 0.42.0*) additional command line arguments to
-  pass
+* `depends` [](BuildTarget | CustomTarget | CustomTargetIndex):
+  passed directly to CustomTarget (*since 0.61.0*)
+* `depend_files` [](str | File): Passed directly to CustomTarget (*since 0.61.0*)
+* `extra_args`: (*Added 0.42.0*) additional command line arguments to pass
+* `install_dir`: directory to install header to
 * `install_header`: if true, install the generated header
 * `install_dir`: directory to install header to
-* `nostdinc`: if true, don't include the standard marshallers from
-  glib
-* `internal`: if true, mark generated sources as internal to
-  `glib-genmarshal` (*Requires GLib 2.54*)
+* `install_header`: if true, install the generated header
+* `internal`: if true, mark generated sources as internal to `glib-genmarshal`
+  (*Requires GLib 2.54*)
+* `nostdinc`: if true, don't include the standard marshallers from glib
 * `prefix`: the prefix to use for symbols
 * `skip_source`: if true, skip source location comments
+* `sources` [](str | File) *required*: the list of sources to use as inputs
 * `stdinc`: if true, include the standard marshallers from glib
-* `sources`: the list of sources to use as inputs
 * `valist_marshallers`: if true, generate va_list marshallers
 
 *Added 0.35.0*
@@ -158,6 +165,7 @@ template with only minor tweaks, in which case the
 Note that if you `#include` the generated header in any of the sources
 for a build target, you must add the generated header to the build
 target's list of sources to codify the dependency. This is true for
+
 all generated sources, not just `mkenums`.
 
 * `c_template`: template to use for generating the source
@@ -316,13 +324,17 @@ VAPI or Vala binaries.
              languages: []string, symlink_media: bool = true): void
 ```
 
-Installs help documentation using Yelp. The first argument is the
-project id.
+Installs help documentation for Yelp using itstool and gettext. The first
+argument is the project id.
 
 Additionally, sources can be passed as additional positional arguments. This
 was, however, undocumented and never officially supported. Due to a longstanding
 bug, passing sources as a keyword argument will result in the positional
 argument sources to be ignored. *since 0.60.0* A warning is raised in this case.
+
+*Since 0.43.0* if "languages" is not specified, a
+[LINGUAS](https://www.gnu.org/software/gettext/manual/html_node/po_002fLINGUAS.html)
+file will be read instead.
 
 *Since 0.60.0* the use of the positional argument sources has been deprecated,
 and the "sources" keyword argument should be used instead. The passing of
@@ -331,7 +343,7 @@ sources as positional arguments will be removed in the future.
 This also creates two targets for translations
 `help-$project-update-po` and `help-$project-pot`.
 
-* `languages`: list of languages for translations
+* `languages`: *(deprecated since 0.43.0)* list of languages for translation, overrides the LINGUAS file
 * `media`: list of media such as images
 * `sources`: list of pages
 * `symlink_media`: if media should be symlinked not copied (defaults to `true` since 0.42.0)

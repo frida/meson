@@ -41,6 +41,14 @@ if T.TYPE_CHECKING:
         include_directories: T.List[T.Union[str, build.IncludeDirs]]
         args: T.List[str]
 
+    class RcKwargs(TypedDict):
+        output: str
+        input: T.List[T.Union[mesonlib.FileOrString, build.CustomTargetIndex]]
+        depfile: T.Optional[str]
+        depend_files: T.List[mesonlib.FileOrString]
+        depends: T.List[T.Union[build.BuildTarget, build.CustomTarget]]
+        command: T.List[T.Union[str, ExternalProgram]]
+
 class ResourceCompilerType(enum.Enum):
     windres = 1
     rc = 2
@@ -103,7 +111,7 @@ class WindowsModule(ExtensionModule):
         'winddows.compile_resoures',
         DEPEND_FILES_KW.evolve(since='0.47.0'),
         DEPENDS_KW.evolve(since='0.47.0'),
-        INCLUDE_DIRECTORIES.evolve(name='include_directories'),
+        INCLUDE_DIRECTORIES,
         KwargInfo('args', ContainerTypeInfo(list, str), default=[], listify=True),
     )
     def compile_resources(self, state: 'ModuleState',
@@ -173,24 +181,26 @@ class WindowsModule(ExtensionModule):
             command: T.List[T.Union[str, ExternalProgram]] = []
             command.append(rescomp)
             command.extend(res_args)
-
-            res_kwargs = {
-                'output': output,
-                'input': [src],
-                'depend_files': wrc_depend_files,
-                'depends': wrc_depends,
-            }
-
+            depfile: T.Optional[str] = None
             # instruct binutils windres to generate a preprocessor depfile
             if rescomp_type == ResourceCompilerType.windres:
-                res_kwargs['depfile'] = f'{output}.d'
+                depfile = f'{output}.d'
                 command.extend(['--preprocessor-arg=-MD',
                                 '--preprocessor-arg=-MQ@OUTPUT@',
                                 '--preprocessor-arg=-MF@DEPFILE@'])
 
-            res_kwargs['command'] = command
-
-            res_targets.append(build.CustomTarget(name_formatted, state.subdir, state.subproject, res_kwargs))
+            res_targets.append(build.CustomTarget(
+                name_formatted,
+                state.subdir,
+                state.subproject,
+                state.environment,
+                command,
+                [src],
+                [output],
+                depfile=depfile,
+                depend_files=wrc_depend_files,
+                extra_depends=wrc_depends,
+            ))
 
         return ModuleReturnValue(res_targets, [res_targets])
 

@@ -156,6 +156,9 @@ class AnsiText:
 def bold(text: str, quoted: bool = False) -> AnsiDecorator:
     return AnsiDecorator(text, "\033[1m", quoted=quoted)
 
+def italic(text: str, quoted: bool = False) -> AnsiDecorator:
+    return AnsiDecorator(text, "\033[3m", quoted=quoted)
+
 def plain(text: str) -> AnsiDecorator:
     return AnsiDecorator(text, "")
 
@@ -206,7 +209,7 @@ def process_markup(args: T.Sequence[TV_Loggable], keep: bool) -> T.List[str]:
             arr.append(str(arg))
     return arr
 
-def force_print(*args: str, nested: str, **kwargs: T.Any) -> None:
+def force_print(*args: str, nested: bool, **kwargs: T.Any) -> None:
     if log_disable_stdout:
         return
     iostr = io.StringIO()
@@ -320,7 +323,7 @@ def _log_error(severity: str, *rargs: TV_Loggable,
         location_str = get_error_location_string(location_file, location.lineno)
         # Unions are frankly awful, and we have to T.cast here to get mypy
         # to understand that the list concatenation is safe
-        location_list = T.cast(TV_LoggableList, [location_str])
+        location_list = T.cast('TV_LoggableList', [location_str])
         args = location_list + args
 
     log(*args, once=once, **kwargs)

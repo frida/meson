@@ -12,12 +12,12 @@ When first running Meson, set it in an environment variable.
 $ CC=mycc meson <options>
 ```
 
-Note that environment variables like `CC` only works in native builds.
-The `CC` refers to the compiler for the host platform, that is the
-compiler used to compile programs that run on the machine we will
-eventually install the project on. The compiler used to build things
-that run on the machine we do the building can be specified with
-`CC_FOR_BUILD`. You can use it in cross builds.
+Note that environment variables like `CC` only refer to the host
+platform in cross builds.  That is, `CC` refers to the compiler used to
+compile programs that run on the machine we will eventually install the
+project on. The compiler used to build things that run on the machine we
+do the building can be specified with `CC_FOR_BUILD`. You can use it in
+cross builds.
 
 Note that environment variables are never the idiomatic way to do
 anything with Meson, however. It is better to use the native and cross
@@ -141,7 +141,7 @@ configure_file(...)
 
 ## Generate configuration data from files
 
-`The [fs module](#Fs-modules) offers the `read` function` which enables adding
+The [fs module](#Fs-modules) offers the `read` function which enables adding
 the contents of arbitrary files to configuration data (among other uses):
 
 ```meson

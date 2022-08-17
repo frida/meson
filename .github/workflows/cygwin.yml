@@ -66,15 +66,21 @@ jobs:
             python3-devel
             python3-libxml2
             python3-libxslt
-            python38-pip
-            python38-wheel
+            python39-pip
+            python39-wheel
             vala
             zlib-devel
+
+      - name: work around gcovr bug https://github.com/gcovr/gcovr/pull/576
+        run: |
+          export PATH=/usr/bin:/usr/local/bin:$(cygpath ${SYSTEMROOT})/system32
+          python3 -m pip --disable-pip-version-check install 'jinja2<3.1.0'
+        shell: C:\cygwin\bin\bash.exe --noprofile --norc -o igncr -eo pipefail '{0}'
 
       - name: Run pip
         run: |
           export PATH=/usr/bin:/usr/local/bin:$(cygpath ${SYSTEMROOT})/system32
-          python3 -m pip --disable-pip-version-check install gcovr jsonschema pefile pytest pytest-xdist coverage codecov
+          python3 -m pip --disable-pip-version-check install gcovr jsonschema pefile pytest pytest-subtests pytest-xdist coverage codecov
         shell: C:\cygwin\bin\bash.exe --noprofile --norc -o igncr -eo pipefail '{0}'
 
       - name: Run tests

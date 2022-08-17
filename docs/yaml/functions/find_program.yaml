@@ -24,7 +24,9 @@ description: |
   (because the command invocator will reject the command otherwise) and
   Unixes (if the script file does not have the executable bit set).
   Hence, you *must not* manually add the interpreter while using this
-  script as part of a list of commands.
+  script as part of a list of commands. Since *0.50.0* if the "python3"
+  program is requested and it is not found in the system, Meson will return
+  its current interpreter.
 
   If you need to check for a program in a non-standard location, you can
   just pass an absolute path to `find_program`, e.g.
@@ -44,15 +46,17 @@ description: |
 
 posargs:
   program_name:
-    type: str
-    description: The name of the program to search
+    type: str | file
+    description: |
+      The name of the program to search, or a [[@file]] object to be used
+      without searching.
 
 varargs:
   name: fallback
-  type: str
+  type: str | file
   since: 0.37.0
   description: |
-    These parameters are used as fallback strings to search for.
+    These parameters are used as fallback names to search for.
     This is meant to be used for cases where the
     program may have many alternative names, such as `foo` and
     `foo.py`. The function will check for the arguments one by one and the

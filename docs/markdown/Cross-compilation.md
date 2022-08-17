@@ -4,7 +4,34 @@ short-description: Setting up cross-compilation
 
 # Cross compilation
 
-Meson has full support for cross compilation. Since cross compiling is
+Meson has full support for cross compilation through the use of
+a cross build definition file.  An minimal example of one such
+file `x86_64-w64-mingw32.txt` for a GCC/MinGW cross compiler
+targeting 64-bit Windows could be:
+
+```ini
+[binaries]
+c = 'x86_64-w64-mingw32-gcc'
+cpp = 'x86_64-w64-mingw32-g++'
+ar = 'x86_64-w64-mingw32-ar'
+strip = 'x86_64-w64-mingw32-strip'
+exe_wrapper = 'wine64'
+
+[host_machine]
+system = 'windows'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'
+```
+
+Which is then used during the `setup` phase.
+
+```sh
+meson setup --cross-file x86_64-w64-mingw32.txt build-mingw
+meson compile -C build-mingw
+```
+
+Since cross compiling is
 more complicated than native building, let's first go over some
 nomenclature. The three most important definitions are traditionally
 called *build*, *host* and *target*. This is confusing because those
@@ -19,8 +46,8 @@ we are going to call these the *build machine*, *host machine* and
   machine-specific output.
 
 The `tl/dr` summary is the following: if you are doing regular cross
-compilation, you only care about `build_machine` and
-`host_machine`. Just ignore `target_machine` altogether and you will
+compilation, you only care about [[@build_machine]] and
+[[@host_machine]]. Just ignore [[@target_machine]] altogether and you will
 be correct 99% of the time. Only compilers and similar tools care
 about the target machine. In fact, for so-called "multi-target" tools
 the target machine need not be fixed at build-time like the others but
@@ -194,7 +221,7 @@ These values define the machines sufficiently for cross compilation
 purposes. The corresponding target definition would look the same but
 have `target_machine` in the header. These values are available in
 your Meson scripts. There are three predefined variables called,
-surprisingly, `build_machine`, `host_machine` and `target_machine`.
+surprisingly, [[@build_machine]], [[@host_machine]] and [[@target_machine]].
 Determining the operating system of your host machine is simply a
 matter of calling `host_machine.system()`.
 
@@ -235,16 +262,16 @@ The main *meson* object provides two functions to determine cross
 compilation status.
 
 ```meson
-meson.is_cross_build()        # returns true when cross compiling
-meson.can_run_host_binaries() # returns true if the host binaries can be run, either with a wrapper or natively
+[[#meson.is_cross_build]]        # returns true when cross compiling
+[[#meson.can_run_host_binaries]] # returns true if the host binaries can be run, either with a wrapper or natively
 ```
 
 You can run system checks on both the system compiler or the cross
 compiler. You just have to specify which one to use.
 
 ```meson
-build_compiler = meson.get_compiler('c', native : true)
-host_compiler = meson.get_compiler('c', native : false)
+build_compiler = [[#meson.get_compiler]]('c', native : true)
+host_compiler = [[#meson.get_compiler]]('c', native : false)
 
 build_int_size = build_compiler.sizeof('int')
 host_int_size  = host_compiler.sizeof('int')
@@ -344,5 +371,5 @@ file called x86-linux, then the following command would start a cross
 build using that cross files:
 
 ```sh
-meson builddir/ --cross-file x86-linux
+meson setup builddir/ --cross-file x86-linux
 ```

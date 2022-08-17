@@ -26,15 +26,14 @@ def _setup_vsenv(force: bool) -> bool:
         return False
     if os.environ.get('OSTYPE') == 'cygwin':
         return False
-    if 'Visual Studio' in os.environ['PATH']:
-        return False
-    # VSINSTALL is set when running setvars from a Visual Studio installation
-    # Tested with Visual Studio 2012 and 2017
-    if 'VSINSTALLDIR' in os.environ:
-        return False
-    # Check explicitly for cl when on Windows
-    if shutil.which('cl.exe'):
-        return False
+    if 'MESON_FORCE_VSENV_FOR_UNITTEST' not in os.environ:
+        # VSINSTALL is set when running setvars from a Visual Studio installation
+        # Tested with Visual Studio 2012 and 2017
+        if 'VSINSTALLDIR' in os.environ:
+            return False
+        # Check explicitly for cl when on Windows
+        if shutil.which('cl.exe'):
+            return False
     if not force:
         if shutil.which('cc'):
             return False
@@ -56,6 +55,7 @@ def _setup_vsenv(force: bool) -> bool:
             '-prerelease',
             '-requiresAny',
             '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
+            '-requires', 'Microsoft.VisualStudio.Workload.WDExpress',
             '-products', '*',
             '-utf8',
             '-format',
@@ -65,12 +65,15 @@ def _setup_vsenv(force: bool) -> bool:
     bat_info = json.loads(bat_json)
     if not bat_info:
         # VS installer instelled but not VS itself maybe?
-        raise MesonException(f'Could not parse vswhere.exe output')
+        raise MesonException('Could not parse vswhere.exe output')
     bat_root = pathlib.Path(bat_info[0]['installationPath'])
     if platform.machine() == 'ARM64':
         bat_path = bat_root / 'VC/Auxiliary/Build/vcvarsx86_arm64.bat'
     else:
         bat_path = bat_root / 'VC/Auxiliary/Build/vcvars64.bat'
+        # if VS is not found try VS Express
+        if not bat_path.exists():
+            bat_path = bat_root / 'VC/Auxiliary/Build/vcvarsx86_amd64.bat'
     if not bat_path.exists():
         raise MesonException(f'Could not find {bat_path}')
 
@@ -93,8 +96,13 @@ def _setup_vsenv(force: bool) -> bool:
             continue
         if not bat_line:
             continue
-        k, v = bat_line.split('=', 1)
-        os.environ[k] = v
+        try:
+            k, v = bat_line.split('=', 1)
+        except ValueError:
+            # there is no "=", ignore junk data
+            pass
+        else:
+            os.environ[k] = v
     return True
 
 def setup_vsenv(force: bool = False) -> bool:

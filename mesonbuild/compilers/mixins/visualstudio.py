@@ -26,6 +26,7 @@ from ... import mlog
 
 if T.TYPE_CHECKING:
     from ...environment import Environment
+    from ...dependencies import Dependency
     from .clike import CLikeCompiler as Compiler
 else:
     # This is a bit clever, for mypy we pretend that these mixins descend from
@@ -71,7 +72,7 @@ msvc_optimization_args = {
 
 msvc_debug_args = {
     False: [],
-    True: ['/Z7']
+    True: ['/Zi']
 }  # type: T.Dict[bool, T.List[str]]
 
 
@@ -301,7 +302,10 @@ class VisualStudioLikeCompiler(Compiler, metaclass=abc.ABCMeta):
             return not(warning_text in p.stderr or warning_text in p.stdout), p.cached
 
     def get_compile_debugfile_args(self, rel_obj: str, pch: bool = False) -> T.List[str]:
-        return []
+        pdbarr = rel_obj.split('.')[:-1]
+        pdbarr += ['pdb']
+        args = ['/Fd' + '.'.join(pdbarr)]
+        return args
 
     def get_instruction_set_args(self, instruction_set: str) -> T.Optional[T.List[str]]:
         if self.is_64:
@@ -329,6 +333,8 @@ class VisualStudioLikeCompiler(Compiler, metaclass=abc.ABCMeta):
             return '14.1' # (Visual Studio 2017)
         elif version < 1930:
             return '14.2' # (Visual Studio 2019)
+        elif version < 1940:
+            return '14.3' # (Visual Studio 2022)
         mlog.warning(f'Could not find toolset for version {self.version!r}')
         return None
 
@@ -377,14 +383,41 @@ class VisualStudioLikeCompiler(Compiler, metaclass=abc.ABCMeta):
     def get_argument_syntax(self) -> str:
         return 'msvc'
 
+    def symbols_have_underscore_prefix(self, env: 'Environment') -> bool:
+        '''
+        Check if the compiler prefixes an underscore to global C symbols.
+
+        This overrides the Clike method, as for MSVC checking the
+        underscore prefix based on the compiler define never works,
+        so do not even try.
+        '''
+        # Try to consult a hardcoded list of cases we know
+        # absolutely have an underscore prefix
+        result = self._symbols_have_underscore_prefix_list(env)
+        if result is not None:
+            return result
+
+        # As a last resort, try search in a compiled binary
+        return self._symbols_have_underscore_prefix_searchbin(env)
+
 
 class MSVCCompiler(VisualStudioLikeCompiler):
 
     """Specific to the Microsoft Compilers."""
 
-    def __init__(self, target: str):
-        super().__init__(target)
-        self.id = 'msvc'
+    id = 'msvc'
+
+    def get_compile_debugfile_args(self, rel_obj: str, pch: bool = False) -> T.List[str]:
+        args = super().get_compile_debugfile_args(rel_obj, pch)
+        # When generating a PDB file with PCH, all compile commands write
+        # to the same PDB file. Hence, we need to serialize the PDB
+        # writes using /FS since we do parallel builds. This slows down the
+        # build obviously, which is why we only do this when PCH is on.
+        # This was added in Visual Studio 2013 (MSVC 18.0). Before that it was
+        # always on: https://msdn.microsoft.com/en-us/library/dn502518.aspx
+        if pch and mesonlib.version_compare(self.version, '>=18.0'):
+            args = ['/FS'] + args
+        return args
 
     def get_instruction_set_args(self, instruction_set: str) -> T.Optional[T.List[str]]:
         if self.version.split('.')[0] == '16' and instruction_set == 'avx':
@@ -402,16 +435,17 @@ class ClangClCompiler(VisualStudioLikeCompiler):
 
     """Specific to Clang-CL."""
 
+    id = 'clang-cl'
+
     def __init__(self, target: str):
         super().__init__(target)
-        self.id = 'clang-cl'
 
         # Assembly
         self.can_compile_suffixes.add('s')
 
     def has_arguments(self, args: T.List[str], env: 'Environment', code: str, mode: str) -> T.Tuple[bool, bool]:
         if mode != 'link':
-            args = args + ['-Werror=unknown-argument']
+            args = args + ['-Werror=unknown-argument', '-Werror=unknown-warning-option']
         return super().has_arguments(args, env, code, mode)
 
     def get_toolset_version(self) -> T.Optional[str]:
@@ -420,3 +454,20 @@ class ClangClCompiler(VisualStudioLikeCompiler):
 
     def get_pch_base_name(self, header: str) -> str:
         return header
+
+    def get_include_args(self, path: str, is_system: bool) -> T.List[str]:
+        if path == '':
+            path = '.'
+        return ['/clang:-isystem' + path] if is_system else ['-I' + path]
+
+    def get_dependency_compile_args(self, dep: 'Dependency') -> T.List[str]:
+        if dep.get_include_type() == 'system':
+            converted = []
+            for i in dep.get_compile_args():
+                if i.startswith('-isystem'):
+                    converted += ['/clang:' + i]
+                else:
+                    converted += [i]
+            return converted
+        else:
+            return dep.get_compile_args()

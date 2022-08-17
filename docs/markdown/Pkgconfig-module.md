@@ -45,8 +45,7 @@ keyword arguments.
   would be `foobar-1`
 - `requires` list of strings, pkgconfig-dependencies or libraries that
    `pkgconfig.generate()` was used on to put in the `Requires` field
-- `requires_private` same as `requires` but for `Requires.private` field
-  field
+- `requires_private` the same as `requires` but for the `Requires.private` field
 - `url` a string with a url for the library
 - `variables` a list of strings with custom variables to add to the
   generated file. The strings must be in the form `name=value` and may
@@ -58,7 +57,8 @@ keyword arguments.
   Spaces in values are escaped with `\`, this is required in the case the value is
   a path that and is used in `cflags` or `libs` arguments. *Since 0.59.0* if
   escaping is not desired (e.g. space separate list of values) `unescaped_variables`
-  keyword argument should be used instead.
+  keyword argument should be used instead. *Since 0.62.0* builtin directory variables
+  that are referenced are automatically created by default.
 - `uninstalled_variables` used instead of the `variables` keyword argument, when
   generating the uninstalled pkg-config file. Since *0.54.0*
   Spaces in values are escaped with `\`, this is required in the case the value is

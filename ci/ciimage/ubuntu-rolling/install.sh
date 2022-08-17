@@ -12,11 +12,10 @@ pkgs=(
   python3-pip libxml2-dev libxslt1-dev libyaml-dev libjson-glib-dev
   wget unzip
   qt5-qmake qtbase5-dev qtchooser qtbase5-dev-tools clang
-  pkg-config-arm-linux-gnueabihf
   libomp-dev
   llvm lcov
   dub ldc
-  mingw-w64 mingw-w64-tools nim
+  mingw-w64 mingw-w64-tools libz-mingw-w64-dev
   libclang-dev
   libgcrypt20-dev
   libgpgme-dev
@@ -26,6 +25,8 @@ pkgs=(
   libperl-dev
   liblapack-dev libscalapack-mpi-dev
   bindgen
+  itstool
+  openjdk-11-jre
 )
 
 sed -i '/^#\sdeb-src /s/^#//' "/etc/apt/sources.list"
