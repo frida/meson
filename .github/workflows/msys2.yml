@@ -1,7 +1,7 @@
 name: msys2
 
 concurrency:
-  group: msys2-${{ github.head_ref }}
+  group: msys2-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 on:
@@ -51,6 +51,9 @@ jobs:
             TOOLCHAIN: clang
     env:
       MESON_CI_JOBNAME: msys2-${{ matrix.NAME }}
+      # XXX: For some reason enabling jit debugging "fixes" random python crashes
+      # see https://github.com/msys2/MINGW-packages/issues/11864
+      MSYS: "winjitdebug"
 
     defaults:
       run:
@@ -106,7 +109,6 @@ jobs:
             # Make sure it is on the PATH
             pypy3 -c "import sys; print(sys.version)"
           fi
-          export BOOST_ROOT=
           export PATHEXT="$PATHEXT;.py"
 
           if [[ '${{ matrix.COMPILER }}' == 'clang' ]]; then

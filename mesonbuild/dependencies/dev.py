@@ -27,10 +27,9 @@ import typing as T
 from mesonbuild.interpreterbase.decorators import FeatureDeprecated
 
 from .. import mesonlib, mlog
-from ..compilers import AppleClangCCompiler, AppleClangCPPCompiler, detect_compiler_for
 from ..environment import get_llvm_tool_names
 from ..mesonlib import version_compare, stringlistify, extract_as_list
-from .base import DependencyException, DependencyMethods, strip_system_libdirs, SystemDependency, ExternalDependency, DependencyTypeName
+from .base import DependencyException, DependencyMethods, detect_compiler, strip_system_libdirs, SystemDependency, ExternalDependency, DependencyTypeName
 from .cmake import CMakeDependency
 from .configtool import ConfigToolDependency
 from .factory import DependencyFactory
@@ -115,9 +114,6 @@ class GTestDependencySystem(SystemDependency):
         else:
             return 'building self'
 
-    def log_tried(self) -> str:
-        return 'system'
-
 
 class GTestDependencyPC(PkgConfigDependency):
 
@@ -185,9 +181,6 @@ class GMockDependencySystem(SystemDependency):
             return 'prebuilt'
         else:
             return 'building self'
-
-    def log_tried(self) -> str:
-        return 'system'
 
 
 class GMockDependencyPC(PkgConfigDependency):
@@ -490,6 +483,8 @@ class ZlibSystemDependency(SystemDependency):
 
     def __init__(self, name: str, environment: 'Environment', kwargs: T.Dict[str, T.Any]):
         super().__init__(name, environment, kwargs)
+        from ..compilers.c import AppleClangCCompiler
+        from ..compilers.cpp import AppleClangCPPCompiler
 
         m = self.env.machines[self.for_machine]
 
@@ -529,14 +524,14 @@ class ZlibSystemDependency(SystemDependency):
 
 class JNISystemDependency(SystemDependency):
     def __init__(self, environment: 'Environment', kwargs: JNISystemDependencyKW):
-        super().__init__('jni', environment, T.cast(T.Dict[str, T.Any], kwargs))
+        super().__init__('jni', environment, T.cast('T.Dict[str, T.Any]', kwargs))
 
         self.feature_since = ('0.62.0', '')
 
         m = self.env.machines[self.for_machine]
 
         if 'java' not in environment.coredata.compilers[self.for_machine]:
-            detect_compiler_for(environment, 'java', self.for_machine)
+            detect_compiler(self.name, environment, self.for_machine, 'java')
         self.javac = environment.coredata.compilers[self.for_machine]['java']
         self.version = self.javac.version
 
@@ -611,7 +606,7 @@ class JNISystemDependency(SystemDependency):
         """Translates the machine information to the platform-dependent include directory
 
         When inspecting a JDK release tarball or $JAVA_HOME, inside the `include/` directory is a
-        platform dependent folder that must be on the target's include path in addition to the
+        platform-dependent directory that must be on the target's include path in addition to the
         parent `include/` directory.
         """
         if m.is_linux():
@@ -622,6 +617,14 @@ class JNISystemDependency(SystemDependency):
             return 'darwin'
         elif m.is_sunos():
             return 'solaris'
+        elif m.is_freebsd():
+            return 'freebsd'
+        elif m.is_netbsd():
+            return 'netbsd'
+        elif m.is_openbsd():
+            return 'openbsd'
+        elif m.is_dragonflybsd():
+            return 'dragonfly'
 
         return None
 

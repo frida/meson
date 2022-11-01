@@ -48,7 +48,8 @@ class BasicLinkerIsCompilerMixin(Compiler):
     def sanitizer_link_args(self, value: str) -> T.List[str]:
         return []
 
-    def get_lto_link_args(self, *, threads: int = 0, mode: str = 'default') -> T.List[str]:
+    def get_lto_link_args(self, *, threads: int = 0, mode: str = 'default',
+                          thinlto_cache_dir: T.Optional[str] = None) -> T.List[str]:
         return []
 
     def can_linker_accept_rsp(self) -> bool:
@@ -57,7 +58,7 @@ class BasicLinkerIsCompilerMixin(Compiler):
     def get_linker_exelist(self) -> T.List[str]:
         return self.exelist.copy()
 
-    def get_linker_output_args(self, output: str) -> T.List[str]:
+    def get_linker_output_args(self, outputname: str) -> T.List[str]:
         return []
 
     def get_linker_always_args(self) -> T.List[str]:
@@ -118,7 +119,7 @@ class BasicLinkerIsCompilerMixin(Compiler):
     def get_buildtype_linker_args(self, buildtype: str) -> T.List[str]:
         return []
 
-    def get_link_debugfile_name(self, target: str) -> str:
+    def get_link_debugfile_name(self, targetfile: str) -> str:
         return ''
 
     def thread_flags(self, env: 'Environment') -> T.List[str]:

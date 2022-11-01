@@ -23,6 +23,7 @@ import json
 import os
 import pickle
 import re
+import shutil
 import typing as T
 import hashlib
 
@@ -34,7 +35,8 @@ from .. import mlog
 from ..compilers import LANGUAGES_USING_LDFLAGS, detect
 from ..mesonlib import (
     File, MachineChoice, MesonException, OrderedSet,
-    classify_unity_sources, OptionKey, join_args
+    classify_unity_sources, OptionKey, join_args,
+    ExecutableSerialisation
 )
 
 if T.TYPE_CHECKING:
@@ -47,6 +49,8 @@ if T.TYPE_CHECKING:
     from ..mesonlib import FileMode, FileOrString
 
     from typing_extensions import TypedDict
+
+    _ALL_SOURCES_TYPE = T.List[T.Union[File, build.CustomTarget, build.CustomTargetIndex, build.GeneratedList]]
 
     class TargetIntrospectionData(TypedDict):
 
@@ -185,27 +189,6 @@ class SubdirInstallData(InstallDataBase):
         super().__init__(path, install_path, install_path_name, install_mode, subproject, tag, data_type)
         self.exclude = exclude
 
-@dataclass(eq=False)
-class ExecutableSerialisation:
-
-    # XXX: should capture and feed default to False, instead of None?
-
-    cmd_args: T.List[str]
-    env: T.Optional[build.EnvironmentVariables] = None
-    exe_wrapper: T.Optional['programs.ExternalProgram'] = None
-    workdir: T.Optional[str] = None
-    extra_paths: T.Optional[T.List] = None
-    capture: T.Optional[bool] = None
-    feed: T.Optional[bool] = None
-    tag: T.Optional[str] = None
-    verbose: bool = False
-
-    def __post_init__(self) -> None:
-        if self.exe_wrapper is not None:
-            assert isinstance(self.exe_wrapper, programs.ExternalProgram)
-        self.pickled = False
-        self.skip_if_destdir = False
-        self.subproject = ''
 
 @dataclass(eq=False)
 class TestSerialisation:
@@ -305,7 +288,7 @@ class Backend:
         elif isinstance(t, build.CustomTargetIndex):
             filename = t.get_outputs()[0]
         else:
-            assert isinstance(t, build.BuildTarget)
+            assert isinstance(t, build.BuildTarget), t
             filename = t.get_filename()
         return os.path.join(self.get_target_dir(t), filename)
 
@@ -452,18 +435,20 @@ class Backend:
         return os.path.relpath(os.path.join('dummyprefixdir', todir),
                                os.path.join('dummyprefixdir', fromdir))
 
-    def flatten_object_list(self, target: build.BuildTarget, proj_dir_to_build_root: str = '') -> T.List[str]:
-        obj_list = self._flatten_object_list(target, target.get_objects(), proj_dir_to_build_root)
-        return list(dict.fromkeys(obj_list))
+    def flatten_object_list(self, target: build.BuildTarget, proj_dir_to_build_root: str = ''
+                            ) -> T.Tuple[T.List[str], T.List[build.BuildTargetTypes]]:
+        obj_list, deps = self._flatten_object_list(target, target.get_objects(), proj_dir_to_build_root)
+        return list(dict.fromkeys(obj_list)), deps
 
     def determine_ext_objs(self, objects: build.ExtractedObjects, proj_dir_to_build_root: str = '') -> T.List[str]:
-        obj_list = self._flatten_object_list(objects.target, [objects], proj_dir_to_build_root)
+        obj_list, _ = self._flatten_object_list(objects.target, [objects], proj_dir_to_build_root)
         return list(dict.fromkeys(obj_list))
 
     def _flatten_object_list(self, target: build.BuildTarget,
                              objects: T.Sequence[T.Union[str, 'File', build.ExtractedObjects]],
-                             proj_dir_to_build_root: str) -> T.List[str]:
+                             proj_dir_to_build_root: str) -> T.Tuple[T.List[str], T.List[build.BuildTargetTypes]]:
         obj_list: T.List[str] = []
+        deps: T.List[build.BuildTargetTypes] = []
         for obj in objects:
             if isinstance(obj, str):
                 o = os.path.join(proj_dir_to_build_root,
@@ -480,11 +465,14 @@ class Backend:
                     obj_list.append(obj.rel_to_builddir(o))
             elif isinstance(obj, build.ExtractedObjects):
                 if obj.recursive:
-                    obj_list += self._flatten_object_list(obj.target, obj.objlist, proj_dir_to_build_root)
-                obj_list += self._determine_ext_objs(obj, proj_dir_to_build_root)
+                    objs, d = self._flatten_object_list(obj.target, obj.objlist, proj_dir_to_build_root)
+                    obj_list.extend(objs)
+                    deps.extend(d)
+                obj_list.extend(self._determine_ext_objs(obj, proj_dir_to_build_root))
+                deps.append(obj.target)
             else:
                 raise MesonException('Unknown data type in object list.')
-        return obj_list
+        return obj_list, deps
 
     @staticmethod
     def is_swift_target(target: build.BuildTarget) -> bool:
@@ -599,15 +587,31 @@ class Backend:
         if any('\n' in c for c in es.cmd_args):
             reasons.append('because command contains newlines')
 
-        if es.env and es.env.varnames:
+        if env and env.varnames:
             reasons.append('to set env')
 
+        # force_serialize passed to this function means that the VS backend has
+        # decided it absolutely cannot use real commands. This is "always",
+        # because it's not clear what will work (other than compilers) and so
+        # we don't bother to handle a variety of common cases that probably do
+        # work.
+        #
+        # It's also overridden for a few conditions that can't be handled
+        # inside a command line
+
+        can_use_env = not force_serialize
         force_serialize = force_serialize or bool(reasons)
 
         if capture:
             reasons.append('to capture output')
         if feed:
             reasons.append('to feed input')
+
+        if can_use_env and reasons == ['to set env'] and shutil.which('env'):
+            envlist = []
+            for k, v in env.get_env({}).items():
+                envlist.append(f'{k}={v}')
+            return ['env'] + envlist + es.cmd_args, ', '.join(reasons)
 
         if not force_serialize:
             if not capture and not feed:
@@ -776,12 +780,22 @@ class Backend:
 
     @staticmethod
     def canonicalize_filename(fname: str) -> str:
+        parts = Path(fname).parts
+        hashed = ''
+        if len(parts) > 5:
+            temp = '/'.join(parts[-5:])
+            # is it shorter to hash the beginning of the path?
+            if len(fname) > len(temp) + 41:
+                hashed = hashlib.sha1(fname.encode('utf-8')).hexdigest() + '_'
+                fname = temp
         for ch in ('/', '\\', ':'):
             fname = fname.replace(ch, '_')
-        return fname
+        return hashed + fname
 
     def object_filename_from_source(self, target: build.BuildTarget, source: 'FileOrString') -> str:
         assert isinstance(source, mesonlib.File)
+        if isinstance(target, build.CompileTarget):
+            return target.sources_map[source]
         build_dir = self.environment.get_build_dir()
         rel_src = source.rel_to_builddir(self.build_to_src)
 
@@ -826,7 +840,7 @@ class Backend:
         # Filter out headers and all non-source files
         sources: T.List['FileOrString'] = []
         for s in raw_sources:
-            if self.environment.is_source(s) and not self.environment.is_header(s):
+            if self.environment.is_source(s):
                 sources.append(s)
             elif self.environment.is_object(s):
                 result.append(s.relative_name())
@@ -1044,7 +1058,7 @@ class Backend:
         tests.
         """
         result: T.Set[str] = set()
-        prospectives: T.Set[T.Union[build.BuildTarget, build.CustomTarget, build.CustomTargetIndex]] = set()
+        prospectives: T.Set[build.BuildTargetTypes] = set()
         if isinstance(target, build.BuildTarget):
             prospectives.update(target.get_transitive_link_deps())
             # External deps
@@ -1180,7 +1194,7 @@ class Backend:
         '''List of all files whose alteration means that the build
         definition needs to be regenerated.'''
         deps = OrderedSet([str(Path(self.build_to_src) / df)
-                for df in self.interpreter.get_build_def_files()])
+                           for df in self.interpreter.get_build_def_files()])
         if self.environment.is_cross_build():
             deps.update(self.environment.coredata.cross_files)
         deps.update(self.environment.coredata.config_files)
@@ -1527,6 +1541,10 @@ class Backend:
             return 'devel'
         elif localedir in dest_path.parents:
             return 'i18n'
+        elif 'installed-tests' in dest_path.parts:
+            return 'tests'
+        elif 'systemtap' in dest_path.parts:
+            return 'systemtap'
         mlog.debug('Failed to guess install tag for', dest_path)
         return None
 
@@ -1534,17 +1552,19 @@ class Backend:
         for t in self.build.get_targets().values():
             if not t.should_install():
                 continue
-            outdirs, default_install_dir_name, custom_install_dir = t.get_install_dir()
+            outdirs, install_dir_names, custom_install_dir = t.get_install_dir()
             # Sanity-check the outputs and install_dirs
             num_outdirs, num_out = len(outdirs), len(t.get_outputs())
-            if num_outdirs != 1 and num_outdirs != num_out:
+            if num_outdirs not in {1, num_out}:
                 m = 'Target {!r} has {} outputs: {!r}, but only {} "install_dir"s were found.\n' \
                     "Pass 'false' for outputs that should not be installed and 'true' for\n" \
                     'using the default installation directory for an output.'
                 raise MesonException(m.format(t.name, num_out, t.get_outputs(), num_outdirs))
             assert len(t.install_tag) == num_out
             install_mode = t.get_custom_install_mode()
-            first_outdir = outdirs[0]  # because mypy get's confused type narrowing in lists
+            # because mypy get's confused type narrowing in lists
+            first_outdir = outdirs[0]
+            first_outdir_name = install_dir_names[0]
 
             # Install the target output(s)
             if isinstance(t, build.BuildTarget):
@@ -1570,7 +1590,7 @@ class Backend:
                     tag = t.install_tag[0] or ('devel' if isinstance(t, build.StaticLibrary) else 'runtime')
                     mappings = t.get_link_deps_mapping(d.prefix)
                     i = TargetInstallData(self.get_target_filename(t), first_outdir,
-                                          default_install_dir_name,
+                                          first_outdir_name,
                                           should_strip, mappings, t.rpath_dirs_to_remove,
                                           t.install_rpath, install_mode, t.subproject,
                                           tag=tag, can_strip=can_strip)
@@ -1595,7 +1615,7 @@ class Backend:
                                 implib_install_dir = self.environment.get_import_lib_dir()
                             # Install the import library; may not exist for shared modules
                             i = TargetInstallData(self.get_target_filename_for_linking(t),
-                                                  implib_install_dir, default_install_dir_name,
+                                                  implib_install_dir, first_outdir_name,
                                                   False, {}, set(), '', install_mode,
                                                   t.subproject, optional=isinstance(t, build.SharedModule),
                                                   tag='devel')
@@ -1604,19 +1624,19 @@ class Backend:
                         if not should_strip and t.get_debug_filename():
                             debug_file = os.path.join(self.get_target_dir(t), t.get_debug_filename())
                             i = TargetInstallData(debug_file, first_outdir,
-                                                  default_install_dir_name,
+                                                  first_outdir_name,
                                                   False, {}, set(), '',
                                                   install_mode, t.subproject,
                                                   optional=True, tag='devel')
                             d.targets.append(i)
                 # Install secondary outputs. Only used for Vala right now.
                 if num_outdirs > 1:
-                    for output, outdir, tag in zip(t.get_outputs()[1:], outdirs[1:], t.install_tag[1:]):
+                    for output, outdir, outdir_name, tag in zip(t.get_outputs()[1:], outdirs[1:], install_dir_names[1:], t.install_tag[1:]):
                         # User requested that we not install this output
                         if outdir is False:
                             continue
                         f = os.path.join(self.get_target_dir(t), output)
-                        i = TargetInstallData(f, outdir, default_install_dir_name, False, {}, set(), None,
+                        i = TargetInstallData(f, outdir, outdir_name, False, {}, set(), None,
                                               install_mode, t.subproject,
                                               tag=tag)
                         d.targets.append(i)
@@ -1635,18 +1655,18 @@ class Backend:
                     if first_outdir is not False:
                         for output, tag in zip(t.get_outputs(), t.install_tag):
                             f = os.path.join(self.get_target_dir(t), output)
-                            i = TargetInstallData(f, first_outdir, default_install_dir_name,
+                            i = TargetInstallData(f, first_outdir, first_outdir_name,
                                                   False, {}, set(), None, install_mode,
                                                   t.subproject, optional=not t.build_by_default,
                                                   tag=tag)
                             d.targets.append(i)
                 else:
-                    for output, outdir, tag in zip(t.get_outputs(), outdirs, t.install_tag):
+                    for output, outdir, outdir_name, tag in zip(t.get_outputs(), outdirs, install_dir_names, t.install_tag):
                         # User requested that we not install this output
                         if outdir is False:
                             continue
                         f = os.path.join(self.get_target_dir(t), output)
-                        i = TargetInstallData(f, outdir, default_install_dir_name,
+                        i = TargetInstallData(f, outdir, outdir_name,
                                               False, {}, set(), None, install_mode,
                                               t.subproject, optional=not t.build_by_default,
                                               tag=tag)
@@ -1747,9 +1767,11 @@ class Backend:
             dst_dir = os.path.join(self.environment.get_prefix(),
                                    sd.install_dir)
             dst_name = os.path.join('{prefix}', sd.install_dir)
+            if sd.install_dir != sd.install_dir_name:
+                dst_name = sd.install_dir_name
             if not sd.strip_directory:
                 dst_dir = os.path.join(dst_dir, os.path.basename(src_dir))
-                dst_name = os.path.join(dst_dir, os.path.basename(src_dir))
+                dst_name = os.path.join(dst_name, os.path.basename(src_dir))
             i = SubdirInstallData(src_dir, dst_dir, dst_name, sd.install_mode, sd.exclude, sd.subproject, sd.install_tag)
             d.install_subdirs.append(i)
 
@@ -1778,7 +1800,7 @@ class Backend:
                     source_list += [os.path.join(self.source_dir, j)]
                 elif isinstance(j, (build.CustomTarget, build.BuildTarget)):
                     source_list += [os.path.join(self.build_dir, j.get_subdir(), o) for o in j.get_outputs()]
-            source_list = list(map(lambda x: os.path.normpath(x), source_list))
+            source_list = [os.path.normpath(s) for s in source_list]
 
             compiler: T.List[str] = []
             if isinstance(target, build.CustomTarget):
@@ -1844,3 +1866,28 @@ class Backend:
             else:
                 env.prepend('PATH', list(extra_paths))
         return env
+
+    def compiler_to_generator(self, target: build.BuildTarget,
+                              compiler: 'Compiler',
+                              sources: _ALL_SOURCES_TYPE,
+                              output_templ: str) -> build.GeneratedList:
+        '''
+        Some backends don't support custom compilers. This is a convenience
+        method to convert a Compiler to a Generator.
+        '''
+        exelist = compiler.get_exelist()
+        exe = programs.ExternalProgram(exelist[0])
+        args = exelist[1:]
+        # FIXME: There are many other args missing
+        commands = self.generate_basic_compiler_args(target, compiler)
+        commands += compiler.get_dependency_gen_args('@OUTPUT@', '@DEPFILE@')
+        commands += compiler.get_output_args('@OUTPUT@')
+        commands += compiler.get_compile_only_args() + ['@INPUT@']
+        commands += self.get_source_dir_include_args(target, compiler)
+        commands += self.get_build_dir_include_args(target, compiler)
+        generator = build.Generator(exe, args + commands.to_native(), [output_templ], depfile='@PLAINNAME@.d')
+        return generator.process_files(sources, self.interpreter)
+
+    def compile_target_to_generator(self, target: build.CompileTarget) -> build.GeneratedList:
+        all_sources = T.cast('_ALL_SOURCES_TYPE', target.sources) + T.cast('_ALL_SOURCES_TYPE', target.generated)
+        return self.compiler_to_generator(target, target.compiler, all_sources, target.output_templ)

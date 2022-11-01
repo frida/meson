@@ -53,7 +53,7 @@ if T.TYPE_CHECKING:
 #
 # Pip requires that RCs are named like this: '0.1.0.rc1'
 # But the corresponding Git tag needs to be '0.1.0rc1'
-version = '0.63.99'
+version = '0.64.0.rc1'
 
 backendlist = ['ninja', 'vs', 'vs2010', 'vs2012', 'vs2013', 'vs2015', 'vs2017', 'vs2019', 'vs2022', 'xcode']
 
@@ -693,7 +693,7 @@ class CoreData:
         result = []
         value = self.options[OptionKey('buildtype')].value
         if value == 'plain':
-            opt = '0'
+            opt = 'plain'
             debug = False
         elif value == 'debug':
             opt = '0'
@@ -720,7 +720,7 @@ class CoreData:
 
     def _set_others_from_buildtype(self, value: str) -> None:
         if value == 'plain':
-            opt = '0'
+            opt = 'plain'
             debug = False
         elif value == 'debug':
             opt = '0'
@@ -757,10 +757,10 @@ class CoreData:
             raise type(e)(('Validation failed for option %s: ' % option_name) + str(e)) \
                 .with_traceback(sys.exc_info()[2])
 
-    def get_external_args(self, for_machine: MachineChoice, lang: str) -> T.Union[str, T.List[str]]:
+    def get_external_args(self, for_machine: MachineChoice, lang: str) -> T.List[str]:
         return self.options[OptionKey('args', machine=for_machine, lang=lang)].value
 
-    def get_external_link_args(self, for_machine: MachineChoice, lang: str) -> T.Union[str, T.List[str]]:
+    def get_external_link_args(self, for_machine: MachineChoice, lang: str) -> T.List[str]:
         return self.options[OptionKey('link_args', machine=for_machine, lang=lang)].value
 
     def update_project_options(self, options: 'MutableKeyedOptionDictType') -> None:
@@ -1217,7 +1217,7 @@ BUILTIN_CORE_OPTIONS: 'MutableKeyedOptionDictType' = OrderedDict([
     (OptionKey('errorlogs'),       BuiltinOption(UserBooleanOption, "Whether to print the logs from failing tests", True)),
     (OptionKey('install_umask'),   BuiltinOption(UserUmaskOption, 'Default umask to apply on permissions of installed files', '022')),
     (OptionKey('layout'),          BuiltinOption(UserComboOption, 'Build directory layout', 'mirror', choices=['mirror', 'flat'])),
-    (OptionKey('optimization'),    BuiltinOption(UserComboOption, 'Optimization level', '0', choices=['0', 'g', '1', '2', '3', 's'])),
+    (OptionKey('optimization'),    BuiltinOption(UserComboOption, 'Optimization level', '0', choices=['plain', '0', 'g', '1', '2', '3', 's'])),
     (OptionKey('prefer_static'),   BuiltinOption(UserBooleanOption, 'Whether to try static linking before shared linking', False)),
     (OptionKey('stdsplit'),        BuiltinOption(UserBooleanOption, 'Split stdout and stderr in test logs', True)),
     (OptionKey('strip'),           BuiltinOption(UserBooleanOption, 'Strip targets on install', False)),

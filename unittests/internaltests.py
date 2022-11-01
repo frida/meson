@@ -13,7 +13,6 @@
 # limitations under the License.
 
 from configparser import ConfigParser
-from mesonbuild.mesonlib.universal import OptionType
 from pathlib import Path
 from unittest import mock
 import contextlib
@@ -32,16 +31,18 @@ import mesonbuild.mlog
 import mesonbuild.depfile
 import mesonbuild.dependencies.base
 import mesonbuild.dependencies.factory
-import mesonbuild.compilers
 import mesonbuild.envconfig
 import mesonbuild.environment
 import mesonbuild.modules.gnome
 from mesonbuild import coredata
+from mesonbuild.compilers.c import ClangCCompiler, GnuCCompiler
+from mesonbuild.compilers.d import DmdDCompiler
 from mesonbuild.interpreterbase import typed_pos_args, InvalidArguments, ObjectHolder
 from mesonbuild.interpreterbase import typed_pos_args, InvalidArguments, typed_kwargs, ContainerTypeInfo, KwargInfo
 from mesonbuild.mesonlib import (
     LibType, MachineChoice, PerMachine, Version, is_windows, is_osx,
     is_cygwin, is_openbsd, search_version, MesonException, OptionKey,
+    OptionType
 )
 from mesonbuild.interpreter.type_checking import in_set_validator, NoneType
 from mesonbuild.dependencies import PkgConfigDependency
@@ -116,7 +117,7 @@ class InternalTests(unittest.TestCase):
                          stat.S_IRGRP | stat.S_IXGRP)
 
     def test_compiler_args_class_none_flush(self):
-        cc = mesonbuild.compilers.ClangCCompiler([], 'fake', MachineChoice.HOST, False, mock.Mock())
+        cc = ClangCCompiler([], [], 'fake', MachineChoice.HOST, False, mock.Mock())
         a = cc.compiler_args(['-I.'])
         #first we are checking if the tree construction deduplicates the correct -I argument
         a += ['-I..']
@@ -133,14 +134,14 @@ class InternalTests(unittest.TestCase):
         self.assertEqual(a, ['-I.', '-I./tests2/', '-I./tests/', '-I..'])
 
     def test_compiler_args_class_d(self):
-        d = mesonbuild.compilers.DmdDCompiler([], 'fake', MachineChoice.HOST, 'info', 'arch')
+        d = DmdDCompiler([], 'fake', MachineChoice.HOST, 'info', 'arch')
         # check include order is kept when deduplicating
         a = d.compiler_args(['-Ifirst', '-Isecond', '-Ithird'])
         a += ['-Ifirst']
         self.assertEqual(a, ['-Ifirst', '-Isecond', '-Ithird'])
 
     def test_compiler_args_class_clike(self):
-        cc = mesonbuild.compilers.ClangCCompiler([], 'fake', MachineChoice.HOST, False, mock.Mock())
+        cc = ClangCCompiler([], [], 'fake', MachineChoice.HOST, False, mock.Mock())
         # Test that empty initialization works
         a = cc.compiler_args()
         self.assertEqual(a, [])
@@ -222,7 +223,7 @@ class InternalTests(unittest.TestCase):
     def test_compiler_args_class_gnuld(self):
         ## Test --start/end-group
         linker = mesonbuild.linkers.GnuBFDDynamicLinker([], MachineChoice.HOST, '-Wl,', [])
-        gcc = mesonbuild.compilers.GnuCCompiler([], 'fake', False, MachineChoice.HOST, mock.Mock(), linker=linker)
+        gcc = GnuCCompiler([], [], 'fake', False, MachineChoice.HOST, mock.Mock(), linker=linker)
         ## Ensure that the fake compiler is never called by overriding the relevant function
         gcc.get_default_include_dirs = lambda: ['/usr/include', '/usr/share/include', '/usr/local/include']
         ## Test that 'direct' append and extend works
@@ -250,7 +251,7 @@ class InternalTests(unittest.TestCase):
     def test_compiler_args_remove_system(self):
         ## Test --start/end-group
         linker = mesonbuild.linkers.GnuBFDDynamicLinker([], MachineChoice.HOST, '-Wl,', [])
-        gcc = mesonbuild.compilers.GnuCCompiler([], 'fake', False, MachineChoice.HOST, mock.Mock(), linker=linker)
+        gcc = GnuCCompiler([], [], 'fake', False, MachineChoice.HOST, mock.Mock(), linker=linker)
         ## Ensure that the fake compiler is never called by overriding the relevant function
         gcc.get_default_include_dirs = lambda: ['/usr/include', '/usr/share/include', '/usr/local/include']
         ## Test that 'direct' append and extend works
@@ -1387,6 +1388,10 @@ class InternalTests(unittest.TestCase):
                 validator=in_set_validator({'clean', 'build', 'rebuild', 'deprecated', 'since'}),
                 deprecated_values={'deprecated': '1.0'},
                 since_values={'since': '1.1'}),
+            KwargInfo('dict', (ContainerTypeInfo(list, str), ContainerTypeInfo(dict, str)), default={},
+                      since_values={list: '1.9'}),
+            KwargInfo('new_dict', (ContainerTypeInfo(list, str), ContainerTypeInfo(dict, str)), default={},
+                      since_values={dict: '1.1'}),
         )
         def _(obj, node, args: T.Tuple, kwargs: T.Dict[str, str]) -> None:
             pass
@@ -1426,6 +1431,18 @@ class InternalTests(unittest.TestCase):
         with self.subTest('new string union'), mock.patch('sys.stdout', io.StringIO()) as out:
             _(None, mock.Mock(subproject=''), [], {'mode': 'since'})
             self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '1.0'.*introduced in '1.1': "testfunc" keyword argument "mode" value "since".*""")
+
+        with self.subTest('new container'), mock.patch('sys.stdout', io.StringIO()) as out:
+            _(None, mock.Mock(subproject=''), [], {'dict': ['a=b']})
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '1.0'.*introduced in '1.9': "testfunc" keyword argument "dict" of type list.*""")
+
+        with self.subTest('new container set to default'), mock.patch('sys.stdout', io.StringIO()) as out:
+            _(None, mock.Mock(subproject=''), [], {'new_dict': {}})
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '1.0'.*introduced in '1.1': "testfunc" keyword argument "new_dict" of type dict.*""")
+
+        with self.subTest('new container default'), mock.patch('sys.stdout', io.StringIO()) as out:
+            _(None, mock.Mock(subproject=''), [], {})
+            self.assertNotRegex(out.getvalue(), r"""WARNING:.Project targets '1.0'.*introduced in '1.1': "testfunc" keyword argument "new_dict" of type dict.*""")
 
     def test_typed_kwarg_evolve(self) -> None:
         k = KwargInfo('foo', str, required=True, default='foo')

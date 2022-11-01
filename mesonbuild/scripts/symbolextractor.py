@@ -53,7 +53,6 @@ def write_if_changed(text: str, outfilename: str) -> None:
         f.write(text)
 
 def print_tool_warning(tools: T.List[str], msg: str, stderr: T.Optional[str] = None) -> None:
-    global TOOL_WARNING_FILE
     if os.path.exists(TOOL_WARNING_FILE):
         return
     m = f'{tools!r} {msg}. {RELINKING_WARNING}'
@@ -316,7 +315,7 @@ def gen_symbols(libfilename: str, impfilename: str, outfilename: str, cross_host
         dummy_syms(outfilename)
 
 def run(args: T.List[str]) -> int:
-    global TOOL_WARNING_FILE
+    global TOOL_WARNING_FILE  # pylint: disable=global-statement
     options = parser.parse_args(args)
     if len(options.args) != 4:
         print('symbolextractor.py <shared library file> <import library> <output file>')

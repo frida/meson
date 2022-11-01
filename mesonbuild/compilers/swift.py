@@ -27,6 +27,7 @@ if T.TYPE_CHECKING:
     from ..mesonlib import MachineChoice
 
 swift_optimization_args = {
+    'plain': [],
     '0': [],
     'g': [],
     '1': ['-O'],
@@ -44,7 +45,7 @@ class SwiftCompiler(Compiler):
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice,
                  is_cross: bool, info: 'MachineInfo', full_version: T.Optional[str] = None,
                  linker: T.Optional['DynamicLinker'] = None):
-        super().__init__(exelist, version, for_machine, info,
+        super().__init__([], exelist, version, for_machine, info,
                          is_cross=is_cross, full_version=full_version,
                          linker=linker)
         self.version = version
@@ -58,7 +59,7 @@ class SwiftCompiler(Compiler):
     def get_dependency_gen_args(self, outtarget: str, outfile: str) -> T.List[str]:
         return ['-emit-dependencies']
 
-    def depfile_for_object(self, objfile: str) -> str:
+    def depfile_for_object(self, objfile: str) -> T.Optional[str]:
         return os.path.splitext(objfile)[0] + '.' + self.get_depfile_suffix()
 
     def get_depfile_suffix(self) -> str:

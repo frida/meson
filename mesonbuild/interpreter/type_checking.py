@@ -8,13 +8,15 @@ import os
 import typing as T
 
 from .. import compilers
-from ..build import (EnvironmentVariables, EnvInitValueType, CustomTarget, BuildTarget,
+from ..build import (CustomTarget, BuildTarget,
                      CustomTargetIndex, ExtractedObjects, GeneratedList, IncludeDirs,
                      BothLibraries, SharedLibrary, StaticLibrary, Jar, Executable)
 from ..coredata import UserFeatureOption
 from ..dependencies import Dependency, InternalDependency
 from ..interpreterbase.decorators import KwargInfo, ContainerTypeInfo
-from ..mesonlib import File, FileMode, MachineChoice, listify, has_path_sep, OptionKey
+from ..mesonlib import (
+    File, FileMode, MachineChoice, listify, has_path_sep, OptionKey,
+    EnvInitValueType, EnvironmentVariables)
 from ..programs import ExternalProgram
 
 # Helper definition for type checks that are `Optional[T]`
@@ -109,7 +111,9 @@ def _lower_strlist(input: T.List[str]) -> T.List[str]:
     return [i.lower() for i in input]
 
 
-def variables_validator(contents: T.Union[T.List[str], T.Dict[str, str]]) -> T.Optional[str]:
+def variables_validator(contents: T.Union[str, T.List[str], T.Dict[str, str]]) -> T.Optional[str]:
+    if isinstance(contents, str):
+        contents = [contents]
     if isinstance(contents, dict):
         variables = contents
     else:
@@ -130,7 +134,9 @@ def variables_validator(contents: T.Union[T.List[str], T.Dict[str, str]]) -> T.O
     return None
 
 
-def variables_convertor(contents: T.Union[T.List[str], T.Dict[str, str]]) -> T.Dict[str, str]:
+def variables_convertor(contents: T.Union[str, T.List[str], T.Dict[str, str]]) -> T.Dict[str, str]:
+    if isinstance(contents, str):
+        contents = [contents]
     if isinstance(contents, dict):
         return contents
     variables = {}
@@ -377,7 +383,7 @@ DEFAULT_OPTIONS: KwargInfo[T.List[str]] = KwargInfo(
 )
 
 ENV_METHOD_KW = KwargInfo('method', str, default='set', since='0.62.0',
-    validator=in_set_validator({'set', 'prepend', 'append'}))
+                          validator=in_set_validator({'set', 'prepend', 'append'}))
 
 ENV_SEPARATOR_KW = KwargInfo('separator', str, default=os.pathsep)
 
@@ -405,7 +411,7 @@ LINK_WITH_KW: KwargInfo[T.List[T.Union[BothLibraries, SharedLibrary, StaticLibra
     ContainerTypeInfo(list, (BothLibraries, SharedLibrary, StaticLibrary, CustomTarget, CustomTargetIndex, Jar, Executable, Dependency)),
     listify=True,
     default=[],
-    validator=lambda x: _link_with_error if isinstance(x, Dependency) else None,
+    validator=lambda x: _link_with_error if any(isinstance(i, Dependency) for i in x) else None,
 )
 
 def link_whole_validator(values: T.List[T.Union[StaticLibrary, CustomTarget, CustomTargetIndex, Dependency]]) -> T.Optional[str]:
@@ -433,7 +439,9 @@ SOURCES_KW: KwargInfo[T.List[T.Union[str, File, CustomTarget, CustomTargetIndex,
 
 VARIABLES_KW: KwargInfo[T.Dict[str, str]] = KwargInfo(
     'variables',
-    (ContainerTypeInfo(list, str), ContainerTypeInfo(dict, str)),
+    # str is listified by validator/convertor, cannot use listify=True here because
+    # that would listify dict too.
+    (str, ContainerTypeInfo(list, str), ContainerTypeInfo(dict, str)), # type: ignore
     validator=variables_validator,
     convertor=variables_convertor,
     default={},

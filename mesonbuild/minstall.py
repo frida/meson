@@ -235,7 +235,7 @@ def restore_selinux_contexts() -> None:
     '''
     try:
         subprocess.check_call(['selinuxenabled'])
-    except (FileNotFoundError, NotADirectoryError, PermissionError, subprocess.CalledProcessError):
+    except (FileNotFoundError, NotADirectoryError, OSError, PermissionError, subprocess.CalledProcessError):
         # If we don't have selinux or selinuxenabled returned 1, failure
         # is ignored quietly.
         return
@@ -693,7 +693,6 @@ class Installer:
                 raise MesonException(f'File {fname!r} could not be found')
             elif os.path.isfile(fname):
                 file_copied = self.do_copyfile(fname, outname, makedirs=(dm, outdir))
-                self.set_mode(outname, install_mode, d.install_umask)
                 if should_strip and d.strip_bin is not None:
                     if fname.endswith('.jar'):
                         self.log('Not stripping jar target: {}'.format(os.path.basename(fname)))
@@ -723,6 +722,8 @@ class Installer:
                         pass
                     else:
                         raise
+                # file mode needs to be set last, after strip/depfixer editing
+                self.set_mode(outname, install_mode, d.install_umask)
 
 def rebuild_all(wd: str) -> bool:
     if not (Path(wd) / 'build.ninja').is_file():

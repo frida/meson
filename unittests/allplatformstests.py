@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from mesonbuild.mesonlib.universal import windows_proof_rm
 import subprocess
 import re
 import json
@@ -42,12 +41,16 @@ from mesonbuild.mesonlib import (
     BuildDirLock, MachineChoice, is_windows, is_osx, is_cygwin, is_dragonflybsd,
     is_sunos, windows_proof_rmtree, python_command, version_compare, split_args, quote_arg,
     relpath, is_linux, git, search_version, do_conf_file, do_conf_str, default_prefix,
-    MesonException, EnvironmentException, OptionKey
+    MesonException, EnvironmentException, OptionKey, ExecutableSerialisation, EnvironmentVariables,
+    windows_proof_rm
 )
 
+from mesonbuild.compilers.mixins.clang import ClangCompiler
+from mesonbuild.compilers.mixins.gnu import GnuCompiler
+from mesonbuild.compilers.mixins.intel import IntelGnuLikeCompiler
+from mesonbuild.compilers.c import VisualStudioCCompiler, ClangClCCompiler
+from mesonbuild.compilers.cpp import VisualStudioCPPCompiler, ClangClCPPCompiler
 from mesonbuild.compilers import (
-    GnuCompiler, ClangCompiler, IntelGnuLikeCompiler, VisualStudioCCompiler,
-    VisualStudioCPPCompiler, ClangClCCompiler, ClangClCPPCompiler,
     detect_static_linker, detect_c_compiler, compiler_from_language,
     detect_compiler_for
 )
@@ -539,7 +542,7 @@ class AllPlatformTests(BasePlatformTests):
         self.run_tests()
 
     def test_implicit_forcefallback(self):
-        testdir = os.path.join(self.unit_test_dir, '96 implicit force fallback')
+        testdir = os.path.join(self.unit_test_dir, '95 implicit force fallback')
         with self.assertRaises(subprocess.CalledProcessError):
             self.init(testdir)
         self.init(testdir, extra_args=['--wrap-mode=forcefallback'])
@@ -578,7 +581,7 @@ class AllPlatformTests(BasePlatformTests):
         self.assertIn('1/1 subtest 1', out)
 
     def test_long_output(self):
-        testdir = os.path.join(self.common_test_dir, '253 long output')
+        testdir = os.path.join(self.common_test_dir, '254 long output')
         self.init(testdir)
         self.build()
         self.run_tests()
@@ -792,6 +795,26 @@ class AllPlatformTests(BasePlatformTests):
         self.assertFailedTestCount(1, self.mtest_command + ['--suite', 'subprjfail', '--suite', 'subprjmix', '--suite', 'mainprj', '--no-suite', 'subprjmix:fail', 'mainprj-failing_test'])
 
         self.assertFailedTestCount(2, self.mtest_command + ['--no-suite', 'subprjfail:fail', '--no-suite', 'subprjmix:fail'])
+
+    def test_mtest_reconfigure(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'mtest can\'t rebuild with {self.backend.name!r}')
+
+        testdir = os.path.join(self.common_test_dir, '206 tap tests')
+        self.init(testdir)
+        self.utime(os.path.join(testdir, 'meson.build'))
+        o = self._run(self.mtest_command + ['--list'])
+        self.assertIn('Regenerating build files.', o)
+        self.assertIn('test_features / xfail', o)
+        o = self._run(self.mtest_command + ['--list'])
+        self.assertNotIn('Regenerating build files.', o)
+        # no real targets should have been built
+        tester = os.path.join(self.builddir, 'tester' + exe_suffix)
+        self.assertPathDoesNotExist(tester)
+        # check that we don't reconfigure if --no-rebuild is passed
+        self.utime(os.path.join(testdir, 'meson.build'))
+        o = self._run(self.mtest_command + ['--list', '--no-rebuild'])
+        self.assertNotIn('Regenerating build files.', o)
 
     def test_build_by_default(self):
         testdir = os.path.join(self.common_test_dir, '129 build by default')
@@ -1726,7 +1749,7 @@ class AllPlatformTests(BasePlatformTests):
         check_pcfile('libvartest2.pc', relocatable=False)
 
         self.wipe()
-        testdir_abs = os.path.join(self.unit_test_dir, '106 pkgconfig relocatable with absolute path')
+        testdir_abs = os.path.join(self.unit_test_dir, '105 pkgconfig relocatable with absolute path')
         self.init(testdir_abs)
 
         check_pcfile('libsimple.pc', relocatable=True, levels=3)
@@ -1929,24 +1952,26 @@ class AllPlatformTests(BasePlatformTests):
             r'sub' + os.path.sep + r'meson.build:3: WARNING: Keyword argument "link_with" defined multiple times.',
             r'meson.build:6: WARNING: a warning of some sort',
             r'sub' + os.path.sep + r'meson.build:4: WARNING: subdir warning',
-            r'meson.build:7: WARNING: Module unstable-simd has no backwards or forwards compatibility and might not exist in future releases.',
+            r'meson.build:7: WARNING: Module SIMD has no backwards or forwards compatibility and might not exist in future releases.',
             r"meson.build:11: WARNING: The variable(s) 'MISSING' in the input file 'conf.in' are not present in the given configuration data.",
         ]:
-            self.assertRegex(out, re.escape(expected))
+            with self.subTest(expected):
+                self.assertRegex(out, re.escape(expected))
 
         for wd in [
             self.src_root,
             self.builddir,
             os.getcwd(),
         ]:
-            self.new_builddir()
-            out = self.init(tdir, workdir=wd)
-            expected = os.path.join(relpath(tdir, self.src_root), 'meson.build')
-            relwd = relpath(self.src_root, wd)
-            if relwd != '.':
-                expected = os.path.join(relwd, expected)
-                expected = '\n' + expected + ':'
-            self.assertIn(expected, out)
+            with self.subTest(wd):
+                self.new_builddir()
+                out = self.init(tdir, workdir=wd)
+                expected = os.path.join(relpath(tdir, self.src_root), 'meson.build')
+                relwd = relpath(self.src_root, wd)
+                if relwd != '.':
+                    expected = os.path.join(relwd, expected)
+                    expected = '\n' + expected + ':'
+                self.assertIn(expected, out)
 
     def test_error_location_path(self):
         '''Test locations in meson errors contain correct paths'''
@@ -2087,7 +2112,7 @@ class AllPlatformTests(BasePlatformTests):
         self.assertIn(msg, out)
 
     def test_mixed_language_linker_check(self):
-        testdir = os.path.join(self.unit_test_dir, '97 compiler.links file arg')
+        testdir = os.path.join(self.unit_test_dir, '96 compiler.links file arg')
         self.init(testdir)
         cmds = self.get_meson_log_compiler_checks()
         self.assertEqual(len(cmds), 5)
@@ -3292,7 +3317,7 @@ class AllPlatformTests(BasePlatformTests):
                 A number       : 1
                 yes            : YES
                 no             : NO
-                coma list      : a, b, c
+                comma list     : a, b, c
 
               Stuff
                 missing prog   : NO
@@ -3300,9 +3325,10 @@ class AllPlatformTests(BasePlatformTests):
                 missing dep    : NO
                 external dep   : YES 1.2.3
                 internal dep   : YES
+                disabler       : NO
 
               Plugins
-                long coma list : alpha, alphacolor, apetag, audiofx, audioparsers, auparse,
+                long comma list: alpha, alphacolor, apetag, audiofx, audioparsers, auparse,
                                  autodetect, avi
 
               Subprojects
@@ -3711,9 +3737,25 @@ class AllPlatformTests(BasePlatformTests):
                   patch_directory = wrap_git_builddef
                   revision = master
                 '''.format(upstream_uri)))
-            self.init(srcdir)
+            out = self.init(srcdir)
             self.build()
             self.run_tests()
+
+            # Make sure the warning does not occur on the first init.
+            out_of_date_warning = 'revision may be out of date'
+            self.assertNotIn(out_of_date_warning, out)
+
+            # Change the wrap's revisions, reconfigure, and make sure it does
+            # warn on the reconfigure.
+            with open(os.path.join(srcdir, 'subprojects', 'wrap_git.wrap'), 'w', encoding='utf-8') as f:
+                f.write(textwrap.dedent('''
+                  [wrap-git]
+                  url = {}
+                  patch_directory = wrap_git_builddef
+                  revision = not-master
+                '''.format(upstream_uri)))
+            out = self.init(srcdir, extra_args='--reconfigure')
+            self.assertIn(out_of_date_warning, out)
 
     def test_extract_objects_custom_target_no_warning(self):
         testdir = os.path.join(self.common_test_dir, '22 object extraction')
@@ -3836,7 +3878,7 @@ class AllPlatformTests(BasePlatformTests):
         self.init(srcdir, extra_args=['-Dbuild.b_lto=true'])
 
     def test_install_skip_subprojects(self):
-        testdir = os.path.join(self.unit_test_dir, '92 install skip subprojects')
+        testdir = os.path.join(self.unit_test_dir, '91 install skip subprojects')
         self.init(testdir)
         self.build()
 
@@ -3882,7 +3924,7 @@ class AllPlatformTests(BasePlatformTests):
         check_installed_files(['--skip-subprojects', 'another'], all_expected)
 
     def test_adding_subproject_to_configure_project(self) -> None:
-        srcdir = os.path.join(self.unit_test_dir, '93 new subproject in configured project')
+        srcdir = os.path.join(self.unit_test_dir, '92 new subproject in configured project')
         self.init(srcdir)
         self.build()
         self.setconf('-Duse-sub=true')
@@ -3905,7 +3947,7 @@ class AllPlatformTests(BasePlatformTests):
         if not shutil.which('clang-format'):
             raise SkipTest('clang-format not found')
 
-        testdir = os.path.join(self.unit_test_dir, '94 clangformat')
+        testdir = os.path.join(self.unit_test_dir, '93 clangformat')
         newdir = os.path.join(self.builddir, 'testdir')
         shutil.copytree(testdir, newdir)
         self.new_builddir()
@@ -3930,7 +3972,7 @@ class AllPlatformTests(BasePlatformTests):
         self.build('clang-format-check')
 
     def test_custom_target_implicit_include(self):
-        testdir = os.path.join(self.unit_test_dir, '95 custominc')
+        testdir = os.path.join(self.unit_test_dir, '94 custominc')
         self.init(testdir)
         self.build()
         compdb = self.get_compdb()
@@ -3970,7 +4012,7 @@ class AllPlatformTests(BasePlatformTests):
                 self.assertEqual(sorted(link_args), sorted(['-flto']))
 
     def test_install_tag(self) -> None:
-        testdir = os.path.join(self.unit_test_dir, '99 install all targets')
+        testdir = os.path.join(self.unit_test_dir, '98 install all targets')
         self.init(testdir)
         self.build()
 
@@ -4117,7 +4159,7 @@ class AllPlatformTests(BasePlatformTests):
         do_install(None, expected_all, 2)
 
     def test_introspect_install_plan(self):
-        testdir = os.path.join(self.unit_test_dir, '99 install all targets')
+        testdir = os.path.join(self.unit_test_dir, '98 install all targets')
         introfile = os.path.join(self.builddir, 'meson-info', 'intro-install_plan.json')
         self.init(testdir)
         self.assertPathExists(introfile)
@@ -4143,11 +4185,11 @@ class AllPlatformTests(BasePlatformTests):
         expected = {
             'targets': {
                 f'{self.builddir}/out1-notag.txt': {
-                    'destination': '{prefix}/share/out1-notag.txt',
+                    'destination': '{datadir}/out1-notag.txt',
                     'tag': None,
                 },
                 f'{self.builddir}/out2-notag.txt': {
-                    'destination': '{prefix}/share/out2-notag.txt',
+                    'destination': '{datadir}/out2-notag.txt',
                     'tag': None,
                 },
                 f'{self.builddir}/libstatic.a': {
@@ -4195,67 +4237,67 @@ class AllPlatformTests(BasePlatformTests):
                     'tag': 'devel',
                 },
                 f'{self.builddir}/out1-custom.txt': {
-                    'destination': '{prefix}/share/out1-custom.txt',
+                    'destination': '{datadir}/out1-custom.txt',
                     'tag': 'custom',
                 },
                 f'{self.builddir}/out2-custom.txt': {
-                    'destination': '{prefix}/share/out2-custom.txt',
+                    'destination': '{datadir}/out2-custom.txt',
                     'tag': 'custom',
                 },
                 f'{self.builddir}/out3-custom.txt': {
-                    'destination': '{prefix}/share/out3-custom.txt',
+                    'destination': '{datadir}/out3-custom.txt',
                     'tag': 'custom',
                 },
                 f'{self.builddir}/subdir/out1.txt': {
-                    'destination': '{prefix}/share/out1.txt',
+                    'destination': '{datadir}/out1.txt',
                     'tag': None,
                 },
                 f'{self.builddir}/subdir/out2.txt': {
-                    'destination': '{prefix}/share/out2.txt',
+                    'destination': '{datadir}/out2.txt',
                     'tag': None,
                 },
                 f'{self.builddir}/out-devel.h': {
-                    'destination': '{prefix}/include/out-devel.h',
+                    'destination': '{includedir}/out-devel.h',
                     'tag': 'devel',
                 },
                 f'{self.builddir}/out3-notag.txt': {
-                    'destination': '{prefix}/share/out3-notag.txt',
+                    'destination': '{datadir}/out3-notag.txt',
                     'tag': None,
                 },
             },
             'configure': {
                 f'{self.builddir}/foo-notag.h': {
-                    'destination': '{prefix}/share/foo-notag.h',
+                    'destination': '{datadir}/foo-notag.h',
                     'tag': None,
                 },
                 f'{self.builddir}/foo2-devel.h': {
-                    'destination': '{prefix}/include/foo2-devel.h',
+                    'destination': '{includedir}/foo2-devel.h',
                     'tag': 'devel',
                 },
                 f'{self.builddir}/foo-custom.h': {
-                    'destination': '{prefix}/share/foo-custom.h',
+                    'destination': '{datadir}/foo-custom.h',
                     'tag': 'custom',
                 },
                 f'{self.builddir}/subdir/foo2.h': {
-                    'destination': '{prefix}/share/foo2.h',
+                    'destination': '{datadir}/foo2.h',
                     'tag': None,
                 },
             },
             'data': {
                 f'{testdir}/bar-notag.txt': {
-                    'destination': '{datadir}/share/bar-notag.txt',
+                    'destination': '{datadir}/bar-notag.txt',
                     'tag': None,
                 },
                 f'{testdir}/bar-devel.h': {
-                    'destination': '{datadir}/include/bar-devel.h',
+                    'destination': '{includedir}/bar-devel.h',
                     'tag': 'devel',
                 },
                 f'{testdir}/bar-custom.txt': {
-                    'destination': '{datadir}/share/bar-custom.txt',
+                    'destination': '{datadir}/bar-custom.txt',
                     'tag': 'custom',
                 },
                 f'{testdir}/subdir/bar2-devel.h': {
-                    'destination': '{datadir}/include/bar2-devel.h',
+                    'destination': '{includedir}/bar2-devel.h',
                     'tag': 'devel',
                 },
             },
@@ -4268,6 +4310,12 @@ class AllPlatformTests(BasePlatformTests):
                     'destination': '{includedir}/foo3-devel.h',
                     'tag': 'devel',
                 },
+            },
+            'install_subdirs': {
+                f'{testdir}/custom_files': {
+                    'destination': '{datadir}/custom_files',
+                    'tag': 'custom'
+                }
             }
         }
 
@@ -4313,7 +4361,7 @@ class AllPlatformTests(BasePlatformTests):
                 }}
             ''')
 
-        testdir = os.path.join(self.unit_test_dir, '102 rlib linkage')
+        testdir = os.path.join(self.unit_test_dir, '101 rlib linkage')
         gen_file = os.path.join(testdir, 'lib.rs')
         with open(gen_file, 'w') as f:
             f.write(template.format(0))
@@ -4333,7 +4381,7 @@ class AllPlatformTests(BasePlatformTests):
         self.assertIn('exit status 39', cm.exception.stdout)
 
     def test_custom_target_name(self):
-        testdir = os.path.join(self.unit_test_dir, '100 custom target name')
+        testdir = os.path.join(self.unit_test_dir, '99 custom target name')
         self.init(testdir)
         out = self.build()
         if self.backend is Backend.ninja:
@@ -4341,7 +4389,7 @@ class AllPlatformTests(BasePlatformTests):
             self.assertIn('Generating subdir/file.txt with a custom command', out)
 
     def test_symlinked_subproject(self):
-        testdir = os.path.join(self.unit_test_dir, '107 subproject symlink')
+        testdir = os.path.join(self.unit_test_dir, '106 subproject symlink')
         subproject_dir = os.path.join(testdir, 'subprojects')
         subproject = os.path.join(testdir, 'symlinked_subproject')
         symlinked_subproject = os.path.join(testdir, 'subprojects', 'symlinked_subproject')
@@ -4354,7 +4402,7 @@ class AllPlatformTests(BasePlatformTests):
         self.build()
 
     def test_configure_same_noop(self):
-        testdir = os.path.join(self.unit_test_dir, '109 configure same noop')
+        testdir = os.path.join(self.unit_test_dir, '108 configure same noop')
         self.init(testdir, extra_args=['-Dopt=val'])
 
         filename = os.path.join(self.privatedir, 'coredata.dat')
@@ -4362,3 +4410,31 @@ class AllPlatformTests(BasePlatformTests):
         self.setconf(["-Dopt=val"])
         newmtime = os.path.getmtime(filename)
         self.assertEqual(oldmtime, newmtime)
+
+    def test_scripts_loaded_modules(self):
+        '''
+        Simulate a wrapped command, as done for custom_target() that capture
+        output. The script will print all python modules loaded and we verify
+        that it contains only an acceptable subset. Loading too many modules
+        slows down the build when many custom targets get wrapped.
+        '''
+        es = ExecutableSerialisation(python_command + ['-c', 'exit(0)'], env=EnvironmentVariables())
+        p = Path(self.builddir, 'exe.dat')
+        with p.open('wb') as f:
+            pickle.dump(es, f)
+        cmd = self.meson_command + ['--internal', 'test_loaded_modules', '--unpickle', str(p)]
+        p = subprocess.run(cmd, stdout=subprocess.PIPE)
+        all_modules = json.loads(p.stdout.splitlines()[0])
+        meson_modules = [m for m in all_modules if 'meson' in m]
+        expected_meson_modules = [
+            'mesonbuild',
+            'mesonbuild._pathlib',
+            'mesonbuild.utils',
+            'mesonbuild.utils.core',
+            'mesonbuild.mesonmain',
+            'mesonbuild.mlog',
+            'mesonbuild.scripts',
+            'mesonbuild.scripts.meson_exe',
+            'mesonbuild.scripts.test_loaded_modules'
+        ]
+        self.assertEqual(sorted(expected_meson_modules), sorted(meson_modules))

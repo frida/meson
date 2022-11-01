@@ -403,6 +403,7 @@ methods:
 
   - name: project_license
     returns: list[str]
+    since: 0.45.0
     description: Returns the array of licenses specified in [[project]] function call.
 
   - name: project_name
@@ -450,7 +451,7 @@ methods:
         type: env | str | list[str] | dict[str] | dict[list[str]]
         description: |
           The [[@env]] object to add.
-          Since *0.62.0* list of strings is allowed in dictionnary values. In that
+          Since *0.62.0* list of strings is allowed in dictionary values. In that
           case values are joined using the separator.
     kwargs:
       separator:
@@ -467,5 +468,5 @@ methods:
         description: |
           Must be one of 'set', 'prepend', or 'append'
           (defaults to 'set'). Controls if initial values defined in the first
-          positional argument are prepended, appended or repace the current value
+          positional argument are prepended, appended or replace the current value
           of the environment variable.

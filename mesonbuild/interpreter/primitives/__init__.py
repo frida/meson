@@ -12,6 +12,8 @@ __all__ = [
     'MesonVersionStringHolder',
     'DependencyVariableString',
     'DependencyVariableStringHolder',
+    'OptionString',
+    'OptionStringHolder',
 ]
 
 from .array import ArrayHolder
@@ -22,5 +24,6 @@ from .range import RangeHolder
 from .string import (
     StringHolder,
     MesonVersionString, MesonVersionStringHolder,
-    DependencyVariableString, DependencyVariableStringHolder
+    DependencyVariableString, DependencyVariableStringHolder,
+    OptionString, OptionStringHolder,
 )

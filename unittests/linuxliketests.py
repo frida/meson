@@ -40,9 +40,11 @@ from mesonbuild.mesonlib import (
 )
 from mesonbuild.compilers import (
     detect_c_compiler, detect_cpp_compiler, compiler_from_language,
-    AppleClangCCompiler, AppleClangCPPCompiler, AppleClangObjCCompiler,
-    AppleClangObjCPPCompiler
 )
+from mesonbuild.compilers.c import AppleClangCCompiler
+from mesonbuild.compilers.cpp import AppleClangCPPCompiler
+from mesonbuild.compilers.objc import AppleClangObjCCompiler
+from mesonbuild.compilers.objcpp import AppleClangObjCPPCompiler
 from mesonbuild.dependencies import PkgConfigDependency
 import mesonbuild.modules.pkgconfig
 
@@ -615,7 +617,7 @@ class LinuxlikeTests(BasePlatformTests):
 
         f = os.path.join(self.installdir, 'etc', 'etcfile.dat')
         found_mode = stat.filemode(os.stat(f).st_mode)
-        want_mode = 'rw------T'
+        want_mode = 'rw-------'
         self.assertEqual(want_mode, found_mode[1:])
 
         f = os.path.join(self.installdir, 'usr', 'bin', 'runscript.sh')
@@ -650,7 +652,7 @@ class LinuxlikeTests(BasePlatformTests):
         f = os.path.join(self.installdir, 'usr', 'share', 'sub1', 'second.dat')
         statf = os.stat(f)
         found_mode = stat.filemode(statf.st_mode)
-        want_mode = 'rwxr-x--t'
+        want_mode = 'rwxr-x--x'
         self.assertEqual(want_mode, found_mode[1:])
         if os.getuid() == 0:
             # The chown failed nonfatally if we're not root
@@ -673,15 +675,15 @@ class LinuxlikeTests(BasePlatformTests):
                 ('bin/trivialprog', '-rwxr-sr-x'),
                 ('include', 'drwxr-x---'),
                 ('include/config.h', '-rw-rwSr--'),
-                ('include/rootdir.h', '-r--r--r-T'),
+                ('include/rootdir.h', '-r--r--r--'),
                 ('lib', 'drwxr-x---'),
                 ('lib/libstat.a', '-rw---Sr--'),
                 ('share', 'drwxr-x---'),
                 ('share/man', 'drwxr-x---'),
                 ('share/man/man1', 'drwxr-x---'),
-                ('share/man/man1/foo.1', '-r--r--r-T'),
+                ('share/man/man1/foo.1', '-r--r--r--'),
                 ('share/sub1', 'drwxr-x---'),
-                ('share/sub1/second.dat', '-rwxr-x--t'),
+                ('share/sub1/second.dat', '-rwxr-x--x'),
                 ('subdir', 'drwxr-x---'),
                 ('subdir/data.dat', '-rw-rwSr--'),
         ]:
@@ -1080,15 +1082,12 @@ class LinuxlikeTests(BasePlatformTests):
         also tested.
         '''
         testdir = os.path.join(self.framework_test_dir, '7 gnome')
-        mesonbuild.modules.gnome.native_glib_version = '2.20'
-        env = {'MESON_UNIT_TEST_PRETEND_GLIB_OLD': "1"}
-        try:
+        with mock.patch('mesonbuild.modules.gnome.GnomeModule._get_native_glib_version', mock.Mock(return_value='2.20')):
+            env = {'MESON_UNIT_TEST_PRETEND_GLIB_OLD': "1"}
             self.init(testdir,
                       inprocess=True,
                       override_envvars=env)
             self.build(override_envvars=env)
-        finally:
-            mesonbuild.modules.gnome.native_glib_version = None
 
     @skipIfNoPkgconfig
     def test_pkgconfig_usage(self):
@@ -1351,7 +1350,7 @@ class LinuxlikeTests(BasePlatformTests):
         see: https://github.com/mesonbuild/meson/issues/9000
              https://stackoverflow.com/questions/48532868/gcc-library-option-with-a-colon-llibevent-a
         '''
-        testdir = os.path.join(self.unit_test_dir, '98 link full name','libtestprovider')
+        testdir = os.path.join(self.unit_test_dir, '97 link full name','libtestprovider')
         oldprefix = self.prefix
         # install into installdir without using DESTDIR
         installdir = self.installdir
@@ -1364,7 +1363,7 @@ class LinuxlikeTests(BasePlatformTests):
         self.new_builddir()
         env = {'LIBRARY_PATH': os.path.join(installdir, self.libdir),
                'PKG_CONFIG_PATH': _prepend_pkg_config_path(os.path.join(installdir, self.libdir, 'pkgconfig'))}
-        testdir = os.path.join(self.unit_test_dir, '98 link full name','proguser')
+        testdir = os.path.join(self.unit_test_dir, '97 link full name','proguser')
         self.init(testdir,override_envvars=env)
 
         # test for link with full path
@@ -1776,7 +1775,7 @@ class LinuxlikeTests(BasePlatformTests):
 
     @skipUnless(is_linux(), 'Test only applicable to Linux')
     def test_install_strip(self):
-        testdir = os.path.join(self.unit_test_dir, '104 strip')
+        testdir = os.path.join(self.unit_test_dir, '103 strip')
         self.init(testdir)
         self.build()
 
@@ -1793,3 +1792,15 @@ class LinuxlikeTests(BasePlatformTests):
         self._run(install_cmd + ['--strip'], workdir=self.builddir)
         stdout = self._run(['file', '-b', lib])
         self.assertNotIn('not stripped', stdout)
+
+    def test_isystem_default_removal_with_symlink(self):
+        env = get_fake_env()
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        default_dirs = cpp.get_default_include_dirs()
+        default_symlinks = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for i in range(len(default_dirs)):
+                symlink = f'{tmpdir}/default_dir{i}'
+                default_symlinks.append(symlink)
+                os.symlink(default_dirs[i], symlink)
+            self.assertFalse(cpp.compiler_args([f'-isystem{symlink}' for symlink in default_symlinks]).to_native())

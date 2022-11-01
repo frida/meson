@@ -18,24 +18,62 @@ from . import _pathlib
 import sys
 sys.modules['pathlib'] = _pathlib
 
+# This file is an entry point for all commands, including scripts. Include the
+# strict minimum python modules for performance reasons.
 import os.path
 import platform
 import importlib
-import traceback
 import argparse
-import shutil
 
-from . import mesonlib
+from .utils.core import MesonException, MesonBugException
 from . import mlog
-from . import mconf, mdist, minit, minstall, mintro, msetup, mtest, rewriter, msubprojects, munstable_coredata, mcompile, mdevenv
-from .mesonlib import MesonException, MesonBugException
-from .wrap import wraptool
-from .scripts import env2mfile
+
+def errorhandler(e, command):
+    import traceback
+    if isinstance(e, MesonException):
+        mlog.exception(e)
+        logfile = mlog.shutdown()
+        if logfile is not None:
+            mlog.log("\nA full log can be found at", mlog.bold(logfile))
+        if os.environ.get('MESON_FORCE_BACKTRACE'):
+            raise e
+        return 1
+    else:
+        # We assume many types of traceback are Meson logic bugs, but most
+        # particularly anything coming from the interpreter during `setup`.
+        # Some things definitely aren't:
+        # - PermissionError is always a problem in the user environment
+        # - runpython doesn't run Meson's own code, even though it is
+        #   dispatched by our run()
+        if os.environ.get('MESON_FORCE_BACKTRACE'):
+            raise e
+        traceback.print_exc()
+
+        if command == 'runpython':
+            return 2
+        elif isinstance(e, OSError):
+            mlog.exception("Unhandled python OSError. This is probably not a Meson bug, "
+                           "but an issue with your build environment.")
+            return e.errno
+        else: # Exception
+            msg = 'Unhandled python exception'
+            if all(getattr(e, a, None) is not None for a in ['file', 'lineno', 'colno']):
+                e = MesonBugException(msg, e.file, e.lineno, e.colno) # type: ignore
+            else:
+                e = MesonBugException(msg)
+            mlog.exception(e)
+        return 2
 
 # Note: when adding arguments, please also add them to the completion
 # scripts in $MESONSRC/data/shell-completions/
 class CommandLineParser:
     def __init__(self):
+        # only import these once we do full argparse processing
+        from . import mconf, mdist, minit, minstall, mintro, msetup, mtest, rewriter, msubprojects, munstable_coredata, mcompile, mdevenv
+        from .scripts import env2mfile
+        from .wrap import wraptool
+        import shutil
+
         self.term_width = shutil.get_terminal_size().columns
         self.formatter = lambda prog: argparse.HelpFormatter(prog, max_help_position=int(self.term_width / 2), width=self.term_width)
 
@@ -139,6 +177,7 @@ class CommandLineParser:
             parser = self.parser
             command = None
 
+        from . import mesonlib
         args = mesonlib.expand_arguments(args)
         options = parser.parse_args(args)
 
@@ -153,44 +192,8 @@ class CommandLineParser:
 
         try:
             return options.run_func(options)
-        except MesonException as e:
-            mlog.exception(e)
-            logfile = mlog.shutdown()
-            if logfile is not None:
-                mlog.log("\nA full log can be found at", mlog.bold(logfile))
-            if os.environ.get('MESON_FORCE_BACKTRACE'):
-                raise
-            return 1
-        except OSError as e:
-            if os.environ.get('MESON_FORCE_BACKTRACE'):
-                raise
-            traceback.print_exc()
-            error_msg = os.linesep.join([
-                "Unhandled python exception",
-                f"{e.strerror} - {e.args}",
-                "this is probably not a Meson bug."])
-
-            mlog.exception(error_msg)
-            return e.errno
-
         except Exception as e:
-            if os.environ.get('MESON_FORCE_BACKTRACE'):
-                raise
-            traceback.print_exc()
-            # We assume many types of traceback are Meson logic bugs, but most
-            # particularly anything coming from the interpreter during `setup`.
-            # Some things definitely aren't:
-            # - PermissionError is always a problem in the user environment
-            # - runpython doesn't run Meson's own code, even though it is
-            #   dispatched by our run()
-            if command != 'runpython':
-                msg = 'Unhandled python exception'
-                if all(getattr(e, a, None) is not None for a in ['file', 'lineno', 'colno']):
-                    e = MesonBugException(msg, e.file, e.lineno, e.colno) # type: ignore
-                else:
-                    e = MesonBugException(msg)
-                mlog.exception(e)
-            return 2
+            return errorhandler(e, command)
         finally:
             if implicit_setup_command_notice:
                 mlog.warning('Running the setup command as `meson [options]` instead of '
@@ -227,6 +230,11 @@ def ensure_stdout_accepts_unicode():
     if sys.stdout.encoding and not sys.stdout.encoding.upper().startswith('UTF-'):
         sys.stdout.reconfigure(errors='surrogateescape')
 
+def set_meson_command(mainfile):
+    # Set the meson command that will be used to run scripts and so on
+    from . import mesonlib
+    mesonlib.set_meson_command(mainfile)
+
 def run(original_args, mainfile):
     if sys.version_info >= (3, 10) and os.environ.get('MESON_RUNNING_IN_PROJECT_TESTS'):
         # workaround for https://bugs.python.org/issue34624
@@ -244,21 +252,22 @@ def run(original_args, mainfile):
         mlog.error('Please install and use mingw-w64-x86_64-python3 and/or mingw-w64-x86_64-meson with Pacman')
         return 2
 
-    # Set the meson command that will be used to run scripts and so on
-    mesonlib.set_meson_command(mainfile)
-
     args = original_args[:]
 
     # Special handling of internal commands called from backends, they don't
     # need to go through argparse.
     if len(args) >= 2 and args[0] == '--internal':
         if args[1] == 'regenerate':
-            # Rewrite "meson --internal regenerate" command line to
-            # "meson --reconfigure"
-            args = ['setup', '--reconfigure'] + args[2:]
+            set_meson_command(mainfile)
+            from . import msetup
+            try:
+                return msetup.run(['--reconfigure'] + args[2:])
+            except Exception as e:
+                return errorhandler(e, 'setup')
         else:
             return run_script_command(args[1], args[2:])
 
+    set_meson_command(mainfile)
     return CommandLineParser().run(args)
 
 def main():

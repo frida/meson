@@ -471,7 +471,7 @@ def _compare_output(expected: T.List[T.Dict[str, str]], output: str, desc: str) 
                     sub = r'\\'
                 else:
                     sub = r'\\\\'
-                expected_line = re.sub(r'/(?=.*(WARNING|ERROR))', sub, expected_line)
+                expected_line = re.sub(r'/(?=.*(WARNING|ERROR|DEPRECATION))', sub, expected_line)
 
             m = OutputMatch(how, expected_line, count)
             if count == 0:
@@ -1059,7 +1059,8 @@ def detect_tests_to_run(only: T.Dict[str, T.List[str]], use_tmp: bool) -> T.List
                        shutil.which('flang') or
                        shutil.which('pgfortran') or
                        shutil.which('nagfor') or
-                       shutil.which('ifort'))
+                       shutil.which('ifort') or
+                       shutil.which('ifx'))
 
     skip_cmake = ((os.environ.get('compiler') == 'msvc2015' and under_ci) or
                   'cmake' not in tool_vers_map or

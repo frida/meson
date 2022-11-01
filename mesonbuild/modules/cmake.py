@@ -18,7 +18,7 @@ import os, os.path, pathlib
 import shutil
 import typing as T
 
-from . import ExtensionModule, ModuleReturnValue, ModuleObject
+from . import ExtensionModule, ModuleReturnValue, ModuleObject, ModuleInfo
 
 from .. import build, mesonlib, mlog, dependencies
 from ..cmake import TargetOptions, cmake_defines_to_args
@@ -127,10 +127,10 @@ class CMakeSubproject(ModuleObject):
         if res is None:
             raise InterpreterException(f'The CMake target {tgt} does not exist\n' +
                                        '  Use the following command in your meson.build to list all available targets:\n\n' +
-                                       '    message(\'CMaket targets:\\n - \' + \'\\n - \'.join(<cmake_subproject>.target_list()))')
+                                       '    message(\'CMake targets:\\n - \' + \'\\n - \'.join(<cmake_subproject>.target_list()))')
 
         # Make sure that all keys are present (if not this is a bug)
-        assert all([x in res for x in ['inc', 'src', 'dep', 'tgt', 'func']])
+        assert all(x in res for x in ['inc', 'src', 'dep', 'tgt', 'func'])
         return res
 
     @noKwargs
@@ -247,7 +247,8 @@ class CmakeModule(ExtensionModule):
     cmake_detected = False
     cmake_root = None
 
-    @FeatureNew('CMake Module', '0.50.0')
+    INFO = ModuleInfo('cmake', '0.50.0')
+
     def __init__(self, interpreter):
         super().__init__(interpreter)
         self.methods.update({

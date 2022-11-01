@@ -11,15 +11,15 @@ from mesonbuild.mesonlib import version_compare
 
 modules = [
     # fully typed submodules
-    # 'mesonbuild/ast',
-    'mesonbuild/cmake',
-    'mesonbuild/compilers',
-    'mesonbuild/dependencies',
-    'mesonbuild/interpreter/primitives',
-    'mesonbuild/interpreterbase',
-    'mesonbuild/linkers',
-    'mesonbuild/scripts',
-    'mesonbuild/wrap',
+    # 'mesonbuild/ast/',
+    'mesonbuild/cmake/',
+    'mesonbuild/compilers/',
+    'mesonbuild/dependencies/',
+    'mesonbuild/interpreter/primitives/',
+    'mesonbuild/interpreterbase/',
+    'mesonbuild/linkers/',
+    'mesonbuild/scripts/',
+    'mesonbuild/wrap/',
 
     # specific files
     'mesonbuild/arglist.py',
@@ -33,25 +33,26 @@ modules = [
     'mesonbuild/interpreter/type_checking.py',
     'mesonbuild/mcompile.py',
     'mesonbuild/mdevenv.py',
-    'mesonbuild/mesonlib/platform.py',
-    'mesonbuild/mesonlib/universal.py',
+    'mesonbuild/utils/platform.py',
+    'mesonbuild/utils/universal.py',
     'mesonbuild/minit.py',
     'mesonbuild/minstall.py',
     'mesonbuild/mintro.py',
     'mesonbuild/mlog.py',
     'mesonbuild/msubprojects.py',
+    'mesonbuild/modules/external_project.py',
     'mesonbuild/modules/fs.py',
     'mesonbuild/modules/gnome.py',
     'mesonbuild/modules/i18n.py',
+    'mesonbuild/modules/icestorm.py',
     'mesonbuild/modules/java.py',
     'mesonbuild/modules/keyval.py',
     'mesonbuild/modules/modtest.py',
+    'mesonbuild/modules/pkgconfig.py',
     'mesonbuild/modules/qt.py',
+    'mesonbuild/modules/rust.py',
     'mesonbuild/modules/sourceset.py',
-    'mesonbuild/modules/unstable_external_project.py',
-    'mesonbuild/modules/unstable_icestorm.py',
-    'mesonbuild/modules/unstable_rust.py',
-    'mesonbuild/modules/unstable_wayland.py',
+    'mesonbuild/modules/wayland.py',
     'mesonbuild/modules/windows.py',
     'mesonbuild/mparser.py',
     'mesonbuild/msetup.py',
@@ -68,9 +69,9 @@ modules = [
 ]
 
 if os.name == 'posix':
-    modules.append('mesonbuild/mesonlib/posix.py')
+    modules.append('mesonbuild/utils/posix.py')
 elif os.name == 'nt':
-    modules.append('mesonbuild/mesonlib/win32.py')
+    modules.append('mesonbuild/utils/win32.py')
 
 def check_mypy() -> None:
     try:
@@ -90,6 +91,8 @@ def main() -> int:
     args = []  # type: T.List[str]
 
     parser = argparse.ArgumentParser(description='Process some integers.')
+    parser.add_argument('files', nargs='*')
+    parser.add_argument('-q', '--quiet', action='store_true', help='do not print informational messages')
     parser.add_argument('-p', '--pretty', action='store_true', help='pretty print mypy errors')
     parser.add_argument('-C', '--clear', action='store_true', help='clear the terminal before running mypy')
 
@@ -100,12 +103,31 @@ def main() -> int:
     if opts.clear:
         print('\x1bc', end='', flush=True)
 
-    print('Running mypy (this can take some time) ...')
-    p = subprocess.run(
-        [sys.executable, '-m', 'mypy'] + args + modules,
-        cwd=root,
-    )
-    return p.returncode
+    to_check = [] # type: T.List[str]
+    if opts.files:
+        for f in opts.files:
+            if f in modules:
+                to_check.append(f)
+            elif any(f.startswith(i) for i in modules):
+                to_check.append(f)
+            else:
+                if not opts.quiet:
+                    print(f'skipping {f!r} because it is not yet typed')
+    else:
+        to_check.extend(modules)
+
+    if to_check:
+        if not opts.quiet:
+            print('Running mypy (this can take some time) ...')
+        p = subprocess.run(
+            [sys.executable, '-m', 'mypy'] + args + to_check,
+            cwd=root,
+        )
+        return p.returncode
+    else:
+        if not opts.quiet:
+            print('nothing to do...')
+        return 0
 
 if __name__ == '__main__':
     sys.exit(main())

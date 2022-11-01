@@ -306,7 +306,7 @@ class Elf(DataSizes):
             self.bf.seek(offset)
             name = self.read_str()
             if name.startswith(prefix):
-                basename = name.split(b'/')[-1]
+                basename = name.rsplit(b'/', maxsplit=1)[-1]
                 padding = b'\0' * (len(name) - len(basename))
                 newname = basename + padding
                 assert len(newname) == len(name)
@@ -470,7 +470,7 @@ def fix_jar(fname: str) -> None:
     subprocess.check_call(['jar', 'ufm', fname, 'META-INF/MANIFEST.MF'])
 
 def fix_rpath(fname: str, rpath_dirs_to_remove: T.Set[bytes], new_rpath: T.Union[str, bytes], final_path: str, install_name_mappings: T.Dict[str, str], verbose: bool = True) -> None:
-    global INSTALL_NAME_TOOL
+    global INSTALL_NAME_TOOL  # pylint: disable=global-statement
     # Static libraries, import libraries, debug information, headers, etc
     # never have rpaths
     # DLLs and EXE currently do not need runtime path fixing

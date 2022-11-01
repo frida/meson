@@ -1,21 +1,27 @@
 _meson() {
   command="${COMP_WORDS[1]}"
-  case "$command" in
-    setup |\
-    configure |\
-    install |\
-    introspect |\
-    init |\
-    test |\
-    wrap |\
-    subprojects |\
-    help)
+  meson_subcommands=(
+      setup
+      configure
+      dist
+      install
+      introspect
+      init
+      test
+      wrap
+      subprojects
+      help
+      rewrite
+      compile
+      devenv
+      env2mfile
+  )
+
+  if [[ " ${meson_subcommands[*]} " =~ " ${command} " ]]; then
       _meson-$command "${COMP_WORDS[@]:1}"
-      ;;
-    *)
+  else
       _meson-setup "${COMP_WORDS[@]}"
-      ;;
-  esac
+  fi
 } &&
 complete -F _meson meson
 
@@ -192,7 +198,7 @@ _meson-setup() {
     fi
 
     if [ $COMP_CWORD -eq 1 ]; then
-      COMPREPLY+=($(compgen -W 'setup configure test introspect' -- "$cur"))
+      COMPREPLY+=($(compgen -W "${meson_subcommands[*]}" -- "$cur"))
     fi
   fi
 }
@@ -240,6 +246,96 @@ _meson-configure() {
     COMPREPLY+=($(compgen -P '-' -W '${shortopts[*]}'))
     fi
   fi
+}
+
+_meson-dist() {
+  : TODO
+}
+
+_meson-install() {
+  : TODO
+}
+
+_meson-introspect() {
+  shortopts=(
+    h
+  )
+
+  longopts=(
+    targets
+    installed
+    buildsystem-files
+    buildoptions
+    tests
+    benchmarks
+    dependencies
+    projectinfo
+  )
+
+  local cur prev
+  if ! _get_comp_words_by_ref cur prev &>/dev/null; then
+    cur="${COMP_WORDS[COMP_CWORD]}"
+  fi
+
+  if [[ "$cur" == "--"* ]]; then
+    COMPREPLY+=($(compgen -P '--' -W '${longopts[*]}' -- "${cur:2}"))
+  elif [[ "$cur" == "-"* ]]; then
+    COMPREPLY+=($(compgen -P '--' -W '${longopts[*]}' -- "${cur:2}"))
+    COMPREPLY+=($(compgen -P '-' -W '${shortopts[*]}' -- "${cur:1}"))
+  else
+    for dir in "${COMP_WORDS[@]}"; do
+      if [ -d "$dir" ]; then
+        break
+      fi
+      dir=.
+    done
+    if [ ! -d "$dir/meson-private" ]; then
+      _filedir -d
+    fi
+
+    if [ -z "$cur" ]; then
+      COMPREPLY+=($(compgen -P '--' -W '${longopts[*]}'))
+      COMPREPLY+=($(compgen -P '-' -W '${shortopts[*]}'))
+    fi
+  fi
+}
+
+_meson-init() {
+  shortopts=(
+    h
+    C
+    n
+    e
+    e
+    d
+    l
+    b
+    f
+  )
+
+  longopts=(
+    help
+	name
+	executable
+	deps
+	language
+	builddir
+	force
+	type
+	version
+  )
+
+  if [[ "$cur" == "--"* ]]; then
+    COMPREPLY+=($(compgen -P '--' -W '${longopts[*]}' -- "${cur:2}"))
+  elif [[ "$cur" == "-"* && ${#cur} -gt 1 ]]; then
+    COMPREPLY+=($(compgen -P '-' -W '${shortopts[*]}' -- "${cur:1}"))
+  else
+    if [ -z "$cur" ]; then
+      COMPREPLY+=($(compgen -P '--' -W '${longopts[*]}'))
+      COMPREPLY+=($(compgen -P '-' -W '${shortopts[*]}'))
+    fi
+  fi
+
 }
 
 _meson-test() {
@@ -367,50 +463,30 @@ for test in json.load(sys.stdin):
   fi
 }
 
-_meson-introspect() {
-  shortopts=(
-    h
-  )
-
-  longopts=(
-    targets
-    installed
-    buildsystem-files
-    buildoptions
-    tests
-    benchmarks
-    dependencies
-    projectinfo
-  )
-
-  local cur prev
-  if ! _get_comp_words_by_ref cur prev &>/dev/null; then
-    cur="${COMP_WORDS[COMP_CWORD]}"
-  fi
-
-  if [[ "$cur" == "--"* ]]; then
-    COMPREPLY+=($(compgen -P '--' -W '${longopts[*]}' -- "${cur:2}"))
-  elif [[ "$cur" == "-"* ]]; then
-    COMPREPLY+=($(compgen -P '--' -W '${longopts[*]}' -- "${cur:2}"))
-    COMPREPLY+=($(compgen -P '-' -W '${shortopts[*]}' -- "${cur:1}"))
-  else
-    for dir in "${COMP_WORDS[@]}"; do
-      if [ -d "$dir" ]; then
-        break
-      fi
-      dir=.
-    done
-    if [ ! -d "$dir/meson-private" ]; then
-      _filedir -d
-    fi
-
-    if [ -z "$cur" ]; then
-      COMPREPLY+=($(compgen -P '--' -W '${longopts[*]}'))
-      COMPREPLY+=($(compgen -P '-' -W '${shortopts[*]}'))
-    fi
-  fi
+_meson-wrap() {
+  : TODO
 }
 
-_meson-wrap() {
+_meson-subprojects() {
+  : TODO
+}
+
+_meson-help() {
+  : # Nothing to do
+}
+
+_meson-rewrite() {
+  : TODO
+}
+
+_meson-compile() {
+  : TODO
+}
+
+_meson-devenv() {
+  : TODO
+}
+
+_meson-env2mfile() {
   : TODO
 }

@@ -20,6 +20,8 @@ These are return values of the `get_id` (Compiler family) and
 | gcc       | The GNU Compiler Collection      | gcc             |
 | intel     | Intel compiler (Linux and Mac)   | gcc             |
 | intel-cl  | Intel compiler (Windows)         | msvc            |
+| intel-llvm    | Intel oneAPI LLVM-based compiler            |                 |
+| intel-llvm-cl | Intel oneAPI LLVM-based compiler (Windows)  | msvc            |
 | lcc       | Elbrus C/C++/Fortran Compiler    |                 |
 | llvm      | LLVM-based compiler (Swift, D)   |                 |
 | mono      | Xamarin C# compiler              |                 |
@@ -36,6 +38,10 @@ These are return values of the `get_id` (Compiler family) and
 | valac     | Vala compiler                    |                 |
 | xc16      | Microchip XC16 C compiler        |                 |
 | cython    | The Cython compiler              |                 |
+| nasm      | The NASM compiler (Since 0.64.0) |                 |
+| yasm      | The YASM compiler (Since 0.64.0) |                 |
+| ml        | Microsoft Macro Assembler for x86 and x86_64 (Since 0.64.0) | msvc |
+| armasm    | Microsoft Macro Assembler for ARM and AARCH64 (Since 0.64.0) | |
 
 ## Linker ids
 
@@ -167,6 +173,8 @@ These are the parameter names for passing language specific arguments to your bu
 | Rust          | rust_args     | rust_link_args    |
 | Vala          | vala_args     | vala_link_args    |
 | Cython        | cython_args   | cython_link_args  |
+| NASM          | nasm_args     | N/A               |
+| MASM          | masm_args     | N/A               |
 
 All these `<lang>_*` options are specified per machine. See in
 [specifying options per
@@ -315,6 +323,7 @@ machine](#Environment-variables-per-machine) section for details.
 | Rust          | RUSTC    | RUSTC_LD  | Before 0.54 RUST_LD*                        |
 | Vala          | VALAC    |           | Use CC_LD. Vala transpiles to C             |
 | C#            | CSC      | CSC       | The linker is the compiler                  |
+| nasm          | NASM     |           | Uses the C linker                           |
 
 *The old environment variales are still supported, but are deprecated
 and will be removed in a future version of Meson.*

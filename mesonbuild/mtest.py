@@ -94,6 +94,9 @@ def determine_worker_count() -> int:
     return num_workers
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument('--maxfail', default=0, type=int,
+                        help='Number of failing tests before aborting the '
+                        'test run. (default: 0, to disable aborting on failure)')
     parser.add_argument('--repeat', default=1, dest='repeat', type=int,
                         help='Number of times to run the tests.')
     parser.add_argument('--no-rebuild', default=False, action='store_true',
@@ -882,7 +885,7 @@ class TestRun:
         self._num = None       # type: T.Optional[int]
         self.name = name
         self.timeout = timeout
-        self.results = list()  # type: T.List[TAPParser.Test]
+        self.results = []      # type: T.List[TAPParser.Test]
         self.returncode = None  # type: T.Optional[int]
         self.starttime = None  # type: T.Optional[float]
         self.duration = None   # type: T.Optional[float]
@@ -1509,6 +1512,7 @@ class TestHarness:
         self.console_logger = ConsoleLogger()
         self.loggers.append(self.console_logger)
         self.need_console = False
+        self.ninja = None # type: T.List[str]
 
         self.logfile_base = None  # type: T.Optional[str]
         if self.options.logbase and not self.options.gdb:
@@ -1523,18 +1527,8 @@ class TestHarness:
             if namebase:
                 self.logfile_base += '-' + namebase.replace(' ', '_')
 
-        startdir = os.getcwd()
-        try:
-            os.chdir(self.options.wd)
-            self.build_data = build.load(os.getcwd())
-            if not self.options.setup:
-                self.options.setup = self.build_data.test_setup_default_name
-            if self.options.benchmark:
-                self.tests = self.load_tests('meson_benchmark_setup.dat')
-            else:
-                self.tests = self.load_tests('meson_test_setup.dat')
-        finally:
-            os.chdir(startdir)
+        self.prepare_build()
+        self.load_metadata()
 
         ss = set()
         for t in self.tests:
@@ -1545,6 +1539,49 @@ class TestHarness:
     def get_console_logger(self) -> 'ConsoleLogger':
         assert self.console_logger
         return self.console_logger
+
+    def prepare_build(self) -> None:
+        if self.options.no_rebuild:
+            return
+
+        if not (Path(self.options.wd) / 'build.ninja').is_file():
+            print('Only ninja backend is supported to rebuild tests before running them.')
+            # Disable, no point in trying to build anything later
+            self.options.no_rebuild = True
+            return
+
+        self.ninja = environment.detect_ninja()
+        if not self.ninja:
+            print("Can't find ninja, can't rebuild test.")
+            # If ninja can't be found return exit code 127, indicating command
+            # not found for shell, which seems appropriate here. This works
+            # nicely for `git bisect run`, telling it to abort - no point in
+            # continuing if there's no ninja.
+            sys.exit(127)
+
+    def load_metadata(self) -> None:
+        startdir = os.getcwd()
+        try:
+            os.chdir(self.options.wd)
+
+            # Before loading build / test data, make sure that the build
+            # configuration does not need to be regenerated. This needs to
+            # happen before rebuild_deps(), because we need the correct list of
+            # tests and their dependencies to compute
+            if not self.options.no_rebuild:
+                ret = subprocess.run(self.ninja + ['build.ninja']).returncode
+                if ret != 0:
+                    raise TestException(f'Could not configure {self.options.wd!r}')
+
+            self.build_data = build.load(os.getcwd())
+            if not self.options.setup:
+                self.options.setup = self.build_data.test_setup_default_name
+            if self.options.benchmark:
+                self.tests = self.load_tests('meson_benchmark_setup.dat')
+            else:
+                self.tests = self.load_tests('meson_test_setup.dat')
+        finally:
+            os.chdir(startdir)
 
     def load_tests(self, file_name: str) -> T.List[TestSerialisation]:
         datafile = Path('meson-private') / file_name
@@ -1689,7 +1726,7 @@ class TestHarness:
         tests = self.get_tests()
         if not tests:
             return 0
-        if not self.options.no_rebuild and not rebuild_deps(self.options.wd, tests):
+        if not self.options.no_rebuild and not rebuild_deps(self.ninja, self.options.wd, tests):
             # We return 125 here in case the build failed.
             # The reason is that exit code 125 tells `git bisect run` that the current
             # commit should be skipped.  Thus users can directly use `meson test` to
@@ -1868,7 +1905,7 @@ class TestHarness:
     async def _run_tests(self, runners: T.List[SingleTestRunner]) -> None:
         semaphore = asyncio.Semaphore(self.options.num_processes)
         futures = deque()  # type: T.Deque[asyncio.Future]
-        running_tests = dict()  # type: T.Dict[asyncio.Future, str]
+        running_tests = {}  # type: T.Dict[asyncio.Future, str]
         interrupted = False
         ctrlc_times = deque(maxlen=MAX_CTRLC)  # type: T.Deque[float]
 
@@ -1878,6 +1915,9 @@ class TestHarness:
                     return
                 res = await test.run(self)
                 self.process_test_result(res)
+                maxfail = self.options.maxfail
+                if maxfail and self.fail_count >= maxfail and res.res.is_bad():
+                    cancel_all_tests()
 
         def test_done(f: asyncio.Future) -> None:
             if not f.cancelled():
@@ -1964,25 +2004,18 @@ def list_tests(th: TestHarness) -> bool:
         print(th.get_pretty_suite(t))
     return not tests
 
-def rebuild_deps(wd: str, tests: T.List[TestSerialisation]) -> bool:
+def rebuild_deps(ninja: T.List[str], wd: str, tests: T.List[TestSerialisation]) -> bool:
     def convert_path_to_target(path: str) -> str:
         path = os.path.relpath(path, wd)
         if os.sep != '/':
             path = path.replace(os.sep, '/')
         return path
 
-    if not (Path(wd) / 'build.ninja').is_file():
-        print('Only ninja backend is supported to rebuild tests before running them.')
-        return True
+    assert len(ninja) > 0
 
-    ninja = environment.detect_ninja()
-    if not ninja:
-        print("Can't find ninja, can't rebuild test.")
-        return False
-
-    depends = set()            # type: T.Set[str]
-    targets = set()            # type: T.Set[str]
-    intro_targets = dict()     # type: T.Dict[str, T.List[str]]
+    depends = set()        # type: T.Set[str]
+    targets = set()        # type: T.Set[str]
+    intro_targets = {}     # type: T.Dict[str, T.List[str]]
     for target in load_info_file(get_infodir(wd), kind='targets'):
         intro_targets[target['id']] = [
             convert_path_to_target(f)

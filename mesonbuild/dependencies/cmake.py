@@ -106,7 +106,7 @@ class CMakeDependency(ExternalDependency):
         # Store a copy of the CMake path on the object itself so it is
         # stored in the pickled coredata and recovered.
         self.cmakebin:  T.Optional[CMakeExecutor] = None
-        self.cmakeinfo: T.Optional[CMakeInfo]     = None
+        self.cmakeinfo: T.Optional[CMakeInfo] = None
 
         # Where all CMake "build dirs" are located
         self.cmake_root_dir = environment.scratch_dir
@@ -272,7 +272,7 @@ class CMakeDependency(ExternalDependency):
                 content = self._cached_listdir(i)
                 candidates = ['Find{}.cmake', '{}Config.cmake', '{}-config.cmake']
                 candidates = [x.format(name).lower() for x in candidates]
-                if any([x[1] in candidates for x in content]):
+                if any(x[1] in candidates for x in content):
                     return True
             return False
 
@@ -548,12 +548,13 @@ class CMakeDependency(ExternalDependency):
                 self.found_modules += [i]
 
             rtgt = resolve_cmake_trace_targets(i, self.traceparser, self.env,
-                clib_compiler=self.clib_compiler,
-                not_found_warning=lambda x: mlog.warning('CMake: Dependency', mlog.bold(x), 'for', mlog.bold(name), 'was not found')
-            )
-            incDirs        += rtgt.include_directories
+                                               clib_compiler=self.clib_compiler,
+                                               not_found_warning=lambda x:
+                                                   mlog.warning('CMake: Dependency', mlog.bold(x), 'for', mlog.bold(name), 'was not found')
+                                               )
+            incDirs += rtgt.include_directories
             compileOptions += rtgt.public_compile_opts
-            libraries      += rtgt.libraries + rtgt.link_flags
+            libraries += rtgt.libraries + rtgt.link_flags
 
         # Make sure all elements in the lists are unique and sorted
         incDirs = sorted(set(incDirs))
@@ -616,8 +617,9 @@ class CMakeDependency(ExternalDependency):
         build_dir = self._setup_cmake_dir(cmake_file)
         return self.cmakebin.call(args, build_dir, env=env)
 
-    def log_tried(self) -> str:
-        return self.type_name
+    @staticmethod
+    def log_tried() -> str:
+        return 'cmake'
 
     def log_details(self) -> str:
         modules = [self._original_module_name(x) for x in self.found_modules]

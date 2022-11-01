@@ -1,7 +1,7 @@
 name: macos
 
 concurrency:
-  group: macos-${{ github.head_ref }}
+  group: macos-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 on:
@@ -67,6 +67,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@v2
+    # Avoid picking up an older version of LLVM that does not work.
+    - run: brew update
     # use python3 from homebrew because it is a valid framework, unlike the actions one:
     # https://github.com/actions/setup-python/issues/58
     - run: brew install pkg-config ninja llvm qt@5 boost ldc hdf5 openmpi lapack scalapack sdl2 python3 boost-python3 gtk-doc
@@ -100,6 +102,9 @@ jobs:
     - run: brew install pkg-config ninja gcc
     - run: brew tap cartr/qt4
     - run: brew install qt@4
+    - run: brew link qt@4
+      # qt4 tap seems to be broken
+    - run: ln -sfn /usr/local/Cellar/qt@4/4.8.7_6.reinstall /usr/local/Cellar/qt@4/4.8.7_6
     - run: meson setup "test cases/frameworks/4 qt" build -Drequired=qt4
     - run: meson compile -C build
     - uses: actions/upload-artifact@v1

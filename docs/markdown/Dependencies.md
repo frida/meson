@@ -233,15 +233,15 @@ Support for packages which require a specified version for CMake
 kwarg (*introduced in 0.57.0*). The specified `cmake_package_version`
 will be passed directly as the second parameter to `find_package`.
 
-It is also possible to reuse existing `Find<name>.cmake` files with
-the `cmake_module_path` property. Using this property is equivalent to
-setting the `CMAKE_MODULE_PATH` variable in CMake. The path(s) given
-to `cmake_module_path` should all be relative to the project source
-directory. Absolute paths should only be used if the CMake files are
-not stored in the project itself.
+It is also possible to reuse existing `Find<name>.cmake` files with the
+`cmake_module_path` property (*since 0.50.0*). Using this property is
+equivalent to setting the `CMAKE_MODULE_PATH` variable in CMake. The
+path(s) given to `cmake_module_path` should all be relative to the
+project source directory. Absolute paths should only be used if the
+CMake files are not stored in the project itself.
 
 Additional CMake parameters can be specified with the `cmake_args`
-property.
+property (*since 0.50.0*).
 
 ## Dub
 
@@ -570,7 +570,7 @@ versions would statically link, due to a quirk in `llvm-config`.
 
 ### Modules, a.k.a. Components
 
-Meson wraps LLVM's concept of components in it's own modules concept.
+Meson wraps LLVM's concept of components in its own modules concept.
 When you need specific components you add them as modules as Meson
 will do the right thing:
 
@@ -756,7 +756,7 @@ See [threads](Threads.md).
 ## Valgrind
 
 Meson will find valgrind using `pkg-config`, but only uses the
-compilation flags and avoids trying to link with it's non-PIC static
+compilation flags and avoids trying to link with its non-PIC static
 libs.
 
 ## Vulkan

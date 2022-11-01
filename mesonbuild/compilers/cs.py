@@ -28,7 +28,9 @@ if T.TYPE_CHECKING:
     from ..environment import Environment
     from ..mesonlib import MachineChoice
 
-cs_optimization_args = {'0': [],
+cs_optimization_args = {
+                        'plain': [],
+                        '0': [],
                         'g': [],
                         '1': ['-optimize+'],
                         '2': ['-optimize+'],
@@ -43,7 +45,7 @@ class CsCompiler(BasicLinkerIsCompilerMixin, Compiler):
 
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice,
                  info: 'MachineInfo', runner: T.Optional[str] = None):
-        super().__init__(exelist, version, for_machine, info)
+        super().__init__([], exelist, version, for_machine, info)
         self.runner = runner
 
     @classmethod

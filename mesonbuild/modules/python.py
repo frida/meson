@@ -14,13 +14,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+import copy
 import functools
 import json
 import os
 import shutil
 import typing as T
 
-from . import ExtensionModule
+from . import ExtensionModule, ModuleInfo
 from .. import mesonlib
 from .. import mlog
 from ..coredata import UserFeatureOption
@@ -30,6 +31,7 @@ from ..dependencies.base import process_method_kw
 from ..dependencies.detect import get_dep_identifier
 from ..environment import detect_cpu_family
 from ..interpreter import ExternalProgramHolder, extract_required_kwarg, permitted_dependency_kwargs
+from ..interpreter import primitives as P_OBJ
 from ..interpreter.type_checking import NoneType, PRESERVE_PATH_KW
 from ..interpreterbase import (
     noPosargs, noKwargs, permittedKwargs, ContainerTypeInfo,
@@ -66,7 +68,7 @@ if T.TYPE_CHECKING:
 
     class PyInstallKw(TypedDict):
 
-        pure: bool
+        pure: T.Optional[bool]
         subdir: str
         install_tag: T.Optional[str]
 
@@ -74,6 +76,7 @@ if T.TYPE_CHECKING:
 
         disabler: bool
         modules: T.List[str]
+        pure: T.Optional[bool]
 
     _Base = ExternalDependency
 else:
@@ -408,6 +411,7 @@ class PythonExternalProgram(ExternalProgram):
             'variables': {},
             'version': '0.0',
         }
+        self.pure: bool = True
 
     def _check_version(self, version: str) -> bool:
         if self.name == 'python2':
@@ -471,7 +475,7 @@ class PythonExternalProgram(ExternalProgram):
         return rel_path
 
 
-_PURE_KW = KwargInfo('pure', bool, default=True)
+_PURE_KW = KwargInfo('pure', (bool, NoneType))
 _SUBDIR_KW = KwargInfo('subdir', str, default='')
 
 
@@ -484,6 +488,7 @@ class PythonInstallation(ExternalProgramHolder):
         self.variables = info['variables']
         self.suffix = info['suffix']
         self.paths = info['paths']
+        self.pure = python.pure
         self.platlib_install_path = os.path.join(prefix, python.platlib)
         self.purelib_install_path = os.path.join(prefix, python.purelib)
         self.version = info['version']
@@ -514,7 +519,7 @@ class PythonInstallation(ExternalProgramHolder):
             if not isinstance(subdir, str):
                 raise InvalidArguments('"subdir" argument must be a string.')
 
-            kwargs['install_dir'] = os.path.join(self.platlib_install_path, subdir)
+            kwargs['install_dir'] = self._get_install_dir_impl(False, subdir)
 
         new_deps = []
         has_pydep = False
@@ -598,24 +603,30 @@ class PythonInstallation(ExternalProgramHolder):
     def install_sources_method(self, args: T.Tuple[T.List[T.Union[str, mesonlib.File]]],
                                kwargs: 'PyInstallKw') -> 'Data':
         tag = kwargs['install_tag'] or 'runtime'
+        pure = kwargs['pure'] if kwargs['pure'] is not None else self.pure
+        install_dir = self._get_install_dir_impl(pure, kwargs['subdir'])
         return self.interpreter.install_data_impl(
             self.interpreter.source_strings_to_files(args[0]),
-            self._get_install_dir_impl(kwargs['pure'], kwargs['subdir']),
+            install_dir,
             mesonlib.FileMode(), rename=None, tag=tag, install_data_type='python',
-            install_dir_name=self._get_install_dir_name_impl(kwargs['pure'], kwargs['subdir']),
+            install_dir_name=install_dir.optname,
             preserve_path=kwargs['preserve_path'])
 
     @noPosargs
     @typed_kwargs('python_installation.install_dir', _PURE_KW, _SUBDIR_KW)
     def get_install_dir_method(self, args: T.List['TYPE_var'], kwargs: 'PyInstallKw') -> str:
-        return self._get_install_dir_impl(kwargs['pure'], kwargs['subdir'])
+        pure = kwargs['pure'] if kwargs['pure'] is not None else self.pure
+        return self._get_install_dir_impl(pure, kwargs['subdir'])
 
-    def _get_install_dir_impl(self, pure: bool, subdir: str) -> str:
-        return os.path.join(
-            self.purelib_install_path if pure else self.platlib_install_path, subdir)
+    def _get_install_dir_impl(self, pure: bool, subdir: str) -> P_OBJ.OptionString:
+        if pure:
+            base = self.purelib_install_path
+            name = '{py_purelib}'
+        else:
+            base = self.platlib_install_path
+            name = '{py_platlib}'
 
-    def _get_install_dir_name_impl(self, pure: bool, subdir: str) -> str:
-        return os.path.join('{py_purelib}' if pure else '{py_platlib}', subdir)
+        return P_OBJ.OptionString(os.path.join(base, subdir), os.path.join(name, subdir))
 
     @noPosargs
     @noKwargs
@@ -663,7 +674,8 @@ class PythonInstallation(ExternalProgramHolder):
 
 class PythonModule(ExtensionModule):
 
-    @FeatureNew('Python Module', '0.46.0')
+    INFO = ModuleInfo('python', '0.46.0')
+
     def __init__(self, interpreter: 'Interpreter') -> None:
         super().__init__(interpreter)
         self.installations: T.Dict[str, ExternalProgram] = {}
@@ -727,6 +739,7 @@ class PythonModule(ExtensionModule):
         KwargInfo('required', (bool, UserFeatureOption), default=True),
         KwargInfo('disabler', bool, default=False, since='0.49.0'),
         KwargInfo('modules', ContainerTypeInfo(list, str), listify=True, default=[], since='0.51.0'),
+        _PURE_KW.evolve(default=True, since='0.64.0'),
     )
     def find_installation(self, state: 'ModuleState', args: T.Tuple[T.Optional[str]],
                           kwargs: 'FindInstallationKw') -> ExternalProgram:
@@ -759,22 +772,10 @@ class PythonModule(ExtensionModule):
         found_modules: T.List[str] = []
         missing_modules: T.List[str] = []
         if python.found() and want_modules:
-            # Python 3.8.x or later require add_dll_directory() to be called on Windows if
-            # the needed modules require external DLLs that are not bundled with the modules.
-            # Simplify things by calling add_dll_directory() on the paths in %PATH%
-            add_paths_cmd = ''
-            if hasattr(os, 'add_dll_directory'):
-                add_paths_cmds = []
-                paths = os.environ['PATH'].split(os.pathsep)
-                for path in paths:
-                    if path != '' and os.path.isdir(path):
-                        add_paths_cmds.append(f'os.add_dll_directory({path!r})')
-                add_paths_cmd = 'import os;' + ';'.join(reversed(add_paths_cmds)) + ';'
-
             for mod in want_modules:
                 p, *_ = mesonlib.Popen_safe(
                     python.command +
-                    ['-c', f'{add_paths_cmd}import {mod}'])
+                    ['-c', f'import {mod}'])
                 if p.returncode != 0:
                     missing_modules.append(mod)
                 else:
@@ -803,6 +804,8 @@ class PythonModule(ExtensionModule):
                 raise mesonlib.MesonException('{} is missing modules: {}'.format(name_or_path or 'python', ', '.join(missing_modules)))
             return NonExistingExternalProgram()
         else:
+            python = copy.copy(python)
+            python.pure = kwargs['pure']
             return python
 
         raise mesonlib.MesonBugException('Unreachable code was reached (PythonModule.find_installation).')

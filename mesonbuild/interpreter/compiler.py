@@ -4,6 +4,7 @@
 
 import enum
 import functools
+import os
 import typing as T
 
 from .. import build
@@ -78,6 +79,11 @@ if T.TYPE_CHECKING:
         header_no_builtin_args: bool
         header_prefix: str
         header_required: T.Union[bool, coredata.UserFeatureOption]
+
+    class PreprocessKW(TypedDict):
+        output: str
+        compile_args: T.List[str]
+        include_directories: T.List[build.IncludeDirs]
 
 
 class _TestMode(enum.Enum):
@@ -184,19 +190,16 @@ class CompilerHolder(ObjectHolder['Compiler']):
                              'first_supported_link_argument': self.first_supported_link_argument_method,
                              'symbols_have_underscore_prefix': self.symbols_have_underscore_prefix_method,
                              'get_argument_syntax': self.get_argument_syntax_method,
+                             'preprocess': self.preprocess_method,
                              })
 
     @property
     def compiler(self) -> 'Compiler':
         return self.held_object
 
-    def _dep_msg(self, deps: T.List['dependencies.Dependency'], endl: str) -> str:
+    def _dep_msg(self, deps: T.List['dependencies.Dependency'], compile_only: bool, endl: str) -> str:
         msg_single = 'with dependency {}'
         msg_many = 'with dependencies {}'
-        if not deps:
-            return endl
-        if endl is None:
-            endl = ''
         names = []
         for d in deps:
             if isinstance(d, dependencies.InternalDependency):
@@ -204,13 +207,17 @@ class CompilerHolder(ObjectHolder['Compiler']):
                                       location=self.current_node)
                 continue
             if isinstance(d, dependencies.ExternalLibrary):
+                if compile_only:
+                    continue
                 name = '-l' + d.name
             else:
                 name = d.name
             names.append(name)
         if not names:
-            return None
+            return endl
         tpl = msg_many if len(names) > 1 else msg_single
+        if endl is None:
+            endl = ''
         return tpl.format(', '.join(names)) + endl
 
     @noPosargs
@@ -239,9 +246,9 @@ class CompilerHolder(ObjectHolder['Compiler']):
         args.extend(extra_args)
         return args
 
-    def _determine_dependencies(self, deps: T.List['dependencies.Dependency'], endl: str = ':') -> T.Tuple[T.List['dependencies.Dependency'], str]:
+    def _determine_dependencies(self, deps: T.List['dependencies.Dependency'], compile_only: bool = False, endl: str = ':') -> T.Tuple[T.List['dependencies.Dependency'], str]:
         deps = dependencies.get_leaf_external_dependencies(deps)
-        return deps, self._dep_msg(deps, endl)
+        return deps, self._dep_msg(deps, compile_only, endl)
 
     @typed_pos_args('compiler.alignment', str)
     @typed_kwargs(
@@ -252,7 +259,7 @@ class CompilerHolder(ObjectHolder['Compiler']):
     )
     def alignment_method(self, args: T.Tuple[str], kwargs: 'AlignmentKw') -> int:
         typename = args[0]
-        deps, msg = self._determine_dependencies(kwargs['dependencies'])
+        deps, msg = self._determine_dependencies(kwargs['dependencies'], compile_only=self.compiler.is_cross)
         result = self.compiler.alignment(typename, kwargs['prefix'], self.environment,
                                          extra_args=kwargs['args'],
                                          dependencies=deps)
@@ -269,7 +276,7 @@ class CompilerHolder(ObjectHolder['Compiler']):
                 code.rel_to_builddir(self.environment.source_dir))
         testname = kwargs['name']
         extra_args = functools.partial(self._determine_args, kwargs['no_builtin_args'], kwargs['include_directories'], kwargs['args'])
-        deps, msg = self._determine_dependencies(kwargs['dependencies'], endl=None)
+        deps, msg = self._determine_dependencies(kwargs['dependencies'], compile_only=False, endl=None)
         result = self.compiler.run(code, self.environment, extra_args=extra_args,
                                    dependencies=deps)
         if testname:
@@ -346,7 +353,7 @@ class CompilerHolder(ObjectHolder['Compiler']):
     def has_function_method(self, args: T.Tuple[str], kwargs: 'CommonKW') -> bool:
         funcname = args[0]
         extra_args = self._determine_args(kwargs['no_builtin_args'], kwargs['include_directories'], kwargs['args'])
-        deps, msg = self._determine_dependencies(kwargs['dependencies'])
+        deps, msg = self._determine_dependencies(kwargs['dependencies'], compile_only=False)
         had, cached = self.compiler.has_function(funcname, kwargs['prefix'], self.environment,
                                                  extra_args=extra_args,
                                                  dependencies=deps)
@@ -386,7 +393,7 @@ class CompilerHolder(ObjectHolder['Compiler']):
     def compute_int_method(self, args: T.Tuple[str], kwargs: 'CompupteIntKW') -> int:
         expression = args[0]
         extra_args = functools.partial(self._determine_args, kwargs['no_builtin_args'], kwargs['include_directories'], kwargs['args'])
-        deps, msg = self._determine_dependencies(kwargs['dependencies'])
+        deps, msg = self._determine_dependencies(kwargs['dependencies'], compile_only=self.compiler.is_cross)
         res = self.compiler.compute_int(expression, kwargs['low'], kwargs['high'],
                                         kwargs['guess'], kwargs['prefix'],
                                         self.environment, extra_args=extra_args,
@@ -399,7 +406,7 @@ class CompilerHolder(ObjectHolder['Compiler']):
     def sizeof_method(self, args: T.Tuple[str], kwargs: 'CommonKW') -> int:
         element = args[0]
         extra_args = functools.partial(self._determine_args, kwargs['no_builtin_args'], kwargs['include_directories'], kwargs['args'])
-        deps, msg = self._determine_dependencies(kwargs['dependencies'])
+        deps, msg = self._determine_dependencies(kwargs['dependencies'], compile_only=self.compiler.is_cross)
         esize = self.compiler.sizeof(element, kwargs['prefix'], self.environment,
                                      extra_args=extra_args, dependencies=deps)
         mlog.log('Checking for size of', mlog.bold(element, True), msg, esize)
@@ -465,7 +472,7 @@ class CompilerHolder(ObjectHolder['Compiler']):
 
         testname = kwargs['name']
         extra_args = functools.partial(self._determine_args, kwargs['no_builtin_args'], kwargs['include_directories'], kwargs['args'])
-        deps, msg = self._determine_dependencies(kwargs['dependencies'])
+        deps, msg = self._determine_dependencies(kwargs['dependencies'], compile_only=False)
         result, cached = self.compiler.links(code, self.environment,
                                              compiler=compiler,
                                              extra_args=extra_args,
@@ -734,3 +741,34 @@ class CompilerHolder(ObjectHolder['Compiler']):
     @noKwargs
     def get_argument_syntax_method(self, args: T.List['TYPE_var'], kwargs: 'TYPE_kwargs') -> str:
         return self.compiler.get_argument_syntax()
+
+    @FeatureNew('compiler.preprocess', '0.64.0')
+    @typed_pos_args('compiler.preprocess', varargs=(mesonlib.File, str), min_varargs=1)
+    @typed_kwargs(
+        'compiler.preprocess',
+        KwargInfo('output', str, default='@PLAINNAME@.i'),
+        KwargInfo('compile_args', ContainerTypeInfo(list, str), listify=True, default=[]),
+        _INCLUDE_DIRS_KW,
+    )
+    def preprocess_method(self, args: T.Tuple[T.List['mesonlib.FileOrString']], kwargs: 'PreprocessKW') -> T.List[build.CustomTargetIndex]:
+        compiler = self.compiler.get_preprocessor()
+        sources = self.interpreter.source_strings_to_files(args[0])
+        tg_kwargs = {
+            f'{self.compiler.language}_args': kwargs['compile_args'],
+            'build_by_default': False,
+            'include_directories': kwargs['include_directories'],
+        }
+        tg = build.CompileTarget(
+            'preprocessor',
+            self.interpreter.subdir,
+            self.subproject,
+            self.environment,
+            sources,
+            kwargs['output'],
+            compiler,
+            tg_kwargs)
+        self.interpreter.add_target(tg.name, tg)
+        # Expose this target as list of its outputs, so user can pass them to
+        # other targets, list outputs, etc.
+        private_dir = os.path.relpath(self.interpreter.backend.get_target_private_dir(tg), self.interpreter.subdir)
+        return [build.CustomTargetIndex(tg, os.path.join(private_dir, o)) for o in tg.outputs]

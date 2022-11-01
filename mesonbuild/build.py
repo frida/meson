@@ -36,7 +36,7 @@ from .mesonlib import (
     extract_as_list, typeslistify, stringlistify, classify_unity_sources,
     get_filenames_templates_dict, substitute_values, has_path_sep,
     OptionKey, PerMachineDefaultable, OptionOverrideProxy,
-    MesonBugException
+    MesonBugException, EnvironmentVariables
 )
 from .compilers import (
     is_object, clink_langs, sort_clink, all_languages,
@@ -55,9 +55,11 @@ if T.TYPE_CHECKING:
     from .mesonlib import FileMode, FileOrString
     from .modules import ModuleState
     from .mparser import BaseNode
+    from .wrap import WrapMode
 
     GeneratedTypes = T.Union['CustomTarget', 'CustomTargetIndex', 'GeneratedList']
     LibTypes = T.Union['SharedLibrary', 'StaticLibrary', 'CustomTarget', 'CustomTargetIndex']
+    BuildTargetTypes = T.Union['BuildTarget', 'CustomTarget', 'CustomTargetIndex']
 
 pch_kwargs = {'c_pch', 'cpp_pch'}
 
@@ -202,6 +204,7 @@ class InstallDir(HoldableObject):
     source_subdir: str
     installable_subdir: str
     install_dir: str
+    install_dir_name: str
     install_mode: 'FileMode'
     exclude: T.Tuple[T.Set[str], T.Set[str]]
     strip_directory: bool
@@ -427,7 +430,7 @@ class ExtractedObjects(HoldableObject):
                 sources.append(s)
 
         # Filter out headers and all non-source files
-        return [s for s in sources if environment.is_source(s) and not environment.is_header(s)]
+        return [s for s in sources if environment.is_source(s)]
 
     def classify_all_sources(self, sources: T.List[FileOrString], generated_sources: T.Sequence['GeneratedTypes']) -> T.Dict['Compiler', T.List['FileOrString']]:
         sources_ = self.get_sources(sources, generated_sources)
@@ -499,71 +502,6 @@ class StructuredSources(HoldableObject):
         return False
 
 
-EnvInitValueType = T.Dict[str, T.Union[str, T.List[str]]]
-
-
-class EnvironmentVariables(HoldableObject):
-    def __init__(self, values: T.Optional[EnvInitValueType] = None,
-                 init_method: Literal['set', 'prepend', 'append'] = 'set', separator: str = os.pathsep) -> None:
-        self.envvars: T.List[T.Tuple[T.Callable[[T.Dict[str, str], str, T.List[str], str], str], str, T.List[str], str]] = []
-        # The set of all env vars we have operations for. Only used for self.has_name()
-        self.varnames: T.Set[str] = set()
-
-        if values:
-            init_func = getattr(self, init_method)
-            for name, value in values.items():
-                init_func(name, listify(value), separator)
-
-    def __repr__(self) -> str:
-        repr_str = "<{0}: {1}>"
-        return repr_str.format(self.__class__.__name__, self.envvars)
-
-    def hash(self, hasher: T.Any):
-        myenv = self.get_env({})
-        for key in sorted(myenv.keys()):
-            hasher.update(bytes(key, encoding='utf-8'))
-            hasher.update(b',')
-            hasher.update(bytes(myenv[key], encoding='utf-8'))
-            hasher.update(b';')
-
-    def has_name(self, name: str) -> bool:
-        return name in self.varnames
-
-    def get_names(self) -> T.Set[str]:
-        return self.varnames
-
-    def set(self, name: str, values: T.List[str], separator: str = os.pathsep) -> None:
-        self.varnames.add(name)
-        self.envvars.append((self._set, name, values, separator))
-
-    def append(self, name: str, values: T.List[str], separator: str = os.pathsep) -> None:
-        self.varnames.add(name)
-        self.envvars.append((self._append, name, values, separator))
-
-    def prepend(self, name: str, values: T.List[str], separator: str = os.pathsep) -> None:
-        self.varnames.add(name)
-        self.envvars.append((self._prepend, name, values, separator))
-
-    @staticmethod
-    def _set(env: T.Dict[str, str], name: str, values: T.List[str], separator: str) -> str:
-        return separator.join(values)
-
-    @staticmethod
-    def _append(env: T.Dict[str, str], name: str, values: T.List[str], separator: str) -> str:
-        curr = env.get(name)
-        return separator.join(values if curr is None else [curr] + values)
-
-    @staticmethod
-    def _prepend(env: T.Dict[str, str], name: str, values: T.List[str], separator: str) -> str:
-        curr = env.get(name)
-        return separator.join(values if curr is None else values + [curr])
-
-    def get_env(self, full_env: T.MutableMapping[str, str]) -> T.Dict[str, str]:
-        env = full_env.copy()
-        for method, name, values, separator in self.envvars:
-            env[name] = method(env, name, values, separator)
-        return env
-
 @dataclass(eq=False)
 class Target(HoldableObject):
 
@@ -627,7 +565,7 @@ class Target(HoldableObject):
             # False (which means we want this specific output out of many
             # outputs to not be installed).
             custom_install_dir = True
-            default_install_dir_name = None
+            install_dir_names = [getattr(i, 'optname', None) for i in outdirs]
         else:
             custom_install_dir = False
             # if outdirs is empty we need to set to something, otherwise we set
@@ -636,8 +574,9 @@ class Target(HoldableObject):
                 outdirs[0] = default_install_dir
             else:
                 outdirs = [default_install_dir]
+            install_dir_names = [default_install_dir_name] * len(outdirs)
 
-        return outdirs, default_install_dir_name, custom_install_dir
+        return outdirs, install_dir_names, custom_install_dir
 
     def get_basename(self) -> str:
         return self.name
@@ -783,8 +722,10 @@ class BuildTarget(Target):
         self.process_objectlist(objects)
         self.process_kwargs(kwargs)
         self.check_unknown_kwargs(kwargs)
-        if not any([self.sources, self.generated, self.objects, self.link_whole, self.structured_sources]):
-            raise InvalidArguments(f'Build target {name} has no sources.')
+        if not any([self.sources, self.generated, self.objects, self.link_whole_targets, self.structured_sources]):
+            mlog.warning(f'Build target {name} has no sources. '
+                         'This was never supposed to be allowed but did because of a bug, '
+                         'support will be removed in a future release of Meson')
         self.validate_install()
         self.check_module_linking()
 
@@ -887,7 +828,7 @@ class BuildTarget(Target):
         # the languages of those libraries as well.
         if self.link_targets or self.link_whole_targets:
             for t in itertools.chain(self.link_targets, self.link_whole_targets):
-                if isinstance(t, CustomTarget) or isinstance(t, CustomTargetIndex):
+                if isinstance(t, (CustomTarget, CustomTargetIndex)):
                     continue # We can't know anything about these.
                 for name, compiler in t.compilers.items():
                     if name in link_langs and name not in self.compilers:
@@ -996,7 +937,7 @@ class BuildTarget(Target):
         return missing_languages
 
     def validate_sources(self):
-        if len(self.compilers) > 1 and any(lang in self.compilers for lang in {'cs', 'java'}):
+        if len(self.compilers) > 1 and any(lang in self.compilers for lang in ['cs', 'java']):
             langs = ', '.join(self.compilers.keys())
             raise InvalidArguments(f'Cannot mix those languages into a target: {langs}')
 
@@ -1064,11 +1005,11 @@ class BuildTarget(Target):
         return ExtractedObjects(self, self.sources, self.generated, self.objects,
                                 recursive)
 
-    def get_all_link_deps(self) -> 'ImmutableListProtocol[T.Union[BuildTarget, CustomTarget, CustomTargetIndex]]':
+    def get_all_link_deps(self) -> ImmutableListProtocol[BuildTargetTypes]:
         return self.get_transitive_link_deps()
 
     @lru_cache(maxsize=None)
-    def get_transitive_link_deps(self) -> 'ImmutableListProtocol[T.Union[BuildTarget, CustomTarget, CustomTargetIndex]]':
+    def get_transitive_link_deps(self) -> ImmutableListProtocol[BuildTargetTypes]:
         result: T.List[Target] = []
         for i in self.link_targets:
             result += i.get_all_link_deps()
@@ -1412,9 +1353,17 @@ You probably should put it in link_with instead.''')
                         mlog.warning(f'Try to link an installed static library target {self.name} with a'
                                      'custom target that is not installed, this might cause problems'
                                      'when you try to use this static library')
-                elif t.is_internal():
+                elif t.is_internal() and not t.uses_rust():
                     # When we're a static library and we link_with to an
                     # internal/convenience library, promote to link_whole.
+                    #
+                    # There are cases we cannot do this, however. In Rust, for
+                    # example, this can't be done with Rust ABI libraries, though
+                    # it could be done with C ABI libraries, though there are
+                    # several meson issues that need to be fixed:
+                    # https://github.com/mesonbuild/meson/issues/10722
+                    # https://github.com/mesonbuild/meson/issues/10723
+                    # https://github.com/mesonbuild/meson/issues/10724
                     return self.link_whole(t)
             if not isinstance(t, (Target, CustomTargetIndex)):
                 raise InvalidArguments(f'{t!r} is not a target.')
@@ -1617,10 +1566,22 @@ You probably should put it in link_with instead.''')
                 # Pretty hard to fix because the return value is passed everywhere
                 return linker, stdlib_args
 
+        # None of our compilers can do clink, this happens for example if the
+        # target only has ASM sources. Pick the first capable compiler.
+        for l in clink_langs:
+            try:
+                comp = self.all_compilers[l]
+                return comp, comp.language_stdlib_only_link_flags(self.environment)
+            except KeyError:
+                pass
+
         raise AssertionError(f'Could not get a dynamic linker for build target {self.name!r}')
 
     def uses_rust(self) -> bool:
         return 'rust' in self.compilers
+
+    def uses_fortran(self) -> bool:
+        return 'fortran' in self.compilers
 
     def get_using_msvc(self) -> bool:
         '''
@@ -2121,13 +2082,15 @@ class SharedLibrary(BuildTarget):
                 prefix = ''
                 # Import library is called foo.dll.lib
                 self.import_filename = f'{self.name}.dll.lib'
-                create_debug_file = True
+                # Debug files(.pdb) is only created with debug buildtype
+                create_debug_file = self.environment.coredata.get_option(OptionKey("debug"))
             elif self.get_using_msvc():
                 # Shared library is of the form foo.dll
                 prefix = ''
                 # Import library is called foo.lib
                 self.import_filename = self.vs_import_filename
-                create_debug_file = True
+                # Debug files(.pdb) is only created with debug buildtype
+                create_debug_file = self.environment.coredata.get_option(OptionKey("debug"))
             # Assume GCC-compatible naming
             else:
                 # Shared library is of the form libfoo.dll
@@ -2400,7 +2363,7 @@ class CommandBase:
     dependencies: T.List[T.Union[BuildTarget, 'CustomTarget']]
     subproject: str
 
-    def flatten_command(self, cmd: T.Sequence[T.Union[str, File, programs.ExternalProgram, 'BuildTarget', 'CustomTarget', 'CustomTargetIndex']]) -> \
+    def flatten_command(self, cmd: T.Sequence[T.Union[str, File, programs.ExternalProgram, BuildTargetTypes]]) -> \
             T.List[T.Union[str, File, BuildTarget, 'CustomTarget']]:
         cmd = listify(cmd)
         final_cmd: T.List[T.Union[str, File, BuildTarget, 'CustomTarget']] = []
@@ -2442,10 +2405,11 @@ class CustomTarget(Target, CommandBase):
                  subproject: str,
                  environment: environment.Environment,
                  command: T.Sequence[T.Union[
-                     str, BuildTarget, CustomTarget, CustomTargetIndex, GeneratedList, programs.ExternalProgram, File]],
+                     str, BuildTargetTypes, GeneratedList,
+                     programs.ExternalProgram, File]],
                  sources: T.Sequence[T.Union[
-                     str, File, BuildTarget, CustomTarget, CustomTargetIndex,
-                     ExtractedObjects, GeneratedList, programs.ExternalProgram]],
+                     str, File, BuildTargetTypes, ExtractedObjects,
+                     GeneratedList, programs.ExternalProgram]],
                  outputs: T.List[str],
                  *,
                  build_always_stale: bool = False,
@@ -2626,12 +2590,50 @@ class CustomTarget(Target, CommandBase):
     def __len__(self) -> int:
         return len(self.outputs)
 
+class CompileTarget(BuildTarget):
+    '''
+    Target that only compile sources without linking them together.
+    It can be used as preprocessor, or transpiler.
+    '''
+
+    typename = 'compile'
+
+    def __init__(self,
+                 name: str,
+                 subdir: str,
+                 subproject: str,
+                 environment: environment.Environment,
+                 sources: T.List[File],
+                 output_templ: str,
+                 compiler: Compiler,
+                 kwargs):
+        compilers = {compiler.get_language(): compiler}
+        super().__init__(name, subdir, subproject, compiler.for_machine,
+                         sources, None, [], environment, compilers, kwargs)
+        self.filename = name
+        self.compiler = compiler
+        self.output_templ = output_templ
+        self.outputs = []
+        for f in sources:
+            plainname = os.path.basename(f.fname)
+            basename = os.path.splitext(plainname)[0]
+            self.outputs.append(output_templ.replace('@BASENAME@', basename).replace('@PLAINNAME@', plainname))
+        self.sources_map = dict(zip(sources, self.outputs))
+
+    def type_suffix(self) -> str:
+        return "@compile"
+
+    @property
+    def is_unity(self) -> bool:
+        return False
+
+
 class RunTarget(Target, CommandBase):
 
     typename = 'run'
 
     def __init__(self, name: str,
-                 command: T.Sequence[T.Union[str, File, BuildTarget, 'CustomTarget', 'CustomTargetIndex', programs.ExternalProgram]],
+                 command: T.Sequence[T.Union[str, File, BuildTargetTypes, programs.ExternalProgram]],
                  dependencies: T.Sequence[Target],
                  subdir: str,
                  subproject: str,
@@ -2750,7 +2752,7 @@ class CustomTargetIndex(HoldableObject):
 
     typename: T.ClassVar[str] = 'custom'
 
-    target: CustomTarget
+    target: T.Union[CustomTarget, CompileTarget]
     output: str
 
     def __post_init__(self) -> None:
@@ -2761,8 +2763,7 @@ class CustomTargetIndex(HoldableObject):
         return f'{self.target.name}[{self.output}]'
 
     def __repr__(self):
-        return '<CustomTargetIndex: {!r}[{}]>'.format(
-            self.target, self.target.get_outputs().index(self.output))
+        return '<CustomTargetIndex: {!r}[{}]>'.format(self.target, self.output)
 
     def get_outputs(self) -> T.List[str]:
         return [self.output]
@@ -2913,7 +2914,7 @@ def load(build_dir: str) -> Build:
             f"Build data file {filename!r} references functions or classes that don't "
             "exist. This probably means that it was generated with an old "
             "version of meson. Try running from the source directory "
-            f"meson {build_dir} --wipe")
+            f"meson setup {build_dir} --wipe")
     if not isinstance(obj, Build):
         raise MesonException(load_fail_msg)
     return obj

@@ -90,7 +90,7 @@ CPU_FAMILIES_64_BIT = [
 ]
 
 # Map from language identifiers to environment variables.
-ENV_VAR_PROG_MAP: T.Mapping[str, str] = {
+ENV_VAR_COMPILER_MAP: T.Mapping[str, str] = {
     # Compilers
     'c': 'CC',
     'cpp': 'CXX',
@@ -101,6 +101,7 @@ ENV_VAR_PROG_MAP: T.Mapping[str, str] = {
     'objcpp': 'OBJCXX',
     'rust': 'RUSTC',
     'vala': 'VALAC',
+    'nasm': 'NASM',
 
     # Linkers
     'c_ld': 'CC_LD',
@@ -110,7 +111,10 @@ ENV_VAR_PROG_MAP: T.Mapping[str, str] = {
     'objc_ld': 'OBJC_LD',
     'objcpp_ld': 'OBJCXX_LD',
     'rust_ld': 'RUSTC_LD',
+}
 
+# Map from utility names to environment variables.
+ENV_VAR_TOOL_MAP: T.Mapping[str, str] = {
     # Binutils
     'ar': 'AR',
     'as': 'AS',
@@ -132,7 +136,10 @@ ENV_VAR_PROG_MAP: T.Mapping[str, str] = {
     'pkg-config': 'PKG_CONFIG',
     'make': 'MAKE',
     'vapigen': 'VAPIGEN',
+    'llvm-config': 'LLVM_CONFIG',
 }
+
+ENV_VAR_PROG_MAP = {**ENV_VAR_COMPILER_MAP, **ENV_VAR_TOOL_MAP}
 
 # Deprecated environment variables mapped from the new variable to the old one
 # Deprecated in 0.54.0

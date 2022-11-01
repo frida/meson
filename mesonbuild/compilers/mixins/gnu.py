@@ -55,6 +55,7 @@ gnulike_buildtype_args = {
 }  # type: T.Dict[str, T.List[str]]
 
 gnu_optimization_args = {
+    'plain': [],
     '0': ['-O0'],
     'g': ['-Og'],
     '1': ['-O1'],
@@ -183,7 +184,7 @@ class GnuLikeCompiler(Compiler, metaclass=abc.ABCMeta):
         return gnulike_instruction_set_args.get(instruction_set, None)
 
     def get_default_include_dirs(self) -> T.List[str]:
-        return gnulike_default_include_dirs(tuple(self.exelist), self.language).copy()
+        return gnulike_default_include_dirs(tuple(self.get_exelist(ccache=False)), self.language).copy()
 
     @abc.abstractmethod
     def openmp_flags(self) -> T.List[str]:
@@ -316,6 +317,12 @@ class GnuLikeCompiler(Compiler, metaclass=abc.ABCMeta):
 
     def get_coverage_args(self) -> T.List[str]:
         return ['--coverage']
+
+    def get_preprocess_to_file_args(self) -> T.List[str]:
+        # We want to allow preprocessing files with any extension, such as
+        # foo.c.in. In that case we need to tell GCC/CLANG to treat them as
+        # assembly file.
+        return self.get_preprocess_only_args() + ['-x', 'assembler-with-cpp']
 
 
 class GnuCompiler(GnuLikeCompiler):

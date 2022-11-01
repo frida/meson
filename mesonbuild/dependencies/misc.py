@@ -284,7 +284,8 @@ class Python3DependencySystem(SystemDependency):
         self.version = sysconfig.get_config_var('py_version')
         self.is_found = True
 
-    def log_tried(self) -> str:
+    @staticmethod
+    def log_tried() -> str:
         return 'sysconfig'
 
 class PcapDependencyConfigTool(ConfigToolDependency):
@@ -392,9 +393,6 @@ class ShadercDependency(SystemDependency):
                                  f'{self.name!r}, may not be statically linked')
 
                 break
-
-    def log_tried(self) -> str:
-        return 'system'
 
 
 class CursesConfigToolDependency(ConfigToolDependency):

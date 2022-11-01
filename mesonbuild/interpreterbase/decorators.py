@@ -389,10 +389,10 @@ class KwargInfo(T.Generic[_T]):
                  default: T.Optional[_T] = None,
                  since: T.Optional[str] = None,
                  since_message: T.Optional[str] = None,
-                 since_values: T.Optional[T.Dict[_T, T.Union[str, T.Tuple[str, str]]]] = None,
+                 since_values: T.Optional[T.Dict[T.Union[_T, T.Type[T.List], T.Type[T.Dict]], T.Union[str, T.Tuple[str, str]]]] = None,
                  deprecated: T.Optional[str] = None,
                  deprecated_message: T.Optional[str] = None,
-                 deprecated_values: T.Optional[T.Dict[_T, T.Union[str, T.Tuple[str, str]]]] = None,
+                 deprecated_values: T.Optional[T.Dict[T.Union[_T, T.Type[T.List], T.Type[T.Dict]], T.Union[str, T.Tuple[str, str]]]] = None,
                  validator: T.Optional[T.Callable[[T.Any], T.Optional[str]]] = None,
                  convertor: T.Optional[T.Callable[[_T], object]] = None,
                  not_set_warning: T.Optional[str] = None):
@@ -418,10 +418,10 @@ class KwargInfo(T.Generic[_T]):
                default: T.Union[_T, None, _NULL_T] = _NULL,
                since: T.Union[str, None, _NULL_T] = _NULL,
                since_message: T.Union[str, None, _NULL_T] = _NULL,
-               since_values: T.Union[T.Dict[_T, T.Union[str, T.Tuple[str, str]]], None, _NULL_T] = _NULL,
+               since_values: T.Union[T.Dict[T.Union[_T, T.Type[T.List], T.Type[T.Dict]], T.Union[str, T.Tuple[str, str]]], None, _NULL_T] = _NULL,
                deprecated: T.Union[str, None, _NULL_T] = _NULL,
                deprecated_message: T.Union[str, None, _NULL_T] = _NULL,
-               deprecated_values: T.Union[T.Dict[_T, T.Union[str, T.Tuple[str, str]]], None, _NULL_T] = _NULL,
+               deprecated_values: T.Union[T.Dict[T.Union[_T, T.Type[T.List], T.Type[T.Dict]], T.Union[str, T.Tuple[str, str]]], None, _NULL_T] = _NULL,
                validator: T.Union[T.Callable[[_T], T.Optional[str]], None, _NULL_T] = _NULL,
                convertor: T.Union[T.Callable[[_T], TYPE_var], None, _NULL_T] = _NULL) -> 'KwargInfo':
         """Create a shallow copy of this KwargInfo, with modifications.
@@ -452,7 +452,7 @@ class KwargInfo(T.Generic[_T]):
         )
 
 
-def typed_kwargs(name: str, *types: KwargInfo) -> T.Callable[..., T.Any]:
+def typed_kwargs(name: str, *types: KwargInfo, allow_unknown: bool = False) -> T.Callable[..., T.Any]:
     """Decorator for type checking keyword arguments.
 
     Used to wrap a meson DSL implementation function, where it checks various
@@ -529,11 +529,12 @@ def typed_kwargs(name: str, *types: KwargInfo) -> T.Callable[..., T.Any]:
             # Cast here, as the convertor function may place something other than a TYPE_var in the kwargs
             kwargs = T.cast('T.Dict[str, object]', _kwargs)
 
-            all_names = {t.name for t in types}
-            unknowns = set(kwargs).difference(all_names)
-            if unknowns:
-                ustr = ', '.join([f'"{u}"' for u in sorted(unknowns)])
-                raise InvalidArguments(f'{name} got unknown keyword arguments {ustr}')
+            if not allow_unknown:
+                all_names = {t.name for t in types}
+                unknowns = set(kwargs).difference(all_names)
+                if unknowns:
+                    ustr = ', '.join([f'"{u}"' for u in sorted(unknowns)])
+                    raise InvalidArguments(f'{name} got unknown keyword arguments {ustr}')
 
             for info in types:
                 types_tuple = info.types if isinstance(info.types, tuple) else (info.types,)

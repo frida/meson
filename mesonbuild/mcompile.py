@@ -22,7 +22,6 @@ import shutil
 import typing as T
 from collections import defaultdict
 from pathlib import Path
-from time import sleep
 
 from . import mlog
 from . import mesonlib
@@ -125,7 +124,7 @@ def get_target_from_intro_data(target: ParsedTargetName, builddir: Path, introsp
             t = i['type'].replace(' ', '_')
             suggestions.append(f'- ./{p}:{t}')
         suggestions_str = '\n'.join(suggestions)
-        raise MesonException(f'Can\'t invoke target `{target.full_name}`: ambiguous name.' \
+        raise MesonException(f'Can\'t invoke target `{target.full_name}`: ambiguous name.'
                              f'Add target type and/or path:\n{suggestions_str}')
 
     return found_targets[0]
@@ -358,7 +357,6 @@ def run(options: 'argparse.Namespace') -> int:
             f'Backend `{backend}` is not yet supported by `compile`. Use generated project files directly instead.')
 
     mlog.log(mlog.green('INFO:'), 'calculating backend command to run:', join_args(cmd))
-    sleep(2)
     p, *_ = mesonlib.Popen_safe(cmd, stdout=sys.stdout.buffer, stderr=sys.stderr.buffer, env=env)
 
     return p.returncode

@@ -66,7 +66,8 @@ d_feature_args = {'gcc':  {'unittest': '-funittest',
                            }
                   }  # type: T.Dict[str, T.Dict[str, str]]
 
-ldc_optimization_args = {'0': [],
+ldc_optimization_args = {'plain': [],
+                         '0': [],
                          'g': [],
                          '1': ['-O1'],
                          '2': ['-O2'],
@@ -74,7 +75,8 @@ ldc_optimization_args = {'0': [],
                          's': ['-Oz'],
                          }  # type: T.Dict[str, T.List[str]]
 
-dmd_optimization_args = {'0': [],
+dmd_optimization_args = {'plain': [],
+                         '0': [],
                          'g': [],
                          '1': ['-O'],
                          '2': ['-O'],
@@ -283,7 +285,8 @@ class DmdLikeCompilerMixin(CompilerMixinBase):
         return super().build_rpath_args(
             env, build_dir, from_dir, rpath_paths, build_rpath, install_rpath)
 
-    def _translate_args_to_nongnu(self, args: T.List[str]) -> T.List[str]:
+    @classmethod
+    def _translate_args_to_nongnu(cls, args: T.List[str], info: MachineInfo, link_id: str) -> T.List[str]:
         # Translate common arguments to flags the LDC/DMD compilers
         # can understand.
         # The flags might have been added by pkg-config files,
@@ -298,10 +301,10 @@ class DmdLikeCompilerMixin(CompilerMixinBase):
         for arg in args:
             # Translate OS specific arguments first.
             osargs = []  # type: T.List[str]
-            if self.info.is_windows():
-                osargs = self.translate_arg_to_windows(arg)
-            elif self.info.is_darwin():
-                osargs = self._translate_arg_to_osx(arg)
+            if info.is_windows():
+                osargs = cls.translate_arg_to_windows(arg)
+            elif info.is_darwin():
+                osargs = cls._translate_arg_to_osx(arg)
             if osargs:
                 dcargs.extend(osargs)
                 continue
@@ -386,7 +389,7 @@ class DmdLikeCompilerMixin(CompilerMixinBase):
                     continue
 
                 # linker flag such as -L=/DEBUG must pass through
-                if self.linker.id == 'link' and self.info.is_windows() and suffix.startswith('/'):
+                if info.is_windows() and link_id == 'link' and suffix.startswith('/'):
                     dcargs.append(arg)
                     continue
 
@@ -439,6 +442,10 @@ class DmdLikeCompilerMixin(CompilerMixinBase):
         if arg.startswith('-install_name'):
             args.append('-L=' + arg)
         return args
+
+    @classmethod
+    def _unix_args_to_native(cls, args: T.List[str], info: MachineInfo, link_id: str = '') -> T.List[str]:
+        return cls._translate_args_to_nongnu(args, info, link_id)
 
     def get_debug_args(self, is_debug: bool) -> T.List[str]:
         ddebug_args = []
@@ -536,7 +543,7 @@ class DCompiler(Compiler):
                  linker: T.Optional['DynamicLinker'] = None,
                  full_version: T.Optional[str] = None,
                  is_cross: bool = False):
-        super().__init__(exelist, version, for_machine, info, linker=linker,
+        super().__init__([], exelist, version, for_machine, info, linker=linker,
                          full_version=full_version, is_cross=is_cross)
         self.arch = arch
         self.exe_wrapper = exe_wrapper
@@ -899,7 +906,7 @@ class LLVMDCompiler(DmdLikeCompilerMixin, DCompiler):
         return self._get_crt_args(crt_val, buildtype)
 
     def unix_args_to_native(self, args: T.List[str]) -> T.List[str]:
-        return self._translate_args_to_nongnu(args)
+        return self._unix_args_to_native(args, self.info, self.linker.id)
 
     def get_optimization_args(self, optimization_level: str) -> T.List[str]:
         return ldc_optimization_args[optimization_level]
@@ -988,7 +995,7 @@ class DmdDCompiler(DmdLikeCompilerMixin, DCompiler):
         return self._get_crt_args(crt_val, buildtype)
 
     def unix_args_to_native(self, args: T.List[str]) -> T.List[str]:
-        return self._translate_args_to_nongnu(args)
+        return self._unix_args_to_native(args, self.info, self.linker.id)
 
     def get_optimization_args(self, optimization_level: str) -> T.List[str]:
         return dmd_optimization_args[optimization_level]

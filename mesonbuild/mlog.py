@@ -17,6 +17,9 @@ import io
 import sys
 import time
 import platform
+import shlex
+import subprocess
+import shutil
 import typing as T
 from contextlib import contextmanager
 from pathlib import Path
@@ -27,6 +30,10 @@ if T.TYPE_CHECKING:
 """This is (mostly) a standalone module used to write logging
 information about Meson runs. Some output goes to screen,
 some to logging dir and some goes to both."""
+
+def is_windows() -> bool:
+    platname = platform.system().lower()
+    return platname == 'windows'
 
 def _windows_ansi() -> bool:
     # windll only exists on windows, so mypy will get mad
@@ -49,7 +56,7 @@ def colorize_console() -> bool:
         return _colorize_console
 
     try:
-        if platform.system().lower() == 'windows':
+        if is_windows():
             _colorize_console = os.isatty(sys.stdout.fileno()) and _windows_ansi()
         else:
             _colorize_console = os.isatty(sys.stdout.fileno()) and os.environ.get('TERM', 'dumb') != 'dumb'
@@ -63,7 +70,7 @@ def setup_console() -> None:
     # on Windows, a subprocess might call SetConsoleMode() on the console
     # connected to stdout and turn off ANSI escape processing. Call this after
     # running a subprocess to ensure we turn it on again.
-    if platform.system().lower() == 'windows':
+    if is_windows():
         try:
             delattr(sys.stdout, 'colorize_console')
         except AttributeError:
@@ -80,41 +87,43 @@ log_errors_only = False      # type: bool
 _in_ci = 'CI' in os.environ  # type: bool
 _logged_once = set()         # type: T.Set[T.Tuple[str, ...]]
 log_warnings_counter = 0     # type: int
+log_pager: T.Optional['subprocess.Popen'] = None
 
 def disable() -> None:
-    global log_disable_stdout
+    global log_disable_stdout  # pylint: disable=global-statement
     log_disable_stdout = True
 
 def enable() -> None:
-    global log_disable_stdout
+    global log_disable_stdout  # pylint: disable=global-statement
     log_disable_stdout = False
 
 def set_quiet() -> None:
-    global log_errors_only
+    global log_errors_only  # pylint: disable=global-statement
     log_errors_only = True
 
 def set_verbose() -> None:
-    global log_errors_only
+    global log_errors_only  # pylint: disable=global-statement
     log_errors_only = False
 
 def initialize(logdir: str, fatal_warnings: bool = False) -> None:
-    global log_dir, log_file, log_fatal_warnings
+    global log_dir, log_file, log_fatal_warnings  # pylint: disable=global-statement
     log_dir = logdir
     log_file = open(os.path.join(logdir, log_fname), 'w', encoding='utf-8')
     log_fatal_warnings = fatal_warnings
 
 def set_timestamp_start(start: float) -> None:
-    global log_timestamp_start
+    global log_timestamp_start  # pylint: disable=global-statement
     log_timestamp_start = start
 
 def shutdown() -> T.Optional[str]:
-    global log_file
+    global log_file  # pylint: disable=global-statement
     if log_file is not None:
         path = log_file.name
         exception_around_goer = log_file
         log_file = None
         exception_around_goer.close()
         return path
+    stop_pager()
     return None
 
 class AnsiDecorator:
@@ -227,7 +236,8 @@ def force_print(*args: str, nested: bool, **kwargs: T.Any) -> None:
 
     # _Something_ is going to get printed.
     try:
-        print(raw, end='')
+        output = log_pager.stdin if log_pager else None
+        print(raw, end='', file=output)
     except UnicodeEncodeError:
         cleaned = raw.encode('ascii', 'replace').decode('ascii')
         print(cleaned, end='')
@@ -328,7 +338,7 @@ def _log_error(severity: str, *rargs: TV_Loggable,
 
     log(*args, once=once, **kwargs)
 
-    global log_warnings_counter
+    global log_warnings_counter  # pylint: disable=global-statement
     log_warnings_counter += 1
 
     if log_fatal_warnings and fatal:
@@ -391,9 +401,50 @@ def format_list(input_list: T.List[str]) -> str:
 
 @contextmanager
 def nested(name: str = '') -> T.Generator[None, None, None]:
-    global log_depth
     log_depth.append(name)
     try:
         yield
     finally:
         log_depth.pop()
+
+def start_pager() -> None:
+    if not colorize_console():
+        return
+    pager_cmd = []
+    if 'PAGER' in os.environ:
+        pager_cmd = shlex.split(os.environ['PAGER'])
+    else:
+        less = shutil.which('less')
+        if not less and is_windows():
+            git = shutil.which('git')
+            if git:
+                path = Path(git).parents[1] / 'usr' / 'bin'
+                less = shutil.which('less', path=str(path))
+        if less:
+            # "R" : support color
+            # "X" : do not clear the screen when leaving the pager
+            # "F" : skip the pager if content fit into the screen
+            pager_cmd = [less, '-RXF']
+    if not pager_cmd:
+        return
+    global log_pager # pylint: disable=global-statement
+    assert log_pager is None
+    try:
+        log_pager = subprocess.Popen(pager_cmd, stdin=subprocess.PIPE,
+                                     text=True, encoding='utf-8')
+    except Exception as e:
+        # Ignore errors, unless it is a user defined pager.
+        if 'PAGER' in os.environ:
+            from .mesonlib import MesonException
+            raise MesonException(f'Failed to start pager: {str(e)}')
+
+def stop_pager() -> None:
+    global log_pager # pylint: disable=global-statement
+    if log_pager:
+        try:
+            log_pager.stdin.flush()
+            log_pager.stdin.close()
+        except BrokenPipeError:
+            pass
+        log_pager.wait()
+        log_pager = None

@@ -14,11 +14,8 @@
 
 from .base import ExternalDependency, DependencyException, DependencyTypeName
 from .pkgconfig import PkgConfigDependency
-from ..mesonlib import (Popen_safe, OptionKey)
-from ..mesonlib.universal import join_args
+from ..mesonlib import (Popen_safe, OptionKey, join_args)
 from ..programs import ExternalProgram
-from ..compilers import DCompiler
-from ..compilers.d import d_feature_args
 from .. import mlog
 import re
 import os
@@ -34,6 +31,7 @@ class DubDependency(ExternalDependency):
     def __init__(self, name: str, environment: 'Environment', kwargs: T.Dict[str, T.Any]):
         super().__init__(DependencyTypeName('dub'), environment, kwargs, language='d')
         self.name = name
+        from ..compilers.d import DCompiler, d_feature_args
 
         _temp_comp = super().get_compiler()
         assert isinstance(_temp_comp, DCompiler)

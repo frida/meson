@@ -19,7 +19,8 @@ import shutil
 import typing as T
 
 from ... import mesonlib
-from ...linkers import AppleDynamicLinker, ClangClDynamicLinker, LLVMDynamicLinker, GnuGoldDynamicLinker
+from ...linkers import AppleDynamicLinker, ClangClDynamicLinker, LLVMDynamicLinker, GnuGoldDynamicLinker, \
+    MoldDynamicLinker
 from ...mesonlib import OptionKey
 from ..compilers import CompileCheckMode
 from .gnu import GnuLikeCompiler
@@ -35,6 +36,7 @@ clang_color_args = {
 }  # type: T.Dict[str, T.List[str]]
 
 clang_optimization_args = {
+    'plain': [],
     '0': ['-O0'],
     'g': ['-Og'],
     '1': ['-O1'],
@@ -51,7 +53,8 @@ class ClangCompiler(GnuLikeCompiler):
         super().__init__()
         self.defines = defines or {}
         self.base_options.update(
-            {OptionKey('b_colorout'), OptionKey('b_lto_threads'), OptionKey('b_lto_mode')})
+            {OptionKey('b_colorout'), OptionKey('b_lto_threads'), OptionKey('b_lto_mode'), OptionKey('b_thinlto_cache'),
+             OptionKey('b_thinlto_cache_dir')})
 
         # TODO: this really should be part of the linker base_options, but
         # linkers don't have base_options.
@@ -148,17 +151,26 @@ class ClangCompiler(GnuLikeCompiler):
     def get_lto_compile_args(self, *, threads: int = 0, mode: str = 'default') -> T.List[str]:
         args: T.List[str] = []
         if mode == 'thin':
-            # Thin LTO requires the use of gold, lld, ld64, or lld-link
-            if not isinstance(self.linker, (AppleDynamicLinker, ClangClDynamicLinker, LLVMDynamicLinker, GnuGoldDynamicLinker)):
-                raise mesonlib.MesonException(f"LLVM's thinLTO only works with gnu gold, lld, lld-link, and ld64, not {self.linker.id}")
+            # ThinLTO requires the use of gold, lld, ld64, lld-link or mold 1.1+
+            if isinstance(self.linker, (MoldDynamicLinker)):
+                # https://github.com/rui314/mold/commit/46995bcfc3e3113133620bf16445c5f13cd76a18
+                if not mesonlib.version_compare(self.linker.version, '>=1.1'):
+                    raise mesonlib.MesonException("LLVM's ThinLTO requires mold 1.1+")
+            elif not isinstance(self.linker, (AppleDynamicLinker, ClangClDynamicLinker, LLVMDynamicLinker, GnuGoldDynamicLinker)):
+                raise mesonlib.MesonException(f"LLVM's ThinLTO only works with gold, lld, lld-link, ld64 or mold, not {self.linker.id}")
             args.append(f'-flto={mode}')
         else:
             assert mode == 'default', 'someone forgot to wire something up'
             args.extend(super().get_lto_compile_args(threads=threads))
         return args
 
-    def get_lto_link_args(self, *, threads: int = 0, mode: str = 'default') -> T.List[str]:
+    def get_lto_link_args(self, *, threads: int = 0, mode: str = 'default',
+                          thinlto_cache_dir: T.Optional[str] = None) -> T.List[str]:
         args = self.get_lto_compile_args(threads=threads, mode=mode)
+        if mode == 'thin' and thinlto_cache_dir is not None:
+            # We check for ThinLTO linker support above in get_lto_compile_args, and all of them support
+            # get_thinlto_cache_args as well
+            args.extend(self.linker.get_thinlto_cache_args(thinlto_cache_dir))
         # In clang -flto-jobs=0 means auto, and is the default if unspecified, just like in meson
         if threads > 0:
             if not mesonlib.version_compare(self.version, '>=4.0.0'):

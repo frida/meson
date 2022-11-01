@@ -18,7 +18,7 @@ import re
 import typing as T
 
 
-from . import ExtensionModule
+from . import ExtensionModule, ModuleInfo
 from . import ModuleReturnValue
 from .. import mesonlib, build
 from .. import mlog
@@ -55,6 +55,9 @@ class ResourceCompilerType(enum.Enum):
     wrc = 3
 
 class WindowsModule(ExtensionModule):
+
+    INFO = ModuleInfo('windows')
+
     def __init__(self, interpreter: 'Interpreter'):
         super().__init__(interpreter)
         self._rescomp: T.Optional[T.Tuple[ExternalProgram, ResourceCompilerType]] = None
@@ -108,7 +111,7 @@ class WindowsModule(ExtensionModule):
 
     @typed_pos_args('windows.compile_resources', varargs=(str, mesonlib.File, build.CustomTarget, build.CustomTargetIndex), min_varargs=1)
     @typed_kwargs(
-        'winddows.compile_resoures',
+        'windows.compile_resources',
         DEPEND_FILES_KW.evolve(since='0.47.0'),
         DEPENDS_KW.evolve(since='0.47.0'),
         INCLUDE_DIRECTORIES,

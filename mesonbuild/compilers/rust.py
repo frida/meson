@@ -31,6 +31,7 @@ if T.TYPE_CHECKING:
 
 
 rust_optimization_args = {
+    'plain': [],
     '0': [],
     'g': ['-C', 'opt-level=0'],
     '1': ['-C', 'opt-level=1'],
@@ -57,7 +58,7 @@ class RustCompiler(Compiler):
                  exe_wrapper: T.Optional['ExternalProgram'] = None,
                  full_version: T.Optional[str] = None,
                  linker: T.Optional['DynamicLinker'] = None):
-        super().__init__(exelist, version, for_machine, info,
+        super().__init__([], exelist, version, for_machine, info,
                          is_cross=is_cross, full_version=full_version,
                          linker=linker)
         self.exe_wrapper = exe_wrapper
@@ -109,9 +110,9 @@ class RustCompiler(Compiler):
         return rust_buildtype_args[buildtype]
 
     def get_sysroot(self) -> str:
-        cmd = self.exelist + ['--print', 'sysroot']
+        cmd = self.get_exelist(ccache=False) + ['--print', 'sysroot']
         p, stdo, stde = Popen_safe(cmd)
-        return stdo.split('\n')[0]
+        return stdo.split('\n', maxsplit=1)[0]
 
     def get_debug_args(self, is_debug: bool) -> T.List[str]:
         return clike_debug_args[is_debug]

@@ -72,9 +72,13 @@ class AstPrinter(AstVisitor):
         self.append(str(node.value), node)
         node.lineno = self.curr_line or node.lineno
 
+    def escape(self, val: str) -> str:
+        return val.translate(str.maketrans({'\'': '\\\'',
+                                            '\\': '\\\\'}))
+
     def visit_StringNode(self, node: mparser.StringNode) -> None:
         assert isinstance(node.value, str)
-        self.append("'" + node.value + "'", node)
+        self.append("'" + self.escape(node.value) + "'", node)
         node.lineno = self.curr_line or node.lineno
 
     def visit_FormatStringNode(self, node: mparser.FormatStringNode) -> None:
@@ -169,9 +173,8 @@ class AstPrinter(AstVisitor):
 
     def visit_ForeachClauseNode(self, node: mparser.ForeachClauseNode) -> None:
         node.lineno = self.curr_line or node.lineno
-        varnames = [x for x in node.varnames]
         self.append_padded('foreach', node)
-        self.append_padded(', '.join(varnames), node)
+        self.append_padded(', '.join(node.varnames), node)
         self.append_padded(':', node)
         node.items.accept(self)
         self.newline()

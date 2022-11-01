@@ -165,7 +165,7 @@ class MesonApp:
             if not reconfigure and not wipe:
                 print('Directory already configured.\n'
                       '\nJust run your build command (e.g. ninja) and Meson will regenerate as necessary.\n'
-                      'If ninja fails, run "ninja reconfigure" or "meson --reconfigure"\n'
+                      'If ninja fails, run "ninja reconfigure" or "meson setup --reconfigure"\n'
                       'to force Meson to regenerate.\n'
                       '\nIf build failures persist, run "meson setup --wipe" to rebuild from scratch\n'
                       'using the same options as passed when configuring the build.'
@@ -297,7 +297,11 @@ class MesonApp:
             if devenv:
                 b.devenv.append(devenv)
 
-def run(options: argparse.Namespace) -> int:
+def run(options: T.Union[argparse.Namespace, T.List[str]]) -> int:
+    if not isinstance(options, argparse.Namespace):
+        parser = argparse.ArgumentParser()
+        add_arguments(parser)
+        options = parser.parse_args(options)
     coredata.parse_cmd_line_options(options)
     app = MesonApp(options)
     app.generate()

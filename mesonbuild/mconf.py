@@ -36,12 +36,17 @@ def add_arguments(parser: 'argparse.ArgumentParser') -> None:
     parser.add_argument('builddir', nargs='?', default='.')
     parser.add_argument('--clearcache', action='store_true', default=False,
                         help='Clear cached state (e.g. found dependencies)')
+    parser.add_argument('--no-pager', action='store_false', dest='pager',
+                        help='Do not redirect output to a pager')
 
-def make_lower_case(val: T.Any) -> T.Union[str, T.List[T.Any]]:  # T.Any because of recursion...
+def stringify(val: T.Any) -> T.Union[str, T.List[T.Any]]:  # T.Any because of recursion...
     if isinstance(val, bool):
         return str(val).lower()
     elif isinstance(val, list):
-        return [make_lower_case(i) for i in val]
+        s = ', '.join(stringify(i) for i in val)
+        return f'[{s}]'
+    elif val is None:
+        return ''
     else:
         return str(val)
 
@@ -61,8 +66,6 @@ class Conf:
         self.value_col = []
         self.choices_col = []
         self.descr_col = []
-        # XXX: is there a case where this can actually remain false?
-        self.has_choices = False
         self.all_subprojects: T.Set[str] = set()
 
         if os.path.isdir(os.path.join(self.build_dir, 'meson-private')):
@@ -111,42 +114,41 @@ class Conf:
         """
         total_width = shutil.get_terminal_size(fallback=(160, 0))[0]
         _col = max(total_width // 5, 20)
-        last_column = total_width - (3 * _col)
+        last_column = total_width - (3 * _col) - 3
         four_column = (_col, _col, _col, last_column if last_column > 1 else _col)
-        # In this case we don't have the choices field, so we can redistribute
-        # the extra 40 characters to val and desc
-        three_column = (_col, _col * 2, total_width // 2)
 
         for line in zip(self.name_col, self.value_col, self.choices_col, self.descr_col):
             if not any(line):
-                print('')
+                mlog.log('')
                 continue
 
             # This is a header, like `Subproject foo:`,
             # We just want to print that and get on with it
             if line[0] and not any(line[1:]):
-                print(line[0])
+                mlog.log(line[0])
                 continue
+
+            def wrap_text(text, width):
+                raw = text.text if isinstance(text, mlog.AnsiDecorator) else text
+                indent = ' ' if raw.startswith('[') else ''
+                wrapped = textwrap.wrap(raw, width, subsequent_indent=indent)
+                if isinstance(text, mlog.AnsiDecorator):
+                    wrapped = [mlog.AnsiDecorator(i, text.code) for i in wrapped]
+                # Add padding here to get even rows, as `textwrap.wrap()` will
+                # only shorten, not lengthen each item
+                return [str(i) + ' ' * (width - len(i)) for i in wrapped]
 
             # wrap will take a long string, and create a list of strings no
             # longer than the size given. Then that list can be zipped into, to
             # print each line of the output, such the that columns are printed
             # to the right width, row by row.
-            if self.has_choices:
-                name = textwrap.wrap(line[0], four_column[0])
-                val = textwrap.wrap(line[1], four_column[1])
-                choice = textwrap.wrap(line[2], four_column[2])
-                desc = textwrap.wrap(line[3], four_column[3])
-                for l in itertools.zip_longest(name, val, choice, desc, fillvalue=''):
-                    # We must use the length modifier here to get even rows, as
-                    # `textwrap.wrap` will only shorten, not lengthen each item
-                    print('{:{widths[0]}} {:{widths[1]}} {:{widths[2]}} {}'.format(*l, widths=four_column))
-            else:
-                name = textwrap.wrap(line[0], three_column[0])
-                val = textwrap.wrap(line[1], three_column[1])
-                desc = textwrap.wrap(line[3], three_column[2])
-                for l in itertools.zip_longest(name, val, desc, fillvalue=''):
-                    print('{:{widths[0]}} {:{widths[1]}} {}'.format(*l, widths=three_column))
+            name = wrap_text(line[0], four_column[0])
+            val = wrap_text(line[1], four_column[1])
+            choice = wrap_text(line[2], four_column[2])
+            desc = wrap_text(line[3], four_column[3])
+            for l in itertools.zip_longest(name, val, choice, desc, fillvalue=''):
+                items = [l[i] if l[i] else ' ' * four_column[i] for i in range(4)]
+                mlog.log(*items)
 
     def split_options_per_subproject(self, options: 'coredata.KeyedOptionDictType') -> T.Dict[str, 'coredata.KeyedOptionDictType']:
         result: T.Dict[str, 'coredata.KeyedOptionDictType'] = {}
@@ -156,54 +158,34 @@ class Conf:
             result.setdefault(k.subproject, {})[k] = o
         return result
 
-    def _add_line(self, name: OptionKey, value, choices, descr) -> None:
-        self.name_col.append(' ' * self.print_margin + str(name))
+    def _add_line(self, name, value, choices, descr) -> None:
+        if isinstance(name, mlog.AnsiDecorator):
+            name.text = ' ' * self.print_margin + name.text
+        else:
+            name = ' ' * self.print_margin + name
+        self.name_col.append(name)
         self.value_col.append(value)
         self.choices_col.append(choices)
         self.descr_col.append(descr)
 
     def add_option(self, name, descr, value, choices):
-        if isinstance(value, list):
-            value = '[{}]'.format(', '.join(make_lower_case(value)))
-        else:
-            value = make_lower_case(value)
-
-        if choices:
-            self.has_choices = True
-            if isinstance(choices, list):
-                choices_list = make_lower_case(choices)
-                current = '['
-                while choices_list:
-                    i = choices_list.pop(0)
-                    if len(current) + len(i) >= self.max_choices_line_length:
-                        self._add_line(name, value, current + ',', descr)
-                        name = ''
-                        value = ''
-                        descr = ''
-                        current = ' '
-                    if len(current) > 1:
-                        current += ', '
-                    current += i
-                choices = current + ']'
-            else:
-                choices = make_lower_case(choices)
-        else:
-            choices = ''
-
-        self._add_line(name, value, choices, descr)
+        value = stringify(value)
+        choices = stringify(choices)
+        self._add_line(mlog.green(name), mlog.yellow(value), mlog.blue(choices), descr)
 
     def add_title(self, title):
-        titles = {'descr': 'Description', 'value': 'Current Value', 'choices': 'Possible Values'}
-        if self.default_values_only:
-            titles['value'] = 'Default Value'
+        title = mlog.cyan(title)
+        descr = mlog.cyan('Description')
+        value = mlog.cyan('Default Value' if self.default_values_only else 'Current Value')
+        choices = mlog.cyan('Possible Values')
         self._add_line('', '', '', '')
-        self._add_line(title, titles['value'], titles['choices'], titles['descr'])
-        self._add_line('-' * len(title), '-' * len(titles['value']), '-' * len(titles['choices']), '-' * len(titles['descr']))
+        self._add_line(title, value, choices, descr)
+        self._add_line('-' * len(title), '-' * len(value), '-' * len(choices), '-' * len(descr))
 
     def add_section(self, section):
         self.print_margin = 0
         self._add_line('', '', '', '')
-        self._add_line(section + ':', '', '', '')
+        self._add_line(mlog.normal_yellow(section + ':'), '', '', '')
         self.print_margin = 2
 
     def print_options(self, title: str, options: 'coredata.KeyedOptionDictType') -> None:
@@ -218,19 +200,22 @@ class Conf:
                 printable_value = '<inherited from main project>'
             self.add_option(str(root), o.description, printable_value, o.choices)
 
-    def print_conf(self):
+    def print_conf(self, pager: bool):
+        if pager:
+            mlog.start_pager()
+
         def print_default_values_warning():
             mlog.warning('The source directory instead of the build directory was specified.')
             mlog.warning('Only the default values for the project are printed, and all command line parameters are ignored.')
 
         if self.default_values_only:
             print_default_values_warning()
-            print('')
+            mlog.log('')
 
-        print('Core properties:')
-        print('  Source dir', self.source_dir)
+        mlog.log('Core properties:')
+        mlog.log('  Source dir', self.source_dir)
         if not self.default_values_only:
-            print('  Build dir ', self.build_dir)
+            mlog.log('  Build dir ', self.build_dir)
 
         dir_option_names = set(coredata.BUILTIN_DIR_OPTIONS)
         test_option_names = {OptionKey('errorlogs'),
@@ -293,7 +278,7 @@ class Conf:
 
         # Print the warning twice so that the user shouldn't be able to miss it
         if self.default_values_only:
-            print('')
+            mlog.log('')
             print_default_values_warning()
 
         self.print_nondefault_buildtype_options()
@@ -302,10 +287,10 @@ class Conf:
         mismatching = self.coredata.get_nondefault_buildtype_args()
         if not mismatching:
             return
-        print("\nThe following option(s) have a different value than the build type default\n")
-        print('               current   default')
+        mlog.log("\nThe following option(s) have a different value than the build type default\n")
+        mlog.log('               current   default')
         for m in mismatching:
-            print(f'{m[0]:21}{m[1]:10}{m[2]:10}')
+            mlog.log(f'{m[0]:21}{m[1]:10}{m[2]:10}')
 
 def run(options):
     coredata.parse_cmd_line_options(options)
@@ -314,7 +299,7 @@ def run(options):
     try:
         c = Conf(builddir)
         if c.default_values_only:
-            c.print_conf()
+            c.print_conf(options.pager)
             return 0
 
         save = False
@@ -326,14 +311,17 @@ def run(options):
             c.clear_cache()
             save = True
         else:
-            c.print_conf()
+            c.print_conf(options.pager)
         if save:
             c.save()
             mintro.update_build_options(c.coredata, c.build.environment.info_dir)
             mintro.write_meson_info_file(c.build, [])
     except ConfException as e:
-        print('Meson configurator encountered an error:')
+        mlog.log('Meson configurator encountered an error:')
         if c is not None and c.build is not None:
             mintro.write_meson_info_file(c.build, [e])
         raise e
+    except BrokenPipeError:
+        # Pager quit before we wrote everything.
+        pass
     return 0

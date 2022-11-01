@@ -137,14 +137,14 @@ def list_install_plan(installdata: backends.InstallData) -> T.Dict[str, T.Dict[s
         'data': installdata.data,
         'man': installdata.man,
         'headers': installdata.headers,
+        'install_subdirs': installdata.install_subdirs
     }.items():
-        for data in data_list:
+        # Mypy doesn't recognize SubdirInstallData as a subclass of InstallDataBase
+        for data in data_list: # type: ignore[attr-defined]
             data_type = data.data_type or key
             install_path_name = data.install_path_name
             if key == 'headers':  # in the headers, install_path_name is the directory
                 install_path_name = os.path.join(install_path_name, os.path.basename(data.path))
-            elif data_type == 'configure':
-                install_path_name = os.path.join('{prefix}', install_path_name)
 
             plan[data_type] = plan.get(data_type, {})
             plan[data_type][data.path] = {
@@ -323,7 +323,7 @@ def find_buildsystem_files_list(src_dir: str) -> T.List[str]:
     filelist = []  # type: T.List[str]
     for root, _, files in os.walk(src_dir):
         for f in files:
-            if f == 'meson.build' or f == 'meson_options.txt':
+            if f in {'meson.build', 'meson_options.txt'}:
                 filelist.append(os.path.relpath(os.path.join(root, f), src_dir))
     return filelist
 
@@ -488,8 +488,8 @@ def run(options: argparse.Namespace) -> int:
             return 1
 
     # Extract introspection information from JSON
-    for i in intro_types.keys():
-        if not intro_types[i].func:
+    for i, v in intro_types.items():
+        if not v.func:
             continue
         if not options.all and not getattr(options, i, False):
             continue
@@ -504,7 +504,6 @@ def run(options: argparse.Namespace) -> int:
 updated_introspection_files = []  # type: T.List[str]
 
 def write_intro_info(intro_info: T.Sequence[T.Tuple[str, T.Union[dict, T.List[T.Any]]]], info_dir: str) -> None:
-    global updated_introspection_files
     for kind, data in intro_info:
         out_file = os.path.join(info_dir, f'intro-{kind}.json')
         tmp_file = os.path.join(info_dir, 'tmp_dump.json')
@@ -512,7 +511,7 @@ def write_intro_info(intro_info: T.Sequence[T.Tuple[str, T.Union[dict, T.List[T.
             json.dump(data, fp)
             fp.flush() # Not sure if this is needed
         os.replace(tmp_file, out_file)
-        updated_introspection_files += [kind]
+        updated_introspection_files.append(kind)
 
 def generate_introspection_file(builddata: build.Build, backend: backends.Backend) -> None:
     coredata = builddata.environment.get_coredata()
@@ -543,14 +542,13 @@ def split_version_string(version: str) -> T.Dict[str, T.Union[str, int]]:
     }
 
 def write_meson_info_file(builddata: build.Build, errors: list, build_files_updated: bool = False) -> None:
-    global updated_introspection_files
     info_dir = builddata.environment.info_dir
     info_file = get_meson_info_file(info_dir)
     intro_types = get_meson_introspection_types()
     intro_info = {}
 
-    for i in intro_types.keys():
-        if not intro_types[i].func:
+    for i, v in intro_types.items():
+        if not v.func:
             continue
         intro_info[i] = {
             'file': f'intro-{i}.json',

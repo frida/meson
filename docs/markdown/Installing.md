@@ -176,6 +176,16 @@ time, please help extending the list of well known categories.
   * Files installed into `localedir`.
 - `typelib`:
   * `gnome.generate_gir()` - `.typelib` file.
+- `bin`:
+  * Scripts and executables bundled with a library meant to be used by end
+    users.
+- `bin-devel`:
+  * Scripts and executables bundled with a library meant to be used by
+    developers (i.e. build tools).
+- `tests`:
+  * Files installed into `installed-tests` subdir (*Since 0.64.0*).
+- `systemtap`:
+  * Files installed into `systemtap` subdir (*Since 0.64.0*).
 
 Custom installation tag can be set using the `install_tag` keyword argument
 on various functions such as [[custom_target]], [[configure_file]],

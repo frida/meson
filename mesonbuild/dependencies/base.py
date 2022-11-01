@@ -387,7 +387,8 @@ class ExternalDependency(Dependency, HasNativeKwarg):
     def log_info(self) -> str:
         return ''
 
-    def log_tried(self) -> str:
+    @staticmethod
+    def log_tried() -> str:
         return ''
 
     # Check if dependency version meets the requirements
@@ -405,7 +406,7 @@ class ExternalDependency(Dependency, HasNativeKwarg):
                 mlog.log(*found_msg)
 
                 if self.required:
-                    m = f'Unknown version of dependency {self.name!r}, but need {self.version_reqs!r}.'
+                    m = f'Unknown version, but need {self.version_reqs!r}.'
                     raise DependencyException(m)
 
             else:
@@ -422,7 +423,7 @@ class ExternalDependency(Dependency, HasNativeKwarg):
                     mlog.log(*found_msg)
 
                     if self.required:
-                        m = 'Invalid version of dependency, need {!r} {!r} found {!r}.'
+                        m = 'Invalid version, need {!r} {!r} found {!r}.'
                         raise DependencyException(m.format(self.name, not_found, self.version))
                     return
 
@@ -602,7 +603,8 @@ class SystemDependency(ExternalDependency):
         super().__init__(DependencyTypeName('system'), env, kwargs, language=language)
         self.name = name
 
-    def log_tried(self) -> str:
+    @staticmethod
+    def log_tried() -> str:
         return 'system'
 
 
@@ -615,5 +617,6 @@ class BuiltinDependency(ExternalDependency):
         super().__init__(DependencyTypeName('builtin'), env, kwargs, language=language)
         self.name = name
 
-    def log_tried(self) -> str:
+    @staticmethod
+    def log_tried() -> str:
         return 'builtin'
