@@ -7,16 +7,6 @@ from .compilers import Compiler
 if T.TYPE_CHECKING:
     from ..environment import Environment
 
-nasm_optimization_args = {
-    'plain': [],
-    '0': ['-O0'],
-    'g': ['-O0'],
-    '1': ['-O1'],
-    '2': ['-Ox'],
-    '3': ['-Ox'],
-    's': ['-Ox'],
-}  # type: T.Dict[str, T.List[str]]
-
 
 class NasmCompiler(Compiler):
     language = 'nasm'
@@ -48,7 +38,7 @@ class NasmCompiler(Compiler):
         return ['-o', outputname]
 
     def get_optimization_args(self, optimization_level: str) -> T.List[str]:
-        return nasm_optimization_args[optimization_level]
+        return [f'-O{optimization_level}']
 
     def get_debug_args(self, is_debug: bool) -> T.List[str]:
         if is_debug:
