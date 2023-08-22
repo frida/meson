@@ -1,6 +1,8 @@
 project('subproj user', 'c',
   version : '2.3.4',
-  license : 'mylicense')
+  license : 'mylicense',
+  license_files: 'mylicense.txt',
+)
 
 assert(meson.project_name() == 'subproj user', 'Incorrect project name')
 
@@ -24,5 +26,5 @@ meson.install_dependency_manifest('share/sublib/sublib.depmf')
 
 unknown_var = sub.get_variable('does-not-exist', [])
 if unknown_var != []
-  error ('unexpetced fallback value for subproject.get_variable()')
+  error ('unexpected fallback value for subproject.get_variable()')
 endif

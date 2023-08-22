@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 from .. import mlog
 import contextlib
@@ -33,7 +34,7 @@ import json
 
 from base64 import b64encode
 from netrc import netrc
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from . import WrapMode
 from .. import coredata
@@ -53,8 +54,7 @@ try:
 except ImportError:
     has_ssl = False
 
-REQ_TIMEOUT = 600.0
-SSL_WARNING_PRINTED = False
+REQ_TIMEOUT = 30.0
 WHITELIST_SUBDOMAIN = 'wrapdb.mesonbuild.com'
 
 ALL_TYPES = ['file', 'git', 'hg', 'svn']
@@ -95,10 +95,7 @@ def open_wrapdburl(urlstring: str, allow_insecure: bool = False, have_opt: bool 
         raise WrapException(f'SSL module not available in {sys.executable}: Cannot contact the WrapDB.{insecure_msg}')
     else:
         # following code is only for those without Python SSL
-        global SSL_WARNING_PRINTED  # pylint: disable=global-statement
-        if not SSL_WARNING_PRINTED:
-            mlog.warning(f'SSL module not available in {sys.executable}: WrapDB traffic not authenticated.')
-            SSL_WARNING_PRINTED = True
+        mlog.warning(f'SSL module not available in {sys.executable}: WrapDB traffic not authenticated.', once=True)
 
     # If we got this far, allow_insecure was manually passed
     nossl_url = url._replace(scheme='http')
@@ -148,11 +145,11 @@ class PackageDefinition:
     def __init__(self, fname: str, subproject: str = ''):
         self.filename = fname
         self.subproject = SubProject(subproject)
-        self.type = None  # type: T.Optional[str]
-        self.values = {} # type: T.Dict[str, str]
-        self.provided_deps = {} # type: T.Dict[str, T.Optional[str]]
-        self.provided_programs = [] # type: T.List[str]
-        self.diff_files = [] # type: T.List[Path]
+        self.type: T.Optional[str] = None
+        self.values: T.Dict[str, str] = {}
+        self.provided_deps: T.Dict[str, T.Optional[str]] = {}
+        self.provided_programs: T.List[str] = []
+        self.diff_files: T.List[Path] = []
         self.basename = os.path.basename(fname)
         self.has_wrap = self.basename.endswith('.wrap')
         self.name = self.basename[:-5] if self.has_wrap else self.basename
@@ -227,6 +224,8 @@ class PackageDefinition:
                 self.diff_files.append(path)
 
     def parse_provide_section(self, config: configparser.ConfigParser) -> None:
+        if config.has_section('provides'):
+            raise WrapException('Unexpected "[provides]" section, did you mean "[provide]"?')
         if config.has_section('provide'):
             for k, v in config['provide'].items():
                 if k == 'dependency_names':
@@ -286,14 +285,15 @@ class Resolver:
     wrap_mode: WrapMode = WrapMode.default
     wrap_frontend: bool = False
     allow_insecure: bool = False
+    silent: bool = False
 
     def __post_init__(self) -> None:
         self.subdir_root = os.path.join(self.source_dir, self.subdir)
         self.cachedir = os.path.join(self.subdir_root, 'packagecache')
-        self.wraps = {} # type: T.Dict[str, PackageDefinition]
+        self.wraps: T.Dict[str, PackageDefinition] = {}
         self.netrc: T.Optional[netrc] = None
-        self.provided_deps = {} # type: T.Dict[str, PackageDefinition]
-        self.provided_programs = {} # type: T.Dict[str, PackageDefinition]
+        self.provided_deps: T.Dict[str, PackageDefinition] = {}
+        self.provided_programs: T.Dict[str, PackageDefinition] = {}
         self.wrapdb: T.Dict[str, T.Any] = {}
         self.wrapdb_provided_deps: T.Dict[str, str] = {}
         self.wrapdb_provided_programs: T.Dict[str, str] = {}
@@ -433,10 +433,10 @@ class Resolver:
                 # Write a dummy wrap file in main project that redirect to the
                 # wrap we picked.
                 with open(main_fname, 'w', encoding='utf-8') as f:
-                    f.write(textwrap.dedent('''\
+                    f.write(textwrap.dedent(f'''\
                         [wrap-redirect]
-                        filename = {}
-                        '''.format(os.path.relpath(self.wrap.filename, self.subdir_root))))
+                        filename = {PurePath(os.path.relpath(self.wrap.filename, self.subdir_root)).as_posix()}
+                        '''))
         else:
             # No wrap file, it's a dummy package definition for an existing
             # directory. Use the source code in place.
@@ -555,7 +555,7 @@ class Resolver:
         revno = self.wrap.get('revision')
         checkout_cmd = ['-c', 'advice.detachedHead=false', 'checkout', revno, '--']
         is_shallow = False
-        depth_option = []    # type: T.List[str]
+        depth_option: T.List[str] = []
         if self.wrap.values.get('depth', '') != '':
             is_shallow = True
             depth_option = ['--depth', self.wrap.values.get('depth')]
@@ -582,8 +582,11 @@ class Resolver:
                         verbose_git(['fetch', self.wrap.get('url'), revno], self.dirname, check=True)
                         verbose_git(checkout_cmd, self.dirname, check=True)
             else:
-                verbose_git(['-c', 'advice.detachedHead=false', 'clone', *depth_option, '--branch', revno, self.wrap.get('url'),
-                             self.directory], self.subdir_root, check=True)
+                args = ['-c', 'advice.detachedHead=false', 'clone', *depth_option]
+                if revno.lower() != 'head':
+                    args += ['--branch', revno]
+                args += [self.wrap.get('url'), self.directory]
+                verbose_git(args, self.subdir_root, check=True)
             if self.wrap.values.get('clone-recursive', '').lower() == 'true':
                 verbose_git(['submodule', 'update', '--init', '--checkout', '--recursive', *depth_option],
                             self.dirname, check=True)
@@ -613,7 +616,7 @@ class Resolver:
 
     def is_git_full_commit_id(self, revno: str) -> bool:
         result = False
-        if len(revno) in (40, 64): # 40 for sha1, 64 for upcoming sha256
+        if len(revno) in {40, 64}: # 40 for sha1, 64 for upcoming sha256
             result = all(ch in '0123456789AaBbCcDdEeFf' for ch in revno)
         return result
 
@@ -676,7 +679,7 @@ class Resolver:
             except urllib.error.URLError as e:
                 mlog.log(str(e))
                 raise WrapException(f'could not get {urlstring} is the internet available?')
-        with contextlib.closing(resp) as resp:
+        with contextlib.closing(resp) as resp, tmpfile as tmpfile:
             try:
                 dlsize = int(resp.info()['Content-Length'])
             except TypeError:
@@ -693,7 +696,8 @@ class Resolver:
                 return hashvalue, tmpfile.name
             sys.stdout.flush()
             progress_bar = ProgressBar(bar_type='download', total=dlsize,
-                                       desc='Downloading')
+                                       desc='Downloading',
+                                       disable=(self.silent or None))
             while True:
                 block = resp.read(blocksize)
                 if block == b'':
@@ -794,7 +798,8 @@ class Resolver:
                 raise WrapException(f'Diff file "{path}" does not exist')
             relpath = os.path.relpath(str(path), self.dirname)
             if PATCH:
-                cmd = [PATCH, '-f', '-p1', '-i', relpath]
+                # Always pass a POSIX path to patch, because on Windows it's MSYS
+                cmd = [PATCH, '-f', '-p1', '-i', str(Path(relpath).as_posix())]
             elif GIT:
                 # If the `patch` command is not available, fall back to `git
                 # apply`. The `--work-tree` is necessary in case we're inside a

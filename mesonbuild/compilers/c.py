@@ -28,11 +28,14 @@ from .mixins.ti import TICompiler
 from .mixins.arm import ArmCompiler, ArmclangCompiler
 from .mixins.visualstudio import MSVCCompiler, ClangClCompiler
 from .mixins.gnu import GnuCompiler
+from .mixins.gnu import gnu_common_warning_args, gnu_c_warning_args
 from .mixins.intel import IntelGnuLikeCompiler, IntelVisualStudioLikeCompiler
 from .mixins.clang import ClangCompiler
 from .mixins.elbrus import ElbrusCompiler
 from .mixins.pgi import PGICompiler
 from .mixins.emscripten import EmscriptenMixin
+from .mixins.metrowerks import MetrowerksCompiler
+from .mixins.metrowerks import mwccarm_instruction_set_args, mwcceppc_instruction_set_args
 from .compilers import (
     gnu_winlibs,
     msvc_winlibs,
@@ -44,7 +47,7 @@ if T.TYPE_CHECKING:
     from ..dependencies import Dependency
     from ..envconfig import MachineInfo
     from ..environment import Environment
-    from ..linkers import DynamicLinker
+    from ..linkers.linkers import DynamicLinker
     from ..mesonlib import MachineChoice
     from ..programs import ExternalProgram
     from .compilers import CompileCheckMode
@@ -152,7 +155,8 @@ class ClangCCompiler(_ClangCStds, ClangCompiler, CCompiler):
         self.warn_args = {'0': [],
                           '1': default_warn_args,
                           '2': default_warn_args + ['-Wextra'],
-                          '3': default_warn_args + ['-Wextra', '-Wpedantic']}
+                          '3': default_warn_args + ['-Wextra', '-Wpedantic'],
+                          'everything': ['-Weverything']}
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = super().get_options()
@@ -212,6 +216,8 @@ class EmscriptenCCompiler(EmscriptenMixin, ClangCCompiler):
                  full_version: T.Optional[str] = None):
         if not is_cross:
             raise MesonException('Emscripten compiler can only be used for cross compilation.')
+        if not version_compare(version, '>=1.39.19'):
+            raise MesonException('Meson requires Emscripten >= 1.39.19')
         ClangCCompiler.__init__(self, ccache, exelist, version, for_machine, is_cross,
                                 info, exe_wrapper=exe_wrapper, linker=linker,
                                 defines=defines, full_version=full_version)
@@ -233,7 +239,8 @@ class ArmclangCCompiler(ArmclangCompiler, CCompiler):
         self.warn_args = {'0': [],
                           '1': default_warn_args,
                           '2': default_warn_args + ['-Wextra'],
-                          '3': default_warn_args + ['-Wextra', '-Wpedantic']}
+                          '3': default_warn_args + ['-Wextra', '-Wpedantic'],
+                          'everything': ['-Weverything']}
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = CCompiler.get_options(self)
@@ -271,7 +278,10 @@ class GnuCCompiler(GnuCompiler, CCompiler):
         self.warn_args = {'0': [],
                           '1': default_warn_args,
                           '2': default_warn_args + ['-Wextra'],
-                          '3': default_warn_args + ['-Wextra', '-Wpedantic']}
+                          '3': default_warn_args + ['-Wextra', '-Wpedantic'],
+                          'everything': (default_warn_args + ['-Wextra', '-Wpedantic'] +
+                                         self.supported_warn_args(gnu_common_warning_args) +
+                                         self.supported_warn_args(gnu_c_warning_args))}
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = CCompiler.get_options(self)
@@ -385,11 +395,12 @@ class IntelCCompiler(IntelGnuLikeCompiler, CCompiler):
                            info, exe_wrapper, linker=linker, full_version=full_version)
         IntelGnuLikeCompiler.__init__(self)
         self.lang_header = 'c-header'
-        default_warn_args = ['-Wall', '-w3', '-diag-disable:remark']
+        default_warn_args = ['-Wall', '-w3']
         self.warn_args = {'0': [],
-                          '1': default_warn_args,
-                          '2': default_warn_args + ['-Wextra'],
-                          '3': default_warn_args + ['-Wextra']}
+                          '1': default_warn_args + ['-diag-disable:remark'],
+                          '2': default_warn_args + ['-Wextra', '-diag-disable:remark'],
+                          '3': default_warn_args + ['-Wextra', '-diag-disable:remark'],
+                          'everything': default_warn_args + ['-Wextra']}
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = CCompiler.get_options(self)
@@ -473,10 +484,10 @@ class VisualStudioCCompiler(MSVCCompiler, VisualStudioLikeCCompilerMixin, CCompi
         args = []
         std = options[OptionKey('std', machine=self.for_machine, lang=self.language)]
         if std.value.startswith('gnu'):
-            mlog.log_once(
+            mlog.log(
                 'cl.exe does not actually support gnu standards, and meson '
                 'will instead demote to the nearest ISO C standard. This '
-                'may cause compilation to fail.')
+                'may cause compilation to fail.', once=True)
         # As of MVSC 16.8, /std:c11 and /std:c17 are the only valid C standard options.
         if std.value in {'c11', 'gnu1x', 'gnu11'}:
             args.append('/std:c11')
@@ -529,7 +540,7 @@ class IntelClCCompiler(IntelVisualStudioLikeCompiler, VisualStudioLikeCCompilerM
         key = OptionKey('std', machine=self.for_machine, lang=self.language)
         std = options[key]
         if std.value == 'c89':
-            mlog.log_once("ICL doesn't explicitly implement c89, setting the standard to 'none', which is close.")
+            mlog.log("ICL doesn't explicitly implement c89, setting the standard to 'none', which is close.", once=True)
         elif std.value != 'none':
             args.append('/Qstd:' + std.value)
         return args
@@ -729,3 +740,60 @@ class TICCompiler(TICompiler, CCompiler):
 class C2000CCompiler(TICCompiler):
     # Required for backwards compat with projects created before ti-cgt support existed
     id = 'c2000'
+
+class MetrowerksCCompilerARM(MetrowerksCompiler, CCompiler):
+    id = 'mwccarm'
+
+    def __init__(self, ccache: T.List[str], exelist: T.List[str], version: str, for_machine: MachineChoice,
+                 is_cross: bool, info: 'MachineInfo',
+                 exe_wrapper: T.Optional['ExternalProgram'] = None,
+                 linker: T.Optional['DynamicLinker'] = None,
+                 full_version: T.Optional[str] = None):
+        CCompiler.__init__(self, ccache, exelist, version, for_machine, is_cross,
+                           info, exe_wrapper, linker=linker, full_version=full_version)
+        MetrowerksCompiler.__init__(self)
+
+    def get_instruction_set_args(self, instruction_set: str) -> T.Optional[T.List[str]]:
+        return mwccarm_instruction_set_args.get(instruction_set, None)
+
+    def get_options(self) -> 'MutableKeyedOptionDictType':
+        opts = CCompiler.get_options(self)
+        c_stds = ['c99']
+        opts[OptionKey('std', machine=self.for_machine, lang=self.language)].choices = ['none'] + c_stds
+        return opts
+
+    def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
+        args = []
+        std = options[OptionKey('std', machine=self.for_machine, lang=self.language)]
+        if std.value != 'none':
+            args.append('-lang')
+            args.append(std.value)
+        return args
+
+class MetrowerksCCompilerEmbeddedPowerPC(MetrowerksCompiler, CCompiler):
+    id = 'mwcceppc'
+
+    def __init__(self, ccache: T.List[str], exelist: T.List[str], version: str, for_machine: MachineChoice,
+                 is_cross: bool, info: 'MachineInfo',
+                 exe_wrapper: T.Optional['ExternalProgram'] = None,
+                 linker: T.Optional['DynamicLinker'] = None,
+                 full_version: T.Optional[str] = None):
+        CCompiler.__init__(self, ccache, exelist, version, for_machine, is_cross,
+                           info, exe_wrapper, linker=linker, full_version=full_version)
+        MetrowerksCompiler.__init__(self)
+
+    def get_instruction_set_args(self, instruction_set: str) -> T.Optional[T.List[str]]:
+        return mwcceppc_instruction_set_args.get(instruction_set, None)
+
+    def get_options(self) -> 'MutableKeyedOptionDictType':
+        opts = CCompiler.get_options(self)
+        c_stds = ['c99']
+        opts[OptionKey('std', machine=self.for_machine, lang=self.language)].choices = ['none'] + c_stds
+        return opts
+
+    def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
+        args = []
+        std = options[OptionKey('std', machine=self.for_machine, lang=self.language)]
+        if std.value != 'none':
+            args.append('-lang ' + std.value)
+        return args

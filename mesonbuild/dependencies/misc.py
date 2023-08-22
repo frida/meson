@@ -13,31 +13,30 @@
 # limitations under the License.
 
 # This file contains the detection logic for miscellaneous external dependencies.
+from __future__ import annotations
 
-from pathlib import Path
 import functools
 import re
-import sysconfig
 import typing as T
 
 from .. import mesonlib
 from .. import mlog
-from ..environment import detect_cpu_family
 from .base import DependencyException, DependencyMethods
 from .base import BuiltinDependency, SystemDependency
 from .cmake import CMakeDependency
 from .configtool import ConfigToolDependency
+from .detect import packages
 from .factory import DependencyFactory, factory_methods
 from .pkgconfig import PkgConfigDependency
 
 if T.TYPE_CHECKING:
-    from ..environment import Environment, MachineChoice
+    from ..environment import Environment
     from .factory import DependencyGenerator
 
 
 @factory_methods({DependencyMethods.PKGCONFIG, DependencyMethods.CMAKE})
 def netcdf_factory(env: 'Environment',
-                   for_machine: 'MachineChoice',
+                   for_machine: 'mesonlib.MachineChoice',
                    kwargs: T.Dict[str, T.Any],
                    methods: T.List[DependencyMethods]) -> T.List['DependencyGenerator']:
     language = kwargs.get('language', 'c')
@@ -58,6 +57,8 @@ def netcdf_factory(env: 'Environment',
         candidates.append(functools.partial(CMakeDependency, 'NetCDF', env, kwargs, language=language))
 
     return candidates
+
+packages['netcdf'] = netcdf_factory
 
 
 class DlBuiltinDependency(BuiltinDependency):
@@ -138,6 +139,8 @@ class OpenMPDependency(SystemDependency):
             if not self.is_found:
                 mlog.log(mlog.yellow('WARNING:'), 'OpenMP found but omp.h missing.')
 
+packages['openmp'] = OpenMPDependency
+
 
 class ThreadDependency(SystemDependency):
     def __init__(self, name: str, environment: 'Environment', kwargs: T.Dict[str, T.Any]) -> None:
@@ -145,7 +148,7 @@ class ThreadDependency(SystemDependency):
         self.is_found = True
         # Happens if you are using a language with threads
         # concept without C, such as plain Cuda.
-        if self.clib_compiler is None:
+        if not self.clib_compiler:
             self.compile_args = []
             self.link_args = []
         else:
@@ -185,113 +188,17 @@ class BlocksDependency(SystemDependency):
 
             self.is_found = True
 
+packages['blocks'] = BlocksDependency
 
-class Python3DependencySystem(SystemDependency):
-    def __init__(self, name: str, environment: 'Environment', kwargs: T.Dict[str, T.Any]) -> None:
-        super().__init__(name, environment, kwargs)
-
-        if not environment.machines.matches_build_machine(self.for_machine):
-            return
-        if not environment.machines[self.for_machine].is_windows():
-            return
-
-        self.name = 'python3'
-        # We can only be sure that it is Python 3 at this point
-        self.version = '3'
-        self._find_libpy3_windows(environment)
-
-    @staticmethod
-    def get_windows_python_arch() -> T.Optional[str]:
-        pyplat = sysconfig.get_platform()
-        if pyplat == 'mingw':
-            pycc = sysconfig.get_config_var('CC')
-            if pycc.startswith('x86_64'):
-                return '64'
-            elif pycc.startswith(('i686', 'i386')):
-                return '32'
-            else:
-                mlog.log(f'MinGW Python built with unknown CC {pycc!r}, please file a bug')
-                return None
-        elif pyplat == 'win32':
-            return '32'
-        elif pyplat in ('win64', 'win-amd64'):
-            return '64'
-        mlog.log(f'Unknown Windows Python platform {pyplat!r}')
-        return None
-
-    def get_windows_link_args(self) -> T.Optional[T.List[str]]:
-        pyplat = sysconfig.get_platform()
-        if pyplat.startswith('win'):
-            vernum = sysconfig.get_config_var('py_version_nodot')
-            if self.static:
-                libpath = Path('libs') / f'libpython{vernum}.a'
-            else:
-                comp = self.get_compiler()
-                if comp.id == "gcc":
-                    libpath = Path(f'python{vernum}.dll')
-                else:
-                    libpath = Path('libs') / f'python{vernum}.lib'
-            lib = Path(sysconfig.get_config_var('base')) / libpath
-        elif pyplat == 'mingw':
-            if self.static:
-                libname = sysconfig.get_config_var('LIBRARY')
-            else:
-                libname = sysconfig.get_config_var('LDLIBRARY')
-            lib = Path(sysconfig.get_config_var('LIBDIR')) / libname
-        if not lib.exists():
-            mlog.log('Could not find Python3 library {!r}'.format(str(lib)))
-            return None
-        return [str(lib)]
-
-    def _find_libpy3_windows(self, env: 'Environment') -> None:
-        '''
-        Find python3 libraries on Windows and also verify that the arch matches
-        what we are building for.
-        '''
-        pyarch = self.get_windows_python_arch()
-        if pyarch is None:
-            self.is_found = False
-            return
-        arch = detect_cpu_family(env.coredata.compilers.host)
-        if arch == 'x86':
-            arch = '32'
-        elif arch == 'x86_64':
-            arch = '64'
-        else:
-            # We can't cross-compile Python 3 dependencies on Windows yet
-            mlog.log(f'Unknown architecture {arch!r} for',
-                     mlog.bold(self.name))
-            self.is_found = False
-            return
-        # Pyarch ends in '32' or '64'
-        if arch != pyarch:
-            mlog.log('Need', mlog.bold(self.name), 'for {}-bit, but '
-                     'found {}-bit'.format(arch, pyarch))
-            self.is_found = False
-            return
-        # This can fail if the library is not found
-        largs = self.get_windows_link_args()
-        if largs is None:
-            self.is_found = False
-            return
-        self.link_args = largs
-        # Compile args
-        inc = sysconfig.get_path('include')
-        platinc = sysconfig.get_path('platinclude')
-        self.compile_args = ['-I' + inc]
-        if inc != platinc:
-            self.compile_args.append('-I' + platinc)
-        self.version = sysconfig.get_config_var('py_version')
-        self.is_found = True
-
-    @staticmethod
-    def log_tried() -> str:
-        return 'sysconfig'
 
 class PcapDependencyConfigTool(ConfigToolDependency):
 
     tools = ['pcap-config']
     tool_name = 'pcap-config'
+
+    # version 1.10.2 added error checking for invalid arguments
+    # version 1.10.3 will hopefully add actual support for --version
+    skip_version = '--help'
 
     def __init__(self, name: str, environment: 'Environment', kwargs: T.Dict[str, T.Any]):
         super().__init__(name, environment, kwargs)
@@ -299,7 +206,9 @@ class PcapDependencyConfigTool(ConfigToolDependency):
             return
         self.compile_args = self.get_config_value(['--cflags'], 'compile_args')
         self.link_args = self.get_config_value(['--libs'], 'link_args')
-        self.version = self.get_pcap_lib_version()
+        if self.version is None:
+            # older pcap-config versions don't support this
+            self.version = self.get_pcap_lib_version()
 
     def get_pcap_lib_version(self) -> T.Optional[str]:
         # Since we seem to need to run a program to discover the pcap version,
@@ -430,7 +339,7 @@ class CursesSystemDependency(SystemDependency):
             ('curses',  ['curses.h']),
         ]
 
-        # Not sure how else to elegently break out of both loops
+        # Not sure how else to elegantly break out of both loops
         for lib, headers in candidates:
             l = self.clib_compiler.find_library(lib, env, [])
             if l:
@@ -566,7 +475,7 @@ class OpensslSystemDependency(SystemDependency):
 
 @factory_methods({DependencyMethods.PKGCONFIG, DependencyMethods.CONFIG_TOOL, DependencyMethods.SYSTEM})
 def curses_factory(env: 'Environment',
-                   for_machine: 'MachineChoice',
+                   for_machine: 'mesonlib.MachineChoice',
                    kwargs: T.Dict[str, T.Any],
                    methods: T.List[DependencyMethods]) -> T.List['DependencyGenerator']:
     candidates: T.List['DependencyGenerator'] = []
@@ -587,11 +496,12 @@ def curses_factory(env: 'Environment',
             candidates.append(functools.partial(CursesSystemDependency, 'curses', env, kwargs))
 
     return candidates
+packages['curses'] = curses_factory
 
 
 @factory_methods({DependencyMethods.PKGCONFIG, DependencyMethods.SYSTEM})
 def shaderc_factory(env: 'Environment',
-                    for_machine: 'MachineChoice',
+                    for_machine: 'mesonlib.MachineChoice',
                     kwargs: T.Dict[str, T.Any],
                     methods: T.List[DependencyMethods]) -> T.List['DependencyGenerator']:
     """Custom DependencyFactory for ShaderC.
@@ -622,94 +532,84 @@ def shaderc_factory(env: 'Environment',
         candidates.append(functools.partial(ShadercDependency, env, kwargs))
 
     return candidates
+packages['shaderc'] = shaderc_factory
 
 
-cups_factory = DependencyFactory(
+packages['cups'] = cups_factory = DependencyFactory(
     'cups',
     [DependencyMethods.PKGCONFIG, DependencyMethods.CONFIG_TOOL, DependencyMethods.EXTRAFRAMEWORK, DependencyMethods.CMAKE],
     configtool_class=CupsDependencyConfigTool,
     cmake_name='Cups',
 )
 
-dl_factory = DependencyFactory(
+packages['dl'] = dl_factory = DependencyFactory(
     'dl',
     [DependencyMethods.BUILTIN, DependencyMethods.SYSTEM],
     builtin_class=DlBuiltinDependency,
     system_class=DlSystemDependency,
 )
 
-gpgme_factory = DependencyFactory(
+packages['gpgme'] = gpgme_factory = DependencyFactory(
     'gpgme',
     [DependencyMethods.PKGCONFIG, DependencyMethods.CONFIG_TOOL],
     configtool_class=GpgmeDependencyConfigTool,
 )
 
-libgcrypt_factory = DependencyFactory(
+packages['libgcrypt'] = libgcrypt_factory = DependencyFactory(
     'libgcrypt',
     [DependencyMethods.PKGCONFIG, DependencyMethods.CONFIG_TOOL],
     configtool_class=LibGCryptDependencyConfigTool,
 )
 
-libwmf_factory = DependencyFactory(
+packages['libwmf'] = libwmf_factory = DependencyFactory(
     'libwmf',
     [DependencyMethods.PKGCONFIG, DependencyMethods.CONFIG_TOOL],
     configtool_class=LibWmfDependencyConfigTool,
 )
 
-pcap_factory = DependencyFactory(
+packages['pcap'] = pcap_factory = DependencyFactory(
     'pcap',
     [DependencyMethods.PKGCONFIG, DependencyMethods.CONFIG_TOOL],
     configtool_class=PcapDependencyConfigTool,
     pkgconfig_name='libpcap',
 )
 
-python3_factory = DependencyFactory(
-    'python3',
-    [DependencyMethods.PKGCONFIG, DependencyMethods.SYSTEM, DependencyMethods.EXTRAFRAMEWORK],
-    system_class=Python3DependencySystem,
-    # There is no version number in the macOS version number
-    framework_name='Python',
-    # There is a python in /System/Library/Frameworks, but that's python 2.x,
-    # Python 3 will always be in /Library
-    extra_kwargs={'paths': ['/Library/Frameworks']},
-)
-
-threads_factory = DependencyFactory(
+packages['threads'] = threads_factory = DependencyFactory(
     'threads',
     [DependencyMethods.SYSTEM, DependencyMethods.CMAKE],
     cmake_name='Threads',
     system_class=ThreadDependency,
 )
 
-iconv_factory = DependencyFactory(
+packages['iconv'] = iconv_factory = DependencyFactory(
     'iconv',
     [DependencyMethods.BUILTIN, DependencyMethods.SYSTEM],
     builtin_class=IconvBuiltinDependency,
     system_class=IconvSystemDependency,
 )
 
-intl_factory = DependencyFactory(
+packages['intl'] = intl_factory = DependencyFactory(
     'intl',
     [DependencyMethods.BUILTIN, DependencyMethods.SYSTEM],
     builtin_class=IntlBuiltinDependency,
     system_class=IntlSystemDependency,
 )
 
-openssl_factory = DependencyFactory(
+packages['openssl'] = openssl_factory = DependencyFactory(
     'openssl',
     [DependencyMethods.PKGCONFIG, DependencyMethods.SYSTEM, DependencyMethods.CMAKE],
     system_class=OpensslSystemDependency,
     cmake_class=lambda name, env, kwargs: CMakeDependency('OpenSSL', env, dict(kwargs, modules=['OpenSSL::Crypto', 'OpenSSL::SSL'])),
 )
 
-libcrypto_factory = DependencyFactory(
+packages['libcrypto'] = libcrypto_factory = DependencyFactory(
     'libcrypto',
     [DependencyMethods.PKGCONFIG, DependencyMethods.SYSTEM, DependencyMethods.CMAKE],
     system_class=OpensslSystemDependency,
     cmake_class=lambda name, env, kwargs: CMakeDependency('OpenSSL', env, dict(kwargs, modules=['OpenSSL::Crypto'])),
 )
 
-libssl_factory = DependencyFactory(
+packages['libssl'] = libssl_factory = DependencyFactory(
     'libssl',
     [DependencyMethods.PKGCONFIG, DependencyMethods.SYSTEM, DependencyMethods.CMAKE],
     system_class=OpensslSystemDependency,

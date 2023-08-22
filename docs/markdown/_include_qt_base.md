@@ -71,7 +71,7 @@ This method takes the following keyword arguments:
  - `qresources` (string | File)[]: Passed to the RCC compiler
  - `ui_files`: (string | File | CustomTarget)[]: Passed the `uic` compiler
  - `moc_sources`: (string | File | CustomTarget)[]: Passed the `moc` compiler. These are converted into .moc files meant to be `#include`ed
- - `moc_headers`: (string | File | CustomTarget)[]: Passied the `moc` compiler. These will be converted into .cpp files
+ - `moc_headers`: (string | File | CustomTarget)[]: Passed the `moc` compiler. These will be converted into .cpp files
  - `include_directories` (IncludeDirectories | string)[], the directories to add to header search path for `moc`
  - `moc_extra_arguments` string[]: any additional arguments to `moc`. Since v0.44.0.
  - `uic_extra_arguments` string[]: any additional arguments to `uic`. Since v0.49.0.
@@ -145,7 +145,7 @@ qt5 = import('qt5')
 qt5_dep = dependency('qt5', modules: ['Core', 'Gui'])
 inc = include_directories('includes')
 moc_files = qt5.compile_moc(headers : 'myclass.h',
-                            extra_arguments: ['-DMAKES_MY_MOC_HEADER_COMPILE'],
+                            extra_args: ['-DMAKES_MY_MOC_HEADER_COMPILE'],
                             include_directories: inc,
                             dependencies: qt5_dep)
 translations = qt5.compile_translations(ts_files : 'myTranslation_fr.ts', build_by_default : true)

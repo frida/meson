@@ -161,7 +161,7 @@ cfile = configure_file(input : 'config.h.in',
   install_dir : false,
   configuration : conf)
 
-# test intsall_dir with install: false
+# test install_dir with install: false
 cfile = configure_file(input : 'config.h.in',
   output : 'do_not_get_installed_in_install_dir.h',
   install : false,
@@ -210,7 +210,11 @@ endif
 # Test the fs replacement
 # Test copying of an empty configuration data object
 inf = 'invalid-utf8.bin.in'
-outf = fs.copyfile(inf, 'invalid-utf8-1.bin')
+outf = fs.copyfile(inf, 'invalid-utf8-1.bin',
+  install: true,
+  install_dir: get_option('datadir') / meson.project_name(),
+  install_tag: 'copyfile',
+)
 test('fs.copyfile string', check_file, args: [files(inf), outf])
 
 # Test with default outname of string

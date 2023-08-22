@@ -14,12 +14,15 @@ import tarfile
 import zipfile
 
 from . import mlog
+from .ast import IntrospectionInterpreter, AstIDGenerator
 from .mesonlib import quiet_git, GitException, Popen_safe, MesonException, windows_proof_rmtree
-from .wrap.wrap import (Resolver, WrapException, ALL_TYPES, PackageDefinition,
+from .wrap.wrap import (Resolver, WrapException, ALL_TYPES,
                         parse_patch_url, update_wrap_file, get_releases)
 
 if T.TYPE_CHECKING:
     from typing_extensions import Protocol
+
+    from .wrap.wrap import PackageDefinition
 
     SubParsers = argparse._SubParsersAction[argparse.ArgumentParser]
 
@@ -207,13 +210,17 @@ class Runner:
         self.log(self.git_output(cmd))
 
     def git_stash(self) -> None:
-        # That git command return 1 (failure) when there is something to stash.
+        # That git command return some output when there is something to stash.
         # We don't want to stash when there is nothing to stash because that would
         # print spurious "No local changes to save".
-        if not quiet_git(['diff', '--quiet', 'HEAD'], self.repo_dir)[0]:
+        if quiet_git(['status', '--porcelain', ':!/.meson-subproject-wrap-hash.txt'], self.repo_dir)[1].strip():
             # Don't pipe stdout here because we want the user to see their changes have
             # been saved.
-            self.git_verbose(['stash'])
+            # Note: `--all` is used, and not `--include-untracked`, to prevent
+            # a potential error if `.meson-subproject-wrap-hash.txt` matches a
+            # gitignore pattern.
+            # We must add the dot in addition to the negation, because older versions of git have a bug.
+            self.git_verbose(['stash', 'push', '--all', ':!/.meson-subproject-wrap-hash.txt', '.'])
 
     def git_show(self) -> None:
         commit_message = self.git_output(['show', '--quiet', '--pretty=format:%h%n%d%n%s%n[%an]'])
@@ -246,9 +253,10 @@ class Runner:
         return True
 
     def git_checkout(self, revision: str, create: bool = False) -> bool:
-        cmd = ['checkout', '--ignore-other-worktrees', revision, '--']
+        cmd = ['checkout', '--ignore-other-worktrees']
         if create:
-            cmd.insert(1, '-b')
+            cmd.append('-b')
+        cmd += [revision, '--']
         try:
             # Stash local changes, commits can always be found back in reflog, to
             # avoid any data lost by mistake.
@@ -680,15 +688,20 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     p.set_defaults(subprojects_func=Runner.packagefiles)
 
 def run(options: 'Arguments') -> int:
-    src_dir = os.path.relpath(os.path.realpath(options.sourcedir))
-    if not os.path.isfile(os.path.join(src_dir, 'meson.build')):
-        mlog.error('Directory', mlog.bold(src_dir), 'does not seem to be a Meson source directory.')
+    source_dir = os.path.relpath(os.path.realpath(options.sourcedir))
+    if not os.path.isfile(os.path.join(source_dir, 'meson.build')):
+        mlog.error('Directory', mlog.bold(source_dir), 'does not seem to be a Meson source directory.')
         return 1
-    subprojects_dir = os.path.join(src_dir, 'subprojects')
-    if not os.path.isdir(subprojects_dir):
-        mlog.log('Directory', mlog.bold(src_dir), 'does not seem to have subprojects.')
+    with mlog.no_logging():
+        intr = IntrospectionInterpreter(source_dir, '', 'none', visitors = [AstIDGenerator()])
+        intr.load_root_meson_file()
+        intr.sanity_check_ast()
+        intr.parse_project()
+    subproject_dir = intr.subproject_dir
+    if not os.path.isdir(os.path.join(source_dir, subproject_dir)):
+        mlog.log('Directory', mlog.bold(source_dir), 'does not seem to have subprojects.')
         return 0
-    r = Resolver(src_dir, 'subprojects', wrap_frontend=True, allow_insecure=options.allow_insecure)
+    r = Resolver(source_dir, subproject_dir, wrap_frontend=True, allow_insecure=options.allow_insecure, silent=True)
     if options.subprojects:
         wraps = [wrap for name, wrap in r.wraps.items() if name in options.subprojects]
     else:
@@ -699,7 +712,8 @@ def run(options: 'Arguments') -> int:
             raise MesonException(f'Unknown subproject type {t!r}, supported types are: {ALL_TYPES_STRING}')
     tasks: T.List[T.Awaitable[bool]] = []
     task_names: T.List[str] = []
-    loop = asyncio.get_event_loop()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     executor = ThreadPoolExecutor(options.num_processes)
     if types:
         wraps = [wrap for wrap in wraps if wrap.type in types]
@@ -708,7 +722,7 @@ def run(options: 'Arguments') -> int:
         pre_func(options)
     logger = Logger(len(wraps))
     for wrap in wraps:
-        dirname = Path(subprojects_dir, wrap.directory).as_posix()
+        dirname = Path(subproject_dir, wrap.directory).as_posix()
         runner = Runner(logger, r, wrap, dirname, options)
         task = loop.run_in_executor(executor, runner.run)
         tasks.append(task)

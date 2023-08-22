@@ -23,6 +23,9 @@ on:
   schedule:
     - cron: '0 0 * * 0'
 
+permissions:
+  contents: read
+
 jobs:
   build:
     # do not run the weekly scheduled job in a fork
@@ -42,7 +45,7 @@ jobs:
           - { name: Ubuntu Bionic,    id: bionic   }
           - { name: Ubuntu Rolling,   id: ubuntu-rolling  }
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
       # Login to dockerhub
       - name: Docker login

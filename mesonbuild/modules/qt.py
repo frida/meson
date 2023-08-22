@@ -108,7 +108,7 @@ class QtBaseModule(ExtensionModule):
         self.qt_version = qt_version
         # It is important that this list does not change order as the order of
         # the returned ExternalPrograms will change as well
-        self.tools: T.Dict[str, ExternalProgram] = {
+        self.tools: T.Dict[str, T.Union[ExternalProgram, build.Executable]] = {
             'moc': NonExistingExternalProgram('moc'),
             'uic': NonExistingExternalProgram('uic'),
             'rcc': NonExistingExternalProgram('rcc'),
@@ -152,7 +152,7 @@ class QtBaseModule(ExtensionModule):
                 arg = ['-v']
 
             # Ensure that the version of qt and each tool are the same
-            def get_version(p: ExternalProgram) -> str:
+            def get_version(p: T.Union[ExternalProgram, build.Executable]) -> str:
                 _, out, err = Popen_safe(p.get_command() + arg)
                 if name == 'lrelease' or not qt_dep.version.startswith('4'):
                     care = out
@@ -198,12 +198,11 @@ class QtBaseModule(ExtensionModule):
         abspath: str
         if isinstance(rcc_file, str):
             abspath = os.path.join(state.environment.source_dir, state.subdir, rcc_file)
-            rcc_dirname = os.path.dirname(abspath)
         else:
             abspath = rcc_file.absolute_path(state.environment.source_dir, state.environment.build_dir)
-            rcc_dirname = os.path.dirname(abspath)
+        rcc_dirname = os.path.dirname(abspath)
 
-        # FIXME: what error are we actually trying to check here?
+        # FIXME: what error are we actually trying to check here? (probably parse errors?)
         try:
             tree = ET.parse(abspath)
             root = tree.getroot()
@@ -212,10 +211,14 @@ class QtBaseModule(ExtensionModule):
                 if child.tag != 'file':
                     mlog.warning("malformed rcc file: ", os.path.join(state.subdir, str(rcc_file)))
                     break
+                elif child.text is None:
+                    raise MesonException(f'<file> element without a path in {os.path.join(state.subdir, str(rcc_file))}')
                 else:
                     result.append(child.text)
 
             return rcc_dirname, result
+        except MesonException:
+            raise
         except Exception:
             raise MesonException(f'Unable to parse resource file {abspath}')
 
@@ -345,6 +348,7 @@ class QtBaseModule(ExtensionModule):
                 [f'{name}.cpp'],
                 depend_files=qrc_deps,
                 depfile=f'{name}.d',
+                description='Compiling Qt resources {}',
             )
             targets.append(res_target)
         else:
@@ -365,6 +369,7 @@ class QtBaseModule(ExtensionModule):
                     [f'{name}.cpp'],
                     depend_files=qrc_deps,
                     depfile=f'{name}.d',
+                    description='Compiling Qt resources {}',
                 )
                 targets.append(res_target)
 
@@ -584,7 +589,7 @@ class QtBaseModule(ExtensionModule):
                 ts = os.path.basename(ts)
             else:
                 outdir = state.subdir
-            cmd: T.List[T.Union[ExternalProgram, str]] = [self.tools['lrelease'], '@INPUT@', '-qm', '@OUTPUT@']
+            cmd: T.List[T.Union[ExternalProgram, build.Executable, str]] = [self.tools['lrelease'], '@INPUT@', '-qm', '@OUTPUT@']
             lrelease_target = build.CustomTarget(
                 f'qt{self.qt_version}-compile-{ts}',
                 outdir,
@@ -597,6 +602,7 @@ class QtBaseModule(ExtensionModule):
                 install_dir=[kwargs['install_dir']],
                 install_tag=['i18n'],
                 build_by_default=kwargs['build_by_default'],
+                description='Compiling Qt translations {}',
             )
             translations.append(lrelease_target)
         if qresource:

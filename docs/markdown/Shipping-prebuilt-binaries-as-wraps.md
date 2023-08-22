@@ -14,19 +14,26 @@ library at the top level and headers in a subdirectory called
 `include`. The Meson build definition would look like the following.
 
 ```meson
-project('binary dep', 'c')
+project('bob', 'c')
+
+# Do some sanity checking so that meson can fail early instead of at final link time
+if not (host_machine.system() == 'windows' and host_machine.cpu_family() == 'x86_64')
+  error('This wrap of libbob is a binary wrap for x64_64 Windows, and will not work on your system')
+endif
 
 cc = meson.get_compiler('c')
-bin_dep = declare_dependency(
+bob_dep = declare_dependency(
   dependencies : cc.find_library('bob', dirs : meson.current_source_dir()),
   include_directories : include_directories('include'))
+
+meson.override_dependency('bob', bob_dep)
 ```
 
 Now you can use this subproject as if it was a Meson project:
 
 ```meson
 project('using dep', 'c')
-bob_dep = subproject('bob').get_variable('bin_dep')
+bob_dep = dependency('bob')
 executable('prog', 'prog.c', dependencies : bob_dep)
 ```
 
@@ -34,6 +41,33 @@ Note that often libraries compiled with different compilers (or even
 compiler flags) might not be compatible. If you do this, then you are
 responsible for verifying that your libraries are compatible, Meson
 will not check things for you.
+
+## Using a wrap file
+
+To make this all work automatically, a project will need a
+[wrap file](Wrap-dependency-system-manual.md#wrap-format), as well as the
+meson.build definition from above. For this example our dependency is called
+`bob`.
+
+The wrap ini (subprojects/bob.wrap):
+```ini
+[wrap-file]
+directory = libbob-1.0
+source_url = https://libbob.example.com/libbob-1.0.zip
+source_filename = libbob-1.0.zip
+source_hash = 5ebeea0dfb75d090ea0e7ff84799b2a7a1550db3fe61eb5f6f61c2e971e57663
+patch_directory = libbob
+
+[provide]
+dependency_names = bob
+```
+
+Then create `subprojects/packagefiles/libbob/`, and place the `meson.build` from
+above in that directory. With these in place a call to `dependency('bob')` will
+first try standard discovery methods for your system (such as pkg-config, cmake,
+and any built-in meson find methods), and then fall back to using the binary
+wrap if it cannot find the dependency on the system. Meson provides the
+`--force-fallback-for=bob` command line option to force the use of the fallback.
 
 ## Note for Linux libraries
 

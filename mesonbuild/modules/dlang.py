@@ -14,13 +14,15 @@
 
 # This file contains the detection logic for external dependencies that
 # are UI-related.
+from __future__ import annotations
 
 import json
 import os
 
 from . import ExtensionModule, ModuleInfo
-from .. import dependencies
 from .. import mlog
+from ..dependencies import Dependency
+from ..dependencies.dub import DubDependency
 from ..interpreterbase import typed_pos_args
 from ..mesonlib import Popen_safe, MesonException
 
@@ -38,7 +40,7 @@ class DlangModule(ExtensionModule):
 
     def _init_dub(self, state):
         if DlangModule.class_dubbin is None:
-            self.dubbin = dependencies.DubDependency.class_dubbin
+            self.dubbin = DubDependency.class_dubbin
             DlangModule.class_dubbin = self.dubbin
         else:
             self.dubbin = DlangModule.class_dubbin
@@ -81,7 +83,7 @@ class DlangModule(ExtensionModule):
                 config[key] = {}
                 if isinstance(value, list):
                     for dep in value:
-                        if isinstance(dep, dependencies.Dependency):
+                        if isinstance(dep, Dependency):
                             name = dep.get_name()
                             ret, res = self._call_dubbin(['describe', name])
                             if ret == 0:
@@ -90,7 +92,7 @@ class DlangModule(ExtensionModule):
                                     config[key][name] = ''
                                 else:
                                     config[key][name] = version
-                elif isinstance(value, dependencies.Dependency):
+                elif isinstance(value, Dependency):
                     name = value.get_name()
                     ret, res = self._call_dubbin(['describe', name])
                     if ret == 0:

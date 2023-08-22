@@ -27,19 +27,14 @@ import abc
 import typing as T
 
 if T.TYPE_CHECKING:
+    from hashlib import _Hash
     from typing_extensions import Literal
     from ..mparser import BaseNode
-    from . import programs
+    from .. import programs
 
+    EnvironOrDict = T.Union[T.Dict[str, str], os._Environ[str]]
 
-__all__ = [
-    'MesonException',
-    'MesonBugException',
-    'HoldableObject',
-    'EnvInitValueType',
-    'EnvironmentVariables',
-    'ExecutableSerialisation',
-]
+    EnvInitValueType = T.Dict[str, T.Union[str, T.List[str]]]
 
 
 class MesonException(Exception):
@@ -73,12 +68,10 @@ class HoldableObject(metaclass=abc.ABCMeta):
     ''' Dummy base class for all objects that can be
         held by an interpreter.baseobjects.ObjectHolder '''
 
-EnvInitValueType = T.Dict[str, T.Union[str, T.List[str]]]
-
 class EnvironmentVariables(HoldableObject):
     def __init__(self, values: T.Optional[EnvInitValueType] = None,
                  init_method: Literal['set', 'prepend', 'append'] = 'set', separator: str = os.pathsep) -> None:
-        self.envvars: T.List[T.Tuple[T.Callable[[T.Dict[str, str], str, T.List[str], str], str], str, T.List[str], str]] = []
+        self.envvars: T.List[T.Tuple[T.Callable[[T.Dict[str, str], str, T.List[str], str, T.Optional[str]], str], str, T.List[str], str]] = []
         # The set of all env vars we have operations for. Only used for self.has_name()
         self.varnames: T.Set[str] = set()
 
@@ -92,7 +85,7 @@ class EnvironmentVariables(HoldableObject):
         repr_str = "<{0}: {1}>"
         return repr_str.format(self.__class__.__name__, self.envvars)
 
-    def hash(self, hasher: T.Any):
+    def hash(self, hasher: _Hash) -> None:
         myenv = self.get_env({})
         for key in sorted(myenv.keys()):
             hasher.update(bytes(key, encoding='utf-8'))
@@ -105,6 +98,11 @@ class EnvironmentVariables(HoldableObject):
 
     def get_names(self) -> T.Set[str]:
         return self.varnames
+
+    def merge(self, other: EnvironmentVariables) -> None:
+        for method, name, values, separator in other.envvars:
+            self.varnames.add(name)
+            self.envvars.append((method, name, values, separator))
 
     def set(self, name: str, values: T.List[str], separator: str = os.pathsep) -> None:
         self.varnames.add(name)
@@ -119,42 +117,43 @@ class EnvironmentVariables(HoldableObject):
         self.envvars.append((self._prepend, name, values, separator))
 
     @staticmethod
-    def _set(env: T.Dict[str, str], name: str, values: T.List[str], separator: str) -> str:
+    def _set(env: T.Dict[str, str], name: str, values: T.List[str], separator: str, default_value: T.Optional[str]) -> str:
         return separator.join(values)
 
     @staticmethod
-    def _append(env: T.Dict[str, str], name: str, values: T.List[str], separator: str) -> str:
-        curr = env.get(name)
+    def _append(env: T.Dict[str, str], name: str, values: T.List[str], separator: str, default_value: T.Optional[str]) -> str:
+        curr = env.get(name, default_value)
         return separator.join(values if curr is None else [curr] + values)
 
     @staticmethod
-    def _prepend(env: T.Dict[str, str], name: str, values: T.List[str], separator: str) -> str:
-        curr = env.get(name)
+    def _prepend(env: T.Dict[str, str], name: str, values: T.List[str], separator: str, default_value: T.Optional[str]) -> str:
+        curr = env.get(name, default_value)
         return separator.join(values if curr is None else values + [curr])
 
-    def get_env(self, full_env: T.MutableMapping[str, str]) -> T.Dict[str, str]:
+    def get_env(self, full_env: EnvironOrDict, default_fmt: T.Optional[str] = None) -> T.Dict[str, str]:
         env = full_env.copy()
         for method, name, values, separator in self.envvars:
-            env[name] = method(env, name, values, separator)
+            default_value = default_fmt.format(name) if default_fmt else None
+            env[name] = method(env, name, values, separator, default_value)
         return env
 
 
 @dataclass(eq=False)
 class ExecutableSerialisation:
 
-    # XXX: should capture and feed default to False, instead of None?
-
     cmd_args: T.List[str]
     env: T.Optional[EnvironmentVariables] = None
     exe_wrapper: T.Optional['programs.ExternalProgram'] = None
     workdir: T.Optional[str] = None
     extra_paths: T.Optional[T.List] = None
-    capture: T.Optional[bool] = None
-    feed: T.Optional[bool] = None
+    capture: T.Optional[str] = None
+    feed: T.Optional[str] = None
     tag: T.Optional[str] = None
     verbose: bool = False
+    installdir_map: T.Optional[T.Dict[str, str]] = None
 
     def __post_init__(self) -> None:
         self.pickled = False
         self.skip_if_destdir = False
         self.subproject = ''
+        self.dry_run = False

@@ -19,6 +19,7 @@
 
 # This file is basically a reimplementation of
 # http://cgit.freedesktop.org/libreoffice/core/commit/?id=3213cd54b76bc80a6f0516aac75a48ff3b2ad67c
+from __future__ import annotations
 
 import typing as T
 import os, sys
@@ -118,7 +119,7 @@ def gnu_syms(libfilename: str, outfilename: str) -> None:
         # Store the size of symbols pointing to data objects so we relink
         # when those change, which is needed because of copy relocations
         # https://github.com/mesonbuild/meson/pull/7132#issuecomment-628353702
-        if line_split[1].upper() in ('B', 'G', 'D') and len(line_split) >= 4:
+        if line_split[1].upper() in {'B', 'G', 'D'} and len(line_split) >= 4:
             entry += [line_split[3]]
         result += [' '.join(entry)]
     write_if_changed('\n'.join(result) + '\n', outfilename)

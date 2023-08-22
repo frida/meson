@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 """Abstractions for the PGI family of compilers."""
 
@@ -31,14 +32,14 @@ else:
     # do). This gives up DRYer type checking, with no runtime impact
     Compiler = object
 
-pgi_buildtype_args = {
+pgi_buildtype_args: T.Dict[str, T.List[str]] = {
     'plain': [],
     'debug': [],
     'debugoptimized': [],
     'release': [],
     'minsize': [],
     'custom': [],
-}  # type: T.Dict[str, T.List[str]]
+}
 
 
 class PGICompiler(Compiler):
@@ -53,7 +54,8 @@ class PGICompiler(Compiler):
             '0': [],
             '1': default_warn_args,
             '2': default_warn_args,
-            '3': default_warn_args
+            '3': default_warn_args,
+            'everything': default_warn_args
         }
 
     def get_module_incdir_args(self) -> T.Tuple[str]:

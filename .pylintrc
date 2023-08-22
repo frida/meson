@@ -1,5 +1,8 @@
 [MASTER]
 jobs=0
+load-plugins=
+    pylint.extensions.bad_builtin,
+    pylint.extensions.set_membership,
 
 [REPORTS]
 score=no
@@ -20,7 +23,6 @@ disable=
     duplicate-value,
     exec-used,
     fixme,
-    implicit-str-concat,
     import-error,
     import-outside-toplevel,
     inconsistent-mro,
@@ -51,7 +53,6 @@ disable=
     redefined-argument-from-local,
     redefined-builtin,
     redefined-outer-name,
-    simplifiable-if-statement,
     subprocess-run-check,
     super-init-not-called,
     too-few-public-methods,
@@ -74,9 +75,6 @@ disable=
     unsubscriptable-object,
     unused-argument,
     unused-variable,
-    use-implicit-booleaness-not-comparison,
-    used-before-assignment,
-    useless-return,
     useless-super-delegation,
     wrong-import-order,
     wrong-import-position,

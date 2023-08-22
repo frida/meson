@@ -102,6 +102,22 @@ Telling Meson to run this script at install time is a one-liner.
 The argument is the name of the script file relative to the current
 subdirectory.
 
+## Installing as the superuser
+
+When building as a non-root user, but installing to root-owned locations via
+e.g. `sudo ninja install`, ninja will attempt to rebuild any out of date
+targets as root. This results in various bad behaviors due to build outputs and
+ninja internal files being owned by root.
+
+Running `meson install` is preferred for several reasons. It can rebuild out of
+date targets and then re-invoke itself as root. *(since 1.1.0)* Additionally,
+running `sudo meson install` will drop permissions and rebuild out of date
+targets as the original user, not as root.
+
+*(since 1.1.0)* Re-invoking as root will try to guess the user's preferred method for
+re-running commands as root. The order of precedence is: sudo, doas, pkexec
+(polkit). An elevation tool can be forced by setting `$MESON_ROOT_CMD`.
+
 ## DESTDIR support
 
 Sometimes you need to install to a different directory than the
@@ -153,14 +169,19 @@ time, please help extending the list of well known categories.
   * [[install_headers]],
   * `pkgconfig.generate()`,
   * `gnome.generate_gir()` - `.gir` file,
+  * `gnome.generate_vapi()` - `.vapi` file (*Since 0.64.0*),
   * Files installed into `libdir` and with `.a` or `.pc` extension,
-  * File installed into `includedir`.
+  * File installed into `includedir`,
+  * Generated header files installed with `gnome.compile_resources()`,
+    `gnome.genmarshal()`, `gnome.mkenums()`, `gnome.mkenums_simple()`
+    and `gnome.gdbus_codegen()` (*Since 0.64.0*).
 - `runtime`:
   * [[executable]],
   * [[shared_library]],
   * [[shared_module]],
   * [[jar]],
-  * Files installed into `bindir`.
+  * `gnome.compile_resources()` - `.gresource` file (*Since 0.64.0*),
+  * Files installed into `bindir`,
   * Files installed into `libdir` and with `.so` or `.dll` extension.
 - `python-runtime`:
   * `python.install_sources()`.

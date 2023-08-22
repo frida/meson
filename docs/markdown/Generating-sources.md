@@ -53,7 +53,7 @@ is generated and that the proper include paths are created for the
 target:
 
 ```meson
-prog_python = import('python').find_installation('python3')
+prog_python = [[#find_program]]('python3')
 
 foo_c = custom_target(
     'foo.c',
@@ -89,7 +89,7 @@ get each output file separately. The order is the same as the order of
 the output argument to `custom_target`
 
 ```meson
-prog_python = import('python').find_installation('python3')
+prog_python = [[#find_program]]('python3')
 
 foo_ch = custom_target(
     'foo.[ch]',
@@ -179,7 +179,7 @@ gen2 = generator(someprog,
                  arguments : ['--out_dir=@BUILD_DIR@', '@INPUT@'])
 ```
 
-In this case you can not use the plain `@OUTPUT@` variable, as it
+In this case you cannot use the plain `@OUTPUT@` variable, as it
 would be ambiguous. This program only needs to know the output
 directory, it will generate the file names by itself.
 

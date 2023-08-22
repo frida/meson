@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 
 from . import coredata as cdata
@@ -61,17 +62,17 @@ def run(options):
     coredata = cdata.load(options.builddir)
     backend = coredata.get_option(OptionKey('backend'))
     for k, v in sorted(coredata.__dict__.items()):
-        if k in ('backend_options', 'base_options', 'builtins', 'compiler_options', 'user_options'):
+        if k in {'backend_options', 'base_options', 'builtins', 'compiler_options', 'user_options'}:
             # use `meson configure` to view these
             pass
-        elif k in ['install_guid', 'test_guid', 'regen_guid']:
+        elif k in {'install_guid', 'test_guid', 'regen_guid'}:
             if all_backends or backend.startswith('vs'):
                 print(k + ': ' + v)
         elif k == 'target_guids':
             if all_backends or backend.startswith('vs'):
                 print(k + ':')
                 dump_guids(v)
-        elif k in ['lang_guids']:
+        elif k == 'lang_guids':
             if all_backends or backend.startswith('vs') or backend == 'xcode':
                 print(k + ':')
                 dump_guids(v)
@@ -103,7 +104,7 @@ def run(options):
                 print('      version: ' + repr(dep.get_version()))
 
             for for_machine in iter(MachineChoice):
-                items_list = list(sorted(v[for_machine].items()))
+                items_list = sorted(v[for_machine].items())
                 if items_list:
                     print(f'Cached dependencies for {for_machine.get_lower_case_name()} machine')
                     for dep_key, deps in items_list:

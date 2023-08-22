@@ -13,13 +13,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 """Posix specific implementations of mesonlib functionality."""
 
 import fcntl
 import typing as T
 
-from .universal import MesonException
+from .core import MesonException
 from .platform import BuildDirLock as BuildDirLockBase
 
 __all__ = ['BuildDirLock']
@@ -33,6 +34,9 @@ class BuildDirLock(BuildDirLockBase):
         except (BlockingIOError, PermissionError):
             self.lockfile.close()
             raise MesonException('Some other Meson process is already using this build directory. Exiting.')
+        except OSError as e:
+            self.lockfile.close()
+            raise MesonException(f'Failed to lock the build directory: {e.strerror}')
 
     def __exit__(self, *args: T.Any) -> None:
         fcntl.flock(self.lockfile, fcntl.LOCK_UN)

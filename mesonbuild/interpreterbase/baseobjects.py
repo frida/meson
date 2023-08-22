@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 from .. import mparser
 from .exceptions import InvalidCode, InvalidArguments
@@ -21,6 +22,7 @@ import textwrap
 
 import typing as T
 from abc import ABCMeta
+from contextlib import AbstractContextManager
 
 if T.TYPE_CHECKING:
     from typing_extensions import Protocol
@@ -117,12 +119,12 @@ class InterpreterObject:
         # We use `type(...) == type(...)` here to enforce an *exact* match for comparison. We
         # don't want comparisons to be possible where `isinstance(derived_obj, type(base_obj))`
         # would pass because this comparison must never be true: `derived_obj == base_obj`
-        if type(self) != type(other):
+        if type(self) is not type(other):
             self._throw_comp_exception(other, '==')
         return self == other
 
     def op_not_equals(self, other: TYPE_var) -> bool:
-        if type(self) != type(other):
+        if type(self) is not type(other):
             self._throw_comp_exception(other, '!=')
         return self != other
 
@@ -155,12 +157,12 @@ class ObjectHolder(InterpreterObject, T.Generic[InterpreterObjectTypeVar]):
     # Override default comparison operators for the held object
     def op_equals(self, other: TYPE_var) -> bool:
         # See the comment from InterpreterObject why we are using `type()` here.
-        if type(self.held_object) != type(other):
+        if type(self.held_object) is not type(other):
             self._throw_comp_exception(other, '==')
         return self.held_object == other
 
     def op_not_equals(self, other: TYPE_var) -> bool:
-        if type(self.held_object) != type(other):
+        if type(self.held_object) is not type(other):
             self._throw_comp_exception(other, '!=')
         return self.held_object != other
 
@@ -179,3 +181,7 @@ class IterableObject(metaclass=ABCMeta):
 
     def size(self) -> int:
         raise MesonBugException(f'size not implemented for {self.__class__.__name__}')
+
+class ContextManagerObject(MesonInterpreterObject, AbstractContextManager):
+    def __init__(self, subproject: 'SubProject') -> None:
+        super().__init__(subproject=subproject)

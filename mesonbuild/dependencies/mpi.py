@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 import functools
 import typing as T
@@ -20,12 +21,14 @@ import re
 from ..environment import detect_cpu_family
 from .base import DependencyMethods, detect_compiler, SystemDependency
 from .configtool import ConfigToolDependency
+from .detect import packages
 from .factory import factory_methods
 from .pkgconfig import PkgConfigDependency
 
 if T.TYPE_CHECKING:
     from .factory import DependencyGenerator
-    from ..environment import Environment, MachineChoice
+    from ..environment import Environment
+    from ..mesonlib import MachineChoice
 
 
 @factory_methods({DependencyMethods.PKGCONFIG, DependencyMethods.CONFIG_TOOL, DependencyMethods.SYSTEM})
@@ -40,7 +43,7 @@ def mpi_factory(env: 'Environment',
 
     candidates: T.List['DependencyGenerator'] = []
     compiler = detect_compiler('mpi', env, for_machine, language)
-    if compiler is None:
+    if not compiler:
         return []
     compiler_is_intel = compiler.get_id() in {'intel', 'intel-cl'}
 
@@ -71,7 +74,7 @@ def mpi_factory(env: 'Environment',
             elif language == 'fortran':
                 tool_names = [os.environ.get('I_MPI_F90'), 'mpiifort']
 
-            cls = IntelMPIConfigToolDependency  # type: T.Type[ConfigToolDependency]
+            cls: T.Type[ConfigToolDependency] = IntelMPIConfigToolDependency
         else: # OpenMPI, which doesn't work with intel
             #
             # We try the environment variables for the tools first, but then
@@ -99,10 +102,12 @@ def mpi_factory(env: 'Environment',
 
     return candidates
 
+packages['mpi'] = mpi_factory
+
 
 class _MPIConfigToolDependency(ConfigToolDependency):
 
-    def _filter_compile_args(self, args: T.Sequence[str]) -> T.List[str]:
+    def _filter_compile_args(self, args: T.List[str]) -> T.List[str]:
         """
         MPI wrappers return a bunch of garbage args.
         Drop -O2 and everything that is not needed.
@@ -126,7 +131,7 @@ class _MPIConfigToolDependency(ConfigToolDependency):
                 result.append(f)
         return result
 
-    def _filter_link_args(self, args: T.Sequence[str]) -> T.List[str]:
+    def _filter_link_args(self, args: T.List[str]) -> T.List[str]:
         """
         MPI wrappers return a bunch of garbage args.
         Drop -O2 and everything that is not needed.
@@ -136,7 +141,7 @@ class _MPIConfigToolDependency(ConfigToolDependency):
         for f in args:
             if self._is_link_arg(f):
                 result.append(f)
-                if f in ('-L', '-Xlinker'):
+                if f in {'-L', '-Xlinker'}:
                     include_next = True
             elif include_next:
                 include_next = False

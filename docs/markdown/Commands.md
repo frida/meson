@@ -61,7 +61,7 @@ Builds a default or a specified target of a configured Meson project.
 `TARGET` has the following syntax `[PATH/]NAME[:TYPE]`, where:
 - `NAME`: name of the target from `meson.build` (e.g. `foo` from `executable('foo', ...)`).
 - `PATH`: path to the target relative to the root `meson.build` file. Note: relative path for a target specified in the root `meson.build` is `./`.
-- `TYPE`: type of the target. Can be one of the following: 'executable', 'static_library', 'shared_library', 'shared_module', 'custom', 'run', 'jar'.
+- `TYPE`: type of the target. Can be one of the following: 'executable', 'static_library', 'shared_library', 'shared_module', 'custom', 'alias', 'run', 'jar'.
 
 `PATH` and/or `TYPE` can be omitted if the resulting `TARGET` can be
 used to uniquely identify the target in `meson.build`.
@@ -281,6 +281,12 @@ Run tests for the configure Meson project.
 
 See [the unit test documentation](Unit-tests.md) for more info.
 
+Since *1.2.0* you can use wildcards in *args* for test names.
+For example, "bas*" will match all test with names beginning with "bas".
+
+Since *1.2.0* it is an error to provide a test name or wildcard that
+does not match any test.
+
 #### Examples:
 
 Run tests for the project:
@@ -345,21 +351,34 @@ These variables are set in environment in addition to those set using [[meson.ad
   schemas is compiled. This is automatically set when using `gnome.compile_schemas()`.
   Note that this requires GLib >= 2.64 when `gnome.compile_schemas()` is used in
   more than one directory.
+- `QEMU_LD_PREFIX` *Since 1.0.0* is set to the `sys_root` value from cross file
+  when cross compiling and that property is defined.
 
-Since *Since 0.62.0* if bash-completion scripts are being installed and the
+*Since 0.62.0* if bash-completion scripts are being installed and the
 shell is bash, they will be automatically sourced.
 
-Since *Since 0.62.0* when GDB helper scripts (*-gdb.py, *-gdb.gdb, and *-gdb.csm)
+*Since 0.62.0* when GDB helper scripts (*-gdb.py, *-gdb.gdb, and *-gdb.csm)
 are installed with a library name that matches one being built, Meson adds the
 needed auto-load commands into `<builddir>/.gdbinit` file. When running gdb from
 top build directory, that file is loaded by gdb automatically. In the case of
 python scripts that needs to load other python modules, `PYTHONPATH` may need
 to be modified using `meson.add_devenv()`.
 
-Since *Since 0.63.0* when cross compiling for Windows `WINEPATH` is used instead
+*Since 0.63.0* when cross compiling for Windows `WINEPATH` is used instead
 of `PATH` which allows running Windows executables using wine. Note that since
 `WINEPATH` size is currently limited to 1024 characters, paths relative to the
 root of build directory are used. That means current workdir must be the root of
 build directory when running wine.
+
+*Since 1.1.0* `meson devenv --dump [<filename>]` command takes an optional
+filename argument to write the environment into a file instead of printing to
+stdout.
+
+*Since 1.1.0* `--dump-format` argument has been added to select which shell
+format should be used. There are currently 3 formats supported:
+- `sh`: Lines are in the format `VAR=/prepend:$VAR:/append`.
+- `export`: Same as `sh` but with extra `export VAR` lines.
+- `vscode`: Same as `sh` but without `$VAR` substitution because they do not
+  seems to be properly supported by vscode.
 
 {{ devenv_arguments.inc }}

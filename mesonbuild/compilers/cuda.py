@@ -22,7 +22,7 @@ from .. import coredata
 from .. import mlog
 from ..mesonlib import (
     EnvironmentException, Popen_safe, OptionOverrideProxy,
-    is_windows, LibType, OptionKey,
+    is_windows, LibType, OptionKey, version_compare,
 )
 from .compilers import (Compiler, cuda_buildtype_args, cuda_optimization_args,
                         cuda_debug_args)
@@ -34,7 +34,7 @@ if T.TYPE_CHECKING:
     from ..dependencies import Dependency
     from ..environment import Environment  # noqa: F401
     from ..envconfig import MachineInfo
-    from ..linkers import DynamicLinker
+    from ..linkers.linkers import DynamicLinker
     from ..mesonlib import MachineChoice
     from ..programs import ExternalProgram
 
@@ -557,7 +557,7 @@ class CudaCompiler(Compiler):
         mlog.debug(stde)
         mlog.debug('-----')
         if pc.returncode != 0:
-            raise EnvironmentException(f'Compiler {self.name_string()} can not compile programs.')
+            raise EnvironmentException(f'Compiler {self.name_string()} cannot compile programs.')
 
         # Run sanity check (if possible)
         if self.is_cross:
@@ -615,13 +615,26 @@ class CudaCompiler(Compiler):
         }}'''
         return self.compiles(t.format_map(fargs), env, extra_args=extra_args, dependencies=dependencies)
 
+    _CPP14_VERSION = '>=9.0'
+    _CPP17_VERSION = '>=11.0'
+    _CPP20_VERSION = '>=12.0'
+
     def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = super().get_options()
         std_key = OptionKey('std', machine=self.for_machine, lang=self.language)
         ccbindir_key = OptionKey('ccbindir', machine=self.for_machine, lang=self.language)
+
+        cpp_stds = ['none', 'c++03', 'c++11']
+        if version_compare(self.version, self._CPP14_VERSION):
+            cpp_stds += ['c++14']
+        if version_compare(self.version, self._CPP17_VERSION):
+            cpp_stds += ['c++17']
+        if version_compare(self.version, self._CPP20_VERSION):
+            cpp_stds += ['c++20']
+
         opts.update({
             std_key:      coredata.UserComboOption('C++ language standard to use with CUDA',
-                                                   ['none', 'c++03', 'c++11', 'c++14', 'c++17'], 'none'),
+                                                   cpp_stds, 'none'),
             ccbindir_key: coredata.UserStringOption('CUDA non-default toolchain directory to use (-ccbin)',
                                                     ''),
         })
@@ -736,7 +749,7 @@ class CudaCompiler(Compiler):
         return self._to_host_flags(self.host_compiler.get_std_exe_link_args(), _Phase.LINKER)
 
     def find_library(self, libname: str, env: 'Environment', extra_dirs: T.List[str],
-                     libtype: LibType = LibType.PREFER_SHARED) -> T.Optional[T.List[str]]:
+                     libtype: LibType = LibType.PREFER_SHARED, lib_prefix_warning: bool = True) -> T.Optional[T.List[str]]:
         return ['-l' + libname] # FIXME
 
     def get_crt_compile_args(self, crt_val: str, buildtype: str) -> T.List[str]:
@@ -747,7 +760,7 @@ class CudaCompiler(Compiler):
         # native option to override it; override it with /NODEFAULTLIB
         host_link_arg_overrides = []
         host_crt_compile_args = self.host_compiler.get_crt_compile_args(crt_val, buildtype)
-        if any(arg in ['/MDd', '/MD', '/MTd'] for arg in host_crt_compile_args):
+        if any(arg in {'/MDd', '/MD', '/MTd'} for arg in host_crt_compile_args):
             host_link_arg_overrides += ['/NODEFAULTLIB:LIBCMT.lib']
         return self._to_host_flags(host_link_arg_overrides + self.host_compiler.get_crt_link_args(crt_val, buildtype), _Phase.LINKER)
 
@@ -774,5 +787,5 @@ class CudaCompiler(Compiler):
     def get_profile_use_args(self) -> T.List[str]:
         return ['-Xcompiler=' + x for x in self.host_compiler.get_profile_use_args()]
 
-    def get_disable_assert_args(self) -> T.List[str]:
-        return self.host_compiler.get_disable_assert_args()
+    def get_assert_args(self, disable: bool) -> T.List[str]:
+        return self.host_compiler.get_assert_args(disable)

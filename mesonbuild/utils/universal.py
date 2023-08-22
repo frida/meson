@@ -17,7 +17,6 @@
 from __future__ import annotations
 from pathlib import Path
 import argparse
-import ctypes
 import enum
 import sys
 import stat
@@ -26,23 +25,38 @@ import abc
 import platform, subprocess, operator, os, shlex, shutil, re
 import collections
 from functools import lru_cache, wraps, total_ordering
-from itertools import tee, filterfalse
+from itertools import tee
 from tempfile import TemporaryDirectory, NamedTemporaryFile
 import typing as T
 import textwrap
 import copy
 import pickle
+import errno
 
 from mesonbuild import mlog
 from .core import MesonException, HoldableObject
 
 if T.TYPE_CHECKING:
-    from typing_extensions import Literal
+    from typing_extensions import Literal, Protocol
 
     from .._typing import ImmutableListProtocol
     from ..build import ConfigurationData
-    from ..coredata import KeyedOptionDictType, UserOption
+    from ..coredata import KeyedOptionDictType, UserOption, StrOrBytesPath
+    from ..environment import Environment
     from ..compilers.compilers import Compiler
+    from ..interpreterbase.baseobjects import SubProject
+
+    class _EnvPickleLoadable(Protocol):
+
+        environment: Environment
+
+    class _VerPickleLoadable(Protocol):
+
+        version: str
+
+    # A generic type for pickle_load. This allows any type that has either a
+    # .version or a .environment to be passed.
+    _PL = T.TypeVar('_PL', bound=T.Union[_EnvPickleLoadable, _VerPickleLoadable])
 
 FileOrString = T.Union['File', str]
 
@@ -82,6 +96,13 @@ __all__ = [
     'default_libdir',
     'default_libexecdir',
     'default_prefix',
+    'default_datadir',
+    'default_includedir',
+    'default_infodir',
+    'default_localedir',
+    'default_mandir',
+    'default_sbindir',
+    'default_sysconfdir',
     'detect_subprojects',
     'detect_vcs',
     'do_conf_file',
@@ -94,7 +115,6 @@ __all__ = [
     'generate_list',
     'get_compiler_for_source',
     'get_filenames_templates_dict',
-    'get_library_dirs',
     'get_variable_regex',
     'get_wine_shortpath',
     'git',
@@ -124,6 +144,7 @@ __all__ = [
     'path_is_in_root',
     'pickle_load',
     'Popen_safe',
+    'Popen_safe_logged',
     'quiet_git',
     'quote_arg',
     'relative_to_if_possible',
@@ -151,13 +172,13 @@ __all__ = [
 # TODO: this is such a hack, this really should be either in coredata or in the
 # interpreter
 # {subproject: project_meson_version}
-project_meson_versions = collections.defaultdict(str)  # type: T.DefaultDict[str, str]
+project_meson_versions: T.DefaultDict[str, str] = collections.defaultdict(str)
 
 
 from glob import glob
 
-if os.path.basename(sys.executable) == 'meson.exe':
-    # In Windows and using the MSI installed executable.
+if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+    # using a PyInstaller bundle, e.g. the MSI installed executable
     python_command = [sys.executable, 'runpython']
 else:
     python_command = [sys.executable]
@@ -173,14 +194,15 @@ class GitException(MesonException):
         self.output = output.strip() if output else ''
 
 GIT = shutil.which('git')
-def git(cmd: T.List[str], workingdir: T.Union[str, bytes, os.PathLike], check: bool = False, **kwargs: T.Any) -> T.Tuple[subprocess.Popen, str, str]:
-    cmd = [GIT] + cmd
+def git(cmd: T.List[str], workingdir: StrOrBytesPath, check: bool = False, **kwargs: T.Any) -> T.Tuple[subprocess.Popen[str], str, str]:
+    assert GIT is not None, 'Callers should make sure it exists'
+    cmd = [GIT, *cmd]
     p, o, e = Popen_safe(cmd, cwd=workingdir, **kwargs)
     if check and p.returncode != 0:
         raise GitException('Git command failed: ' + str(cmd), e)
     return p, o, e
 
-def quiet_git(cmd: T.List[str], workingdir: T.Union[str, bytes, os.PathLike], check: bool = False) -> T.Tuple[bool, str]:
+def quiet_git(cmd: T.List[str], workingdir: StrOrBytesPath, check: bool = False) -> T.Tuple[bool, str]:
     if not GIT:
         m = 'Git program not found.'
         if check:
@@ -191,7 +213,7 @@ def quiet_git(cmd: T.List[str], workingdir: T.Union[str, bytes, os.PathLike], ch
         return False, e
     return True, o
 
-def verbose_git(cmd: T.List[str], workingdir: T.Union[str, bytes, os.PathLike], check: bool = False) -> bool:
+def verbose_git(cmd: T.List[str], workingdir: StrOrBytesPath, check: bool = False) -> bool:
     if not GIT:
         m = 'Git program not found.'
         if check:
@@ -249,7 +271,7 @@ def check_direntry_issues(direntry_array: T.Union[T.Iterable[T.Union[str, bytes]
                 You are using {e!r} which is not a Unicode-compatible
                 locale but you are trying to access a file system entry called {de!r} which is
                 not pure ASCII. This may cause problems.
-                '''), file=sys.stderr)
+                '''))
 
 class SecondLevelHolder(HoldableObject, metaclass=abc.ABCMeta):
     ''' A second level object holder. The primary purpose
@@ -465,6 +487,9 @@ class MachineChoice(enum.IntEnum):
     BUILD = 0
     HOST = 1
 
+    def __str__(self) -> str:
+        return f'{self.get_lower_case_name()} machine'
+
     def get_lower_case_name(self) -> str:
         return PerMachine('build', 'host')[self]
 
@@ -493,7 +518,7 @@ class PerMachine(T.Generic[_T]):
         machines, we can elaborate the original and then redefault them and thus
         avoid repeating the elaboration explicitly.
         """
-        unfreeze = PerMachineDefaultable() # type: PerMachineDefaultable[T.Optional[_T]]
+        unfreeze: PerMachineDefaultable[T.Optional[_T]] = PerMachineDefaultable()
         unfreeze.build = self.build
         unfreeze.host = self.host
         if unfreeze.host == unfreeze.build:
@@ -522,7 +547,7 @@ class PerThreeMachine(PerMachine[_T]):
         machines, we can elaborate the original and then redefault them and thus
         avoid repeating the elaboration explicitly.
         """
-        unfreeze = PerThreeMachineDefaultable() # type: PerThreeMachineDefaultable[T.Optional[_T]]
+        unfreeze: PerThreeMachineDefaultable[T.Optional[_T]] = PerThreeMachineDefaultable()
         unfreeze.build = self.build
         unfreeze.host = self.host
         unfreeze.target = self.target
@@ -574,7 +599,7 @@ class PerMachineDefaultable(PerMachine[T.Optional[_T]]):
         return m.default_missing()
 
 
-class PerThreeMachineDefaultable(PerMachineDefaultable, PerThreeMachine[T.Optional[_T]]):
+class PerThreeMachineDefaultable(PerMachineDefaultable[T.Optional[_T]], PerThreeMachine[T.Optional[_T]]):
     """Extends `PerThreeMachine` with the ability to default from `None`s.
     """
     def __init__(self) -> None:
@@ -681,15 +706,23 @@ def darwin_get_object_archs(objpath: str) -> 'ImmutableListProtocol[str]':
         mlog.debug(f'lipo {objpath}: {stderr}')
         return None
     stdo = stdo.rsplit(': ', 1)[1]
+
     # Convert from lipo-style archs to meson-style CPUs
-    stdo = stdo.replace('i386', 'x86')
-    stdo = stdo.replace('arm64', 'aarch64')
-    stdo = stdo.replace('ppc7400', 'ppc')
-    stdo = stdo.replace('ppc970', 'ppc')
+    map_arch = {
+        'i386': 'x86',
+        'arm64': 'aarch64',
+        'arm64e': 'aarch64',
+        'ppc7400': 'ppc',
+        'ppc970': 'ppc',
+    }
+    lipo_archs = stdo.split()
+    meson_archs = [map_arch.get(lipo_arch, lipo_arch) for lipo_arch in lipo_archs]
+
     # Add generic name for armv7 and armv7s
     if 'armv7' in stdo:
-        stdo += ' arm'
-    return stdo.split()
+        meson_archs.append('arm')
+
+    return meson_archs
 
 def windows_detect_native_arch() -> str:
     """
@@ -698,6 +731,7 @@ def windows_detect_native_arch() -> str:
     if sys.platform != 'win32':
         return ''
     try:
+        import ctypes
         process_arch = ctypes.c_ushort()
         native_arch = ctypes.c_ushort()
         kernel32 = ctypes.windll.kernel32
@@ -729,10 +763,38 @@ def windows_detect_native_arch() -> str:
 
 def detect_vcs(source_dir: T.Union[str, Path]) -> T.Optional[T.Dict[str, str]]:
     vcs_systems = [
-        dict(name = 'git',        cmd = 'git', repo_dir = '.git', get_rev = 'git describe --dirty=+', rev_regex = '(.*)', dep = '.git/logs/HEAD'),
-        dict(name = 'mercurial',  cmd = 'hg',  repo_dir = '.hg',  get_rev = 'hg id -i',               rev_regex = '(.*)', dep = '.hg/dirstate'),
-        dict(name = 'subversion', cmd = 'svn', repo_dir = '.svn', get_rev = 'svn info',               rev_regex = 'Revision: (.*)', dep = '.svn/wc.db'),
-        dict(name = 'bazaar',     cmd = 'bzr', repo_dir = '.bzr', get_rev = 'bzr revno',              rev_regex = '(.*)', dep = '.bzr'),
+        {
+            'name': 'git',
+            'cmd': 'git',
+            'repo_dir': '.git',
+            'get_rev': 'git describe --dirty=+ --always',
+            'rev_regex': '(.*)',
+            'dep': '.git/logs/HEAD'
+        },
+        {
+            'name': 'mercurial',
+            'cmd': 'hg',
+            'repo_dir': '.hg',
+            'get_rev': 'hg id -i',
+            'rev_regex': '(.*)',
+            'dep': '.hg/dirstate'
+        },
+        {
+            'name': 'subversion',
+            'cmd': 'svn',
+            'repo_dir': '.svn',
+            'get_rev': 'svn info',
+            'rev_regex': 'Revision: (.*)',
+            'dep': '.svn/wc.db'
+        },
+        {
+            'name': 'bazaar',
+            'cmd': 'bzr',
+            'repo_dir': '.bzr',
+            'get_rev': 'bzr revno',
+            'rev_regex': '(.*)',
+            'dep': '.bzr'
+        },
     ]
     if isinstance(source_dir, str):
         source_dir = Path(source_dir)
@@ -863,14 +925,14 @@ def version_compare(vstr1: str, vstr2: str) -> bool:
 def version_compare_many(vstr1: str, conditions: T.Union[str, T.Iterable[str]]) -> T.Tuple[bool, T.List[str], T.List[str]]:
     if isinstance(conditions, str):
         conditions = [conditions]
-    found = []
-    not_found = []
+    found: T.List[str] = []
+    not_found: T.List[str] = []
     for req in conditions:
         if not version_compare(vstr1, req):
             not_found.append(req)
         else:
             found.append(req)
-    return not_found == [], not_found, found
+    return not not_found, not_found, found
 
 
 # determine if the minimum version satisfying the condition |condition| exceeds
@@ -977,58 +1039,60 @@ def default_libdir() -> str:
 
 
 def default_libexecdir() -> str:
+    if is_haiku():
+        return 'lib'
     # There is no way to auto-detect this, so it must be set at build time
     return 'libexec'
 
 
 def default_prefix() -> str:
-    return 'c:/' if is_windows() else '/usr/local'
-
-
-def get_library_dirs() -> T.List[str]:
     if is_windows():
-        return ['C:/mingw/lib'] # TODO: get programmatically
-    if is_osx():
-        return ['/usr/lib'] # TODO: get programmatically
-    # The following is probably Debian/Ubuntu specific.
-    # /usr/local/lib is first because it contains stuff
-    # installed by the sysadmin and is probably more up-to-date
-    # than /usr/lib. If you feel that this search order is
-    # problematic, please raise the issue on the mailing list.
-    unixdirs = ['/usr/local/lib', '/usr/lib', '/lib']
+        return 'c:/'
+    if is_haiku():
+        return '/boot/system/non-packaged'
+    return '/usr/local'
 
-    if is_freebsd():
-        return unixdirs
-    # FIXME: this needs to be further genericized for aarch64 etc.
-    machine = platform.machine()
-    if machine in ('i386', 'i486', 'i586', 'i686'):
-        plat = 'i386'
-    elif machine.startswith('arm'):
-        plat = 'arm'
-    else:
-        plat = ''
 
-    # Solaris puts 32-bit libraries in the main /lib & /usr/lib directories
-    # and 64-bit libraries in platform specific subdirectories.
-    if is_sunos():
-        if machine == 'i86pc':
-            plat = 'amd64'
-        elif machine.startswith('sun4'):
-            plat = 'sparcv9'
+def default_datadir() -> str:
+    if is_haiku():
+        return 'data'
+    return 'share'
 
-    usr_platdir = Path('/usr/lib/') / plat
-    if usr_platdir.is_dir():
-        unixdirs += [str(x) for x in (usr_platdir).iterdir() if x.is_dir()]
-    if os.path.exists('/usr/lib64'):
-        unixdirs.append('/usr/lib64')
 
-    lib_platdir = Path('/lib/') / plat
-    if lib_platdir.is_dir():
-        unixdirs += [str(x) for x in (lib_platdir).iterdir() if x.is_dir()]
-    if os.path.exists('/lib64'):
-        unixdirs.append('/lib64')
+def default_includedir() -> str:
+    if is_haiku():
+        return 'develop/headers'
+    return 'include'
 
-    return unixdirs
+
+def default_infodir() -> str:
+    if is_haiku():
+        return 'documentation/info'
+    return 'share/info'
+
+
+def default_localedir() -> str:
+    if is_haiku():
+        return 'data/locale'
+    return 'share/locale'
+
+
+def default_mandir() -> str:
+    if is_haiku():
+        return 'documentation/man'
+    return 'share/man'
+
+
+def default_sbindir() -> str:
+    if is_haiku():
+        return 'bin'
+    return 'sbin'
+
+
+def default_sysconfdir() -> str:
+    if is_haiku():
+        return 'settings'
+    return 'etc'
 
 
 def has_path_sep(name: str, sep: str = '/\\') -> bool:
@@ -1071,7 +1135,7 @@ if is_windows():
         return result
 
     def split_args(cmd: str) -> T.List[str]:
-        result = []
+        result: T.List[str] = []
         arg = ''
         num_backslashes = 0
         num_quotes = 0
@@ -1119,7 +1183,7 @@ def join_args(args: T.Iterable[str]) -> str:
 def do_replacement(regex: T.Pattern[str], line: str,
                    variable_format: Literal['meson', 'cmake', 'cmake@'],
                    confdata: T.Union[T.Dict[str, T.Tuple[str, T.Optional[str]]], 'ConfigurationData']) -> T.Tuple[str, T.Set[str]]:
-    missing_variables = set()  # type: T.Set[str]
+    missing_variables: T.Set[str] = set()
     if variable_format == 'cmake':
         start_tag = '${'
         backslash_tag = '\\${'
@@ -1143,6 +1207,8 @@ def do_replacement(regex: T.Pattern[str], line: str,
                 var, _ = confdata.get(varname)
                 if isinstance(var, str):
                     var_str = var
+                elif isinstance(var, bool):
+                    var_str = str(int(var))
                 elif isinstance(var, int):
                     var_str = str(var)
                 else:
@@ -1155,42 +1221,62 @@ def do_replacement(regex: T.Pattern[str], line: str,
     return re.sub(regex, variable_replace, line), missing_variables
 
 def do_define(regex: T.Pattern[str], line: str, confdata: 'ConfigurationData',
-              variable_format: Literal['meson', 'cmake', 'cmake@']) -> str:
+              variable_format: Literal['meson', 'cmake', 'cmake@'], subproject: T.Optional[SubProject] = None) -> str:
+    cmake_bool_define = False
+    if variable_format != "meson":
+        cmake_bool_define = "cmakedefine01" in line
+
     def get_cmake_define(line: str, confdata: 'ConfigurationData') -> str:
         arr = line.split()
-        define_value = []
+
+        if cmake_bool_define:
+            (v, desc) = confdata.get(arr[1])
+            return str(int(bool(v)))
+
+        define_value: T.List[str] = []
         for token in arr[2:]:
             try:
-                (v, desc) = confdata.get(token)
+                v, _ = confdata.get(token)
                 define_value += [str(v)]
             except KeyError:
                 define_value += [token]
         return ' '.join(define_value)
 
     arr = line.split()
-    if variable_format == 'meson' and len(arr) != 2:
-        raise MesonException('#mesondefine does not contain exactly two tokens: %s' % line.strip())
+    if len(arr) != 2:
+        if variable_format == 'meson':
+            raise MesonException('#mesondefine does not contain exactly two tokens: %s' % line.strip())
+        elif subproject is not None:
+            from ..interpreterbase.decorators import FeatureNew
+            FeatureNew.single_use('cmakedefine without exactly two tokens', '0.54.1', subproject)
 
     varname = arr[1]
     try:
-        (v, desc) = confdata.get(varname)
+        v, _ = confdata.get(varname)
     except KeyError:
-        return '/* #undef %s */\n' % varname
-    if isinstance(v, bool):
+        if cmake_bool_define:
+            return '#define %s 0\n' % varname
+        else:
+            return '/* #undef %s */\n' % varname
+
+    if isinstance(v, str) or variable_format != "meson":
+        if variable_format == 'meson':
+            result = v
+        else:
+            if not cmake_bool_define and not v:
+                return '/* #undef %s */\n' % varname
+
+            result = get_cmake_define(line, confdata)
+        result = f'#define {varname} {result}'.strip() + '\n'
+        result, _ = do_replacement(regex, result, variable_format, confdata)
+        return result
+    elif isinstance(v, bool):
         if v:
             return '#define %s\n' % varname
         else:
             return '#undef %s\n' % varname
     elif isinstance(v, int):
         return '#define %s %d\n' % (varname, v)
-    elif isinstance(v, str):
-        if variable_format == 'meson':
-            result = v
-        else:
-            result = get_cmake_define(line, confdata)
-        result = f'#define {varname} {result}\n'
-        (result, missing_variable) = do_replacement(regex, result, variable_format, confdata)
-        return result
     else:
         raise MesonException('#mesondefine argument "%s" is of unknown type.' % varname)
 
@@ -1203,9 +1289,9 @@ def get_variable_regex(variable_format: Literal['meson', 'cmake', 'cmake@'] = 'm
         regex = re.compile(r'(?:\\\\)+(?=\\?\$)|\\\${|\${([-a-zA-Z0-9_]+)}')
     return regex
 
-def do_conf_str(src: str, data: list, confdata: 'ConfigurationData',
+def do_conf_str(src: str, data: T.List[str], confdata: 'ConfigurationData',
                 variable_format: Literal['meson', 'cmake', 'cmake@'],
-                encoding: str = 'utf-8') -> T.Tuple[T.List[str], T.Set[str], bool]:
+                subproject: T.Optional[SubProject] = None) -> T.Tuple[T.List[str], T.Set[str], bool]:
     def line_is_valid(line: str, variable_format: str) -> bool:
         if variable_format == 'meson':
             if '#cmakedefine' in line:
@@ -1221,15 +1307,15 @@ def do_conf_str(src: str, data: list, confdata: 'ConfigurationData',
     if variable_format != 'meson':
         search_token = '#cmakedefine'
 
-    result = []
-    missing_variables = set()
+    result: T.List[str] = []
+    missing_variables: T.Set[str] = set()
     # Detect when the configuration data is empty and no tokens were found
     # during substitution so we can warn the user to use the `copy:` kwarg.
     confdata_useless = not confdata.keys()
     for line in data:
-        if line.startswith(search_token):
+        if line.lstrip().startswith(search_token):
             confdata_useless = False
-            line = do_define(regex, line, confdata, variable_format)
+            line = do_define(regex, line, confdata, variable_format, subproject)
         else:
             if not line_is_valid(line, variable_format):
                 raise MesonException(f'Format error in {src}: saw "{line.strip()}" when format set to "{variable_format}"')
@@ -1243,14 +1329,14 @@ def do_conf_str(src: str, data: list, confdata: 'ConfigurationData',
 
 def do_conf_file(src: str, dst: str, confdata: 'ConfigurationData',
                  variable_format: Literal['meson', 'cmake', 'cmake@'],
-                 encoding: str = 'utf-8') -> T.Tuple[T.Set[str], bool]:
+                 encoding: str = 'utf-8', subproject: T.Optional[SubProject] = None) -> T.Tuple[T.Set[str], bool]:
     try:
         with open(src, encoding=encoding, newline='') as f:
             data = f.readlines()
     except Exception as e:
         raise MesonException(f'Could not read input file {src}: {e!s}')
 
-    (result, missing_variables, confdata_useless) = do_conf_str(src, data, confdata, variable_format, encoding)
+    (result, missing_variables, confdata_useless) = do_conf_str(src, data, confdata, variable_format, subproject)
     dst_tmp = dst + '~'
     try:
         with open(dst_tmp, 'w', encoding=encoding, newline='') as f:
@@ -1266,12 +1352,8 @@ CONF_C_PRELUDE = '''/*
  * Do not edit, your changes will be lost.
  */
 
-#ifndef __MESON_CONFIG_H__
-#define __MESON_CONFIG_H__
+#pragma once
 
-'''
-
-CONF_C_POSTLUDE = '''#endif /* __MESON_CONFIG_H__ */
 '''
 
 CONF_NASM_PRELUDE = '''; Autogenerated by the Meson build system.
@@ -1279,14 +1361,12 @@ CONF_NASM_PRELUDE = '''; Autogenerated by the Meson build system.
 
 '''
 
-def dump_conf_header(ofilename: str, cdata: 'ConfigurationData', output_format: T.Literal['c', 'nasm']) -> None:
+def dump_conf_header(ofilename: str, cdata: 'ConfigurationData', output_format: Literal['c', 'nasm']) -> None:
     if output_format == 'c':
         prelude = CONF_C_PRELUDE
-        postlude = CONF_C_POSTLUDE
         prefix = '#'
     else:
         prelude = CONF_NASM_PRELUDE
-        postlude = None
         prefix = '%'
 
     ofilename_tmp = ofilename + '~'
@@ -1309,8 +1389,6 @@ def dump_conf_header(ofilename: str, cdata: 'ConfigurationData', output_format: 
                 ofile.write(f'{prefix}define {k} {v}\n\n')
             else:
                 raise MesonException('Unknown data type in configuration file entry: ' + k)
-        if postlude is not None:
-            ofile.write(postlude)
     replace_if_different(ofilename, ofilename_tmp)
 
 
@@ -1338,7 +1416,7 @@ def listify(item: T.Any, flatten: bool = True) -> T.List[T.Any]:
     '''
     if not isinstance(item, list):
         return [item]
-    result = []  # type: T.List[T.Any]
+    result: T.List[T.Any] = []
     for i in item:
         if flatten and isinstance(i, list):
             result += listify(i, flatten=True)
@@ -1379,7 +1457,7 @@ def stringlistify(item: T.Union[T.Any, T.Sequence[T.Any]]) -> T.List[str]:
 
 
 def expand_arguments(args: T.Iterable[str]) -> T.Optional[T.List[str]]:
-    expended_args = []  # type: T.List[str]
+    expended_args: T.List[str] = []
     for arg in args:
         if not arg.startswith('@'):
             expended_args.append(arg)
@@ -1406,7 +1484,7 @@ def partition(pred: T.Callable[[_T], object], iterable: T.Iterable[_T]) -> T.Tup
     ([0, 2, 4, 6, 8], [1, 3, 5, 7, 9])
     """
     t1, t2 = tee(iterable)
-    return filterfalse(pred, t1), filter(pred, t2)
+    return (t for t in t1 if not pred(t)), (t for t in t2 if pred(t))
 
 
 def Popen_safe(args: T.List[str], write: T.Optional[str] = None,
@@ -1421,12 +1499,19 @@ def Popen_safe(args: T.List[str], write: T.Optional[str] = None,
     # If write is not None, set stdin to PIPE so data can be sent.
     if write is not None:
         stdin = subprocess.PIPE
-    if not sys.stdout.encoding or encoding.upper() != 'UTF-8':
-        p, o, e = Popen_safe_legacy(args, write=write, stdin=stdin, stdout=stdout, stderr=stderr, **kwargs)
-    else:
-        p = subprocess.Popen(args, universal_newlines=True, encoding=encoding, close_fds=False,
-                             stdin=stdin, stdout=stdout, stderr=stderr, **kwargs)
-        o, e = p.communicate(write)
+
+    try:
+        if not sys.stdout.encoding or encoding.upper() != 'UTF-8':
+            p, o, e = Popen_safe_legacy(args, write=write, stdin=stdin, stdout=stdout, stderr=stderr, **kwargs)
+        else:
+            p = subprocess.Popen(args, universal_newlines=True, encoding=encoding, close_fds=False,
+                                 stdin=stdin, stdout=stdout, stderr=stderr, **kwargs)
+            o, e = p.communicate(write)
+    except OSError as oserr:
+        if oserr.errno == errno.ENOEXEC:
+            raise MesonException(f'Failed running {args[0]!r}, binary or interpreter not executable.\n'
+                                 'Possibly wrong architecture or the executable bit is not set.')
+        raise
     # Sometimes the command that we run will call another command which will be
     # without the above stdin workaround, so set the console mode again just in
     # case.
@@ -1441,12 +1526,12 @@ def Popen_safe_legacy(args: T.List[str], write: T.Optional[str] = None,
                       **kwargs: T.Any) -> T.Tuple['subprocess.Popen[str]', str, str]:
     p = subprocess.Popen(args, universal_newlines=False, close_fds=False,
                          stdin=stdin, stdout=stdout, stderr=stderr, **kwargs)
-    input_ = None  # type: T.Optional[bytes]
+    input_: T.Optional[bytes] = None
     if write is not None:
         input_ = write.encode('utf-8')
     o, e = p.communicate(input_)
     if o is not None:
-        if sys.stdout.encoding:
+        if sys.stdout.encoding is not None:
             o = o.decode(encoding=sys.stdout.encoding, errors='replace').replace('\r\n', '\n')
         else:
             o = o.decode(errors='replace').replace('\r\n', '\n')
@@ -1455,6 +1540,27 @@ def Popen_safe_legacy(args: T.List[str], write: T.Optional[str] = None,
             e = e.decode(encoding=sys.stderr.encoding, errors='replace').replace('\r\n', '\n')
         else:
             e = e.decode(errors='replace').replace('\r\n', '\n')
+    return p, o, e
+
+
+def Popen_safe_logged(args: T.List[str], msg: str = 'Called', **kwargs: T.Any) -> T.Tuple['subprocess.Popen[str]', str, str]:
+    '''
+    Wrapper around Popen_safe that assumes standard piped o/e and logs this to the meson log.
+    '''
+    try:
+        p, o, e = Popen_safe(args, **kwargs)
+    except Exception as excp:
+        mlog.debug('-----------')
+        mlog.debug(f'{msg}: `{join_args(args)}` -> {excp}')
+        raise
+
+    rc, out, err = p.returncode, o.strip(), e.strip()
+    mlog.debug('-----------')
+    mlog.debug(f'{msg}: `{join_args(args)}` -> {rc}')
+    if out:
+        mlog.debug(f'stdout:\n{out}\n-----------')
+    if err:
+        mlog.debug(f'stderr:\n{err}\n-----------')
     return p, o, e
 
 
@@ -1476,8 +1582,8 @@ def iter_regexin_iter(regexiter: T.Iterable[str], initer: T.Iterable[str]) -> T.
 
 def _substitute_values_check_errors(command: T.List[str], values: T.Dict[str, T.Union[str, T.List[str]]]) -> None:
     # Error checking
-    inregex = ['@INPUT([0-9]+)?@', '@PLAINNAME@', '@BASENAME@']  # type: T.List[str]
-    outregex = ['@OUTPUT([0-9]+)?@', '@OUTDIR@']                 # type: T.List[str]
+    inregex: T.List[str] = ['@INPUT([0-9]+)?@', '@PLAINNAME@', '@BASENAME@']
+    outregex: T.List[str] = ['@OUTPUT([0-9]+)?@', '@OUTDIR@']
     if '@INPUT@' not in values:
         # Error out if any input-derived templates are present in the command
         match = iter_regexin_iter(inregex, command)
@@ -1541,7 +1647,7 @@ def substitute_values(command: T.List[str], values: T.Dict[str, T.Union[str, T.L
     _substitute_values_check_errors(command, values)
 
     # Substitution
-    outcmd = []  # type: T.List[str]
+    outcmd: T.List[str] = []
     rx_keys = [re.escape(key) for key in values if key not in ('@INPUT@', '@OUTPUT@')]
     value_rx = re.compile('|'.join(rx_keys)) if rx_keys else None
     for vv in command:
@@ -1607,7 +1713,7 @@ def get_filenames_templates_dict(inputs: T.List[str], outputs: T.List[str]) -> T
 
     @OUTPUT0@, @OUTPUT1@, ... one for each output file
     '''
-    values = {}  # type: T.Dict[str, T.Union[str, T.List[str]]]
+    values: T.Dict[str, T.Union[str, T.List[str]]] = {}
     # Gather values derived from the input
     if inputs:
         # We want to substitute all the inputs.
@@ -1839,17 +1945,20 @@ class ProgressBarFallback:  # lgtm [py/iter-returns-non-self]
     __iter__ method' warning.
     '''
     def __init__(self, iterable: T.Optional[T.Iterable[str]] = None, total: T.Optional[int] = None,
-                 bar_type: T.Optional[str] = None, desc: T.Optional[str] = None):
+                 bar_type: T.Optional[str] = None, desc: T.Optional[str] = None,
+                 disable: T.Optional[bool] = None):
         if iterable is not None:
             self.iterable = iter(iterable)
             return
         self.total = total
         self.done = 0
         self.printed_dots = 0
-        if self.total and bar_type == 'download':
-            print('Download size:', self.total)
-        if desc:
-            print(f'{desc}: ', end='')
+        self.disable = not mlog.colorize_console() if disable is None else disable
+        if not self.disable:
+            if self.total and bar_type == 'download':
+                print('Download size:', self.total)
+            if desc:
+                print(f'{desc}: ', end='')
 
     # Pretend to be an iterator when called as one and don't print any
     # progress
@@ -1860,8 +1969,9 @@ class ProgressBarFallback:  # lgtm [py/iter-returns-non-self]
         return next(self.iterable)
 
     def print_dot(self) -> None:
-        print('.', end='')
-        sys.stdout.flush()
+        if not self.disable:
+            print('.', end='')
+            sys.stdout.flush()
         self.printed_dots += 1
 
     def update(self, progress: int) -> None:
@@ -1875,21 +1985,29 @@ class ProgressBarFallback:  # lgtm [py/iter-returns-non-self]
             self.print_dot()
 
     def close(self) -> None:
-        print('')
+        if not self.disable:
+            print()
 
 try:
     from tqdm import tqdm
 except ImportError:
     # ideally we would use a typing.Protocol here, but it's part of typing_extensions until 3.8
-    ProgressBar = ProgressBarFallback  # type: T.Union[T.Type[ProgressBarFallback], T.Type[ProgressBarTqdm]]
+    ProgressBar: T.Union[T.Type[ProgressBarFallback], T.Type[ProgressBarTqdm]] = ProgressBarFallback
 else:
     class ProgressBarTqdm(tqdm):
         def __init__(self, *args: T.Any, bar_type: T.Optional[str] = None, **kwargs: T.Any) -> None:
             if bar_type == 'download':
-                kwargs.update({'unit': 'bytes', 'leave': True})
+                kwargs.update({'unit': 'B',
+                               'unit_scale': True,
+                               'unit_divisor': 1024,
+                               'leave': True,
+                               'bar_format': '{l_bar}{bar}| {n_fmt}/{total_fmt} {rate_fmt} eta {remaining}',
+                               })
+
             else:
-                kwargs.update({'leave': False})
-            kwargs['ncols'] = 100
+                kwargs.update({'leave': False,
+                               'bar_format': '{l_bar}{bar}| {n_fmt}/{total_fmt} eta {remaining}',
+                               })
             super().__init__(*args, **kwargs)
 
     ProgressBar = ProgressBarTqdm
@@ -1901,12 +2019,12 @@ class RealPathAction(argparse.Action):
         super().__init__(option_strings, dest, nargs=None, default=default, **kwargs)
 
     def __call__(self, parser: argparse.ArgumentParser, namespace: argparse.Namespace,
-                 values: T.Union[str, T.Sequence[T.Any], None], option_string: str = None) -> None:
+                 values: T.Union[str, T.Sequence[T.Any], None], option_string: T.Optional[str] = None) -> None:
         assert isinstance(values, str)
         setattr(namespace, self.dest, os.path.abspath(os.path.realpath(values)))
 
 
-def get_wine_shortpath(winecmd: T.List[str], wine_paths: T.Sequence[str],
+def get_wine_shortpath(winecmd: T.List[str], wine_paths: T.List[str],
                        workdir: T.Optional[str] = None) -> str:
     '''
     WINEPATH size is limited to 1024 bytes which can easily be exceeded when
@@ -1935,9 +2053,9 @@ def get_wine_shortpath(winecmd: T.List[str], wine_paths: T.Sequence[str],
         return wine_path
 
     # Check paths that can be reduced by making them relative to workdir.
-    rel_paths = []
+    rel_paths: T.List[str] = []
     if workdir:
-        abs_paths = []
+        abs_paths: T.List[str] = []
         for p in wine_paths:
             try:
                 rel = Path(p).relative_to(workdir)
@@ -1974,7 +2092,7 @@ def get_wine_shortpath(winecmd: T.List[str], wine_paths: T.Sequence[str],
 
 
 def run_once(func: T.Callable[..., _T]) -> T.Callable[..., _T]:
-    ret = []  # type: T.List[_T]
+    ret: T.List[_T] = []
 
     @wraps(func)
     def wrapper(*args: T.Any, **kwargs: T.Any) -> _T:
@@ -2062,6 +2180,7 @@ _BUILTIN_NAMES = {
     'includedir',
     'infodir',
     'libdir',
+    'licensedir',
     'libexecdir',
     'localedir',
     'localstatedir',
@@ -2075,6 +2194,7 @@ _BUILTIN_NAMES = {
     'debug',
     'default_library',
     'errorlogs',
+    'genvslite',
     'install_umask',
     'layout',
     'optimization',
@@ -2089,6 +2209,7 @@ _BUILTIN_NAMES = {
     'force_fallback_for',
     'pkg_config_path',
     'cmake_prefix_path',
+    'vsenv',
 }
 
 
@@ -2239,7 +2360,7 @@ class OptionKey:
     def evolve(self, name: T.Optional[str] = None, subproject: T.Optional[str] = None,
                machine: T.Optional[MachineChoice] = None, lang: T.Optional[str] = '',
                module: T.Optional[str] = '') -> 'OptionKey':
-        """Create a new copy of this key, but with alterted members.
+        """Create a new copy of this key, but with altered members.
 
         For example:
         >>> a = OptionKey('foo', '', MachineChoice.Host)
@@ -2262,11 +2383,11 @@ class OptionKey:
         return self.evolve(subproject='')
 
     def as_build(self) -> 'OptionKey':
-        """Convenience method for key.evolve(machine=MachinceChoice.BUILD)."""
+        """Convenience method for key.evolve(machine=MachineChoice.BUILD)."""
         return self.evolve(machine=MachineChoice.BUILD)
 
     def as_host(self) -> 'OptionKey':
-        """Convenience method for key.evolve(machine=MachinceChoice.HOST)."""
+        """Convenience method for key.evolve(machine=MachineChoice.HOST)."""
         return self.evolve(machine=MachineChoice.HOST)
 
     def is_backend(self) -> bool:
@@ -2289,7 +2410,8 @@ class OptionKey:
         """Convenience method to check if this is a base option."""
         return self.type is OptionType.BASE
 
-def pickle_load(filename: str, object_name: str, object_type: T.Type) -> T.Any:
+
+def pickle_load(filename: str, object_name: str, object_type: T.Type[_PL]) -> _PL:
     load_fail_msg = f'{object_name} file {filename!r} is corrupted. Try with a fresh build tree.'
     try:
         with open(filename, 'rb') as f:
@@ -2297,16 +2419,28 @@ def pickle_load(filename: str, object_name: str, object_type: T.Type) -> T.Any:
     except (pickle.UnpicklingError, EOFError):
         raise MesonException(load_fail_msg)
     except (TypeError, ModuleNotFoundError, AttributeError):
+        build_dir = os.path.dirname(os.path.dirname(filename))
         raise MesonException(
             f"{object_name} file {filename!r} references functions or classes that don't "
             "exist. This probably means that it was generated with an old "
-            "version of meson.")
+            "version of meson. Try running from the source directory "
+            f'meson setup {build_dir} --wipe')
     if not isinstance(obj, object_type):
         raise MesonException(load_fail_msg)
+
+    # Because these Protocols are not available at runtime (and cannot be made
+    # available at runtime until we drop support for Python < 3.8), we have to
+    # do a bit of hackery so that mypy understands what's going on here
+    version: str
+    if hasattr(obj, 'version'):
+        version = T.cast('_VerPickleLoadable', obj).version
+    else:
+        version = T.cast('_EnvPickleLoadable', obj).environment.coredata.version
+
     from ..coredata import version as coredata_version
     from ..coredata import major_versions_differ, MesonVersionMismatchException
-    if major_versions_differ(obj.version, coredata_version):
-        raise MesonVersionMismatchException(obj.version, coredata_version)
+    if major_versions_differ(version, coredata_version):
+        raise MesonVersionMismatchException(version, coredata_version)
     return obj
 
 

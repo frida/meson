@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 """Entrypoint script for backend agnostic compile."""
 
@@ -25,7 +26,6 @@ from pathlib import Path
 
 from . import mlog
 from . import mesonlib
-from . import coredata
 from .mesonlib import MesonException, RealPathAction, join_args, setup_vsenv
 from mesonbuild.environment import detect_ninja
 from mesonbuild.coredata import UserArrayOption
@@ -54,7 +54,7 @@ def parse_introspect_data(builddir: Path) -> T.Dict[str, T.List[dict]]:
     with path_to_intro.open(encoding='utf-8') as f:
         schema = json.load(f)
 
-    parsed_data = defaultdict(list) # type: T.Dict[str, T.List[dict]]
+    parsed_data: T.Dict[str, T.List[dict]] = defaultdict(list)
     for target in schema:
         parsed_data[target['name']] += [target]
     return parsed_data
@@ -89,6 +89,7 @@ class ParsedTargetName:
             'shared_library',
             'shared_module',
             'custom',
+            'alias',
             'run',
             'jar',
         }
@@ -99,7 +100,7 @@ def get_target_from_intro_data(target: ParsedTargetName, builddir: Path, introsp
         raise MesonException(f'Can\'t invoke target `{target.full_name}`: target not found')
 
     intro_targets = introspect_data[target.name]
-    found_targets = []  # type: T.List[T.Dict[str, T.Any]]
+    found_targets: T.List[T.Dict[str, T.Any]] = []
 
     resolved_bdir = builddir.resolve()
 
@@ -107,11 +108,9 @@ def get_target_from_intro_data(target: ParsedTargetName, builddir: Path, introsp
         found_targets = intro_targets
     else:
         for intro_target in intro_targets:
-            if (intro_target['subproject'] or
-                    (target.type and target.type != intro_target['type'].replace(' ', '_')) or
-                    (target.path
-                        and intro_target['filename'] != 'no_name'
-                        and Path(target.path) != Path(intro_target['filename'][0]).relative_to(resolved_bdir).parent)):
+            if ((target.type and target.type != intro_target['type'].replace(' ', '_')) or
+                (target.path and intro_target['filename'] != 'no_name' and
+                 Path(target.path) != Path(intro_target['filename'][0]).relative_to(resolved_bdir).parent)):
                 continue
             found_targets += [intro_target]
 
@@ -120,7 +119,7 @@ def get_target_from_intro_data(target: ParsedTargetName, builddir: Path, introsp
     elif len(found_targets) > 1:
         suggestions: T.List[str] = []
         for i in found_targets:
-            p = Path(i['filename'][0]).relative_to(resolved_bdir)
+            p = Path(i['filename'][0]).relative_to(resolved_bdir).parent / i['name']
             t = i['type'].replace(' ', '_')
             suggestions.append(f'- ./{p}:{t}')
         suggestions_str = '\n'.join(suggestions)
@@ -132,7 +131,7 @@ def get_target_from_intro_data(target: ParsedTargetName, builddir: Path, introsp
 def generate_target_names_ninja(target: ParsedTargetName, builddir: Path, introspect_data: dict) -> T.List[str]:
     intro_target = get_target_from_intro_data(target, builddir, introspect_data)
 
-    if intro_target['type'] == 'run':
+    if intro_target['type'] in {'alias', 'run'}:
         return [target.name]
     else:
         return [str(Path(out_file).relative_to(builddir.resolve())) for out_file in intro_target['filename']]
@@ -171,11 +170,11 @@ def get_parsed_args_ninja(options: 'argparse.Namespace', builddir: Path) -> T.Tu
 def generate_target_name_vs(target: ParsedTargetName, builddir: Path, introspect_data: dict) -> str:
     intro_target = get_target_from_intro_data(target, builddir, introspect_data)
 
-    assert intro_target['type'] != 'run', 'Should not reach here: `run` targets must be handle above'
+    assert intro_target['type'] not in {'alias', 'run'}, 'Should not reach here: `run` targets must be handle above'
 
     # Normalize project name
     # Source: https://docs.microsoft.com/en-us/visualstudio/msbuild/how-to-build-specific-targets-in-solutions-by-using-msbuild-exe
-    target_name = re.sub(r"[\%\$\@\;\.\(\)']", '_', intro_target['id'])  # type: str
+    target_name = re.sub(r"[\%\$\@\;\.\(\)']", '_', intro_target['id'])
     rel_path = Path(intro_target['filename'][0]).relative_to(builddir.resolve()).parent
     if rel_path != Path('.'):
         target_name = str(rel_path / target_name)
@@ -190,11 +189,9 @@ def get_parsed_args_vs(options: 'argparse.Namespace', builddir: Path) -> T.Tuple
 
     if options.targets:
         intro_data = parse_introspect_data(builddir)
-        has_run_target = any(map(
-            lambda t:
-                get_target_from_intro_data(ParsedTargetName(t), builddir, intro_data)['type'] == 'run',
-            options.targets
-        ))
+        has_run_target = any(
+            get_target_from_intro_data(ParsedTargetName(t), builddir, intro_data)['type'] in {'alias', 'run'}
+            for t in options.targets)
 
         if has_run_target:
             # `run` target can't be used the same way as other targets on `vs` backend.
@@ -334,14 +331,14 @@ def run(options: 'argparse.Namespace') -> int:
     if options.targets and options.clean:
         raise MesonException('`TARGET` and `--clean` can\'t be used simultaneously')
 
-    cdata = coredata.load(options.wd)
     b = build.load(options.wd)
-    vsenv_active = setup_vsenv(b.need_vsenv)
-    if vsenv_active:
+    cdata = b.environment.coredata
+    need_vsenv = T.cast('bool', cdata.get_option(mesonlib.OptionKey('vsenv')))
+    if setup_vsenv(need_vsenv):
         mlog.log(mlog.green('INFO:'), 'automatically activated MSVC compiler environment')
 
-    cmd = []    # type: T.List[str]
-    env = None  # type: T.Optional[T.Dict[str, str]]
+    cmd: T.List[str] = []
+    env: T.Optional[T.Dict[str, str]] = None
 
     backend = cdata.get_option(mesonlib.OptionKey('backend'))
     assert isinstance(backend, str)

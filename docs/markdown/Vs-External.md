@@ -14,7 +14,7 @@ project types select `Makefile project`. Click `Next`.
 
 Type your project's name In the `Project name` entry box. In this
 example we're going to use `testproj`. Next select the `Location`
-entry and browse to the root of your projet sources. Make sure that
+entry and browse to the root of your project sources. Make sure that
 the checkbox `Place solution and project in the same directory` is
 checked. Click `Create`.
 
@@ -26,7 +26,7 @@ as follows:
 |build  | `meson compile -C $(Configuration)` |
 |clean  | `meson compile -C $(Configuration) --clean` |
 |rebuild| `meson compile -C $(Configuration) --clean && meson compile -C $(Configuration)` |
-|Output | `$(Configuration)\name_of_your_executable.exe|
+|Output | `$(Configuration)\name_of_your_executable.exe` |
 
 
 Then click `Finish`.

@@ -80,7 +80,7 @@ class CMakeDependency(ExternalDependency):
 
     def __init__(self, name: str, environment: 'Environment', kwargs: T.Dict[str, T.Any], language: T.Optional[str] = None, force_use_global_compilers: bool = False) -> None:
         # Gather a list of all languages to support
-        self.language_list = []  # type: T.List[str]
+        self.language_list: T.List[str] = []
         if language is None or force_use_global_compilers:
             compilers = None
             if kwargs.get('native', False):
@@ -312,7 +312,7 @@ class CMakeDependency(ExternalDependency):
                 return True
 
         # Check PATH
-        system_env = []  # type: T.List[str]
+        system_env: T.List[str] = []
         for i in os.environ.get('PATH', '').split(os.pathsep):
             if i.endswith('/bin') or i.endswith('\\bin'):
                 i = i[:-4]
@@ -388,6 +388,7 @@ class CMakeDependency(ExternalDependency):
             cmake_opts += ['-DARCHS={}'.format(';'.join(self.cmakeinfo.archs))]
             cmake_opts += [f'-DVERSION={package_version}']
             cmake_opts += ['-DCOMPS={}'.format(';'.join([x[0] for x in comp_mapped]))]
+            cmake_opts += [f'-DSTATIC={self.static}']
             cmake_opts += args
             cmake_opts += self.traceparser.trace_args()
             cmake_opts += toolchain.get_cmake_args()
@@ -489,7 +490,7 @@ class CMakeDependency(ExternalDependency):
             libs_raw = [x for x in self.traceparser.get_cmake_var('PACKAGE_LIBRARIES') if x]
 
             # CMake has a "fun" API, where certain keywords describing
-            # configurations can be in the *_LIBRARIES vraiables. See:
+            # configurations can be in the *_LIBRARIES variables. See:
             # - https://github.com/mesonbuild/meson/issues/9197
             # - https://gitlab.freedesktop.org/libnice/libnice/-/issues/140
             # - https://cmake.org/cmake/help/latest/command/target_link_libraries.html#overview  (the last point in the section)
@@ -505,12 +506,12 @@ class CMakeDependency(ExternalDependency):
                     libs += [i]
                 # According to the CMake docs, a keyword only works for the
                 # directly the following item and all items without a keyword
-                # are implizitly `general`
+                # are implicitly `general`
                 cfg_matches = True
 
             # Try to use old style variables if no module is specified
             if len(libs) > 0:
-                self.compile_args = list(map(lambda x: f'-I{x}', incDirs)) + defs
+                self.compile_args = [f'-I{x}' for x in incDirs] + defs
                 self.link_args = []
                 for j in libs:
                     rtgt = resolve_cmake_trace_targets(j, self.traceparser, self.env, clib_compiler=self.clib_compiler)

@@ -14,7 +14,7 @@ methods:
       distribution source has been generated but before it is
       archived. Note that this runs the script file that is in the
       _staging_ directory, not the one in the source directory. If the
-      script file can not be found in the staging directory, it is a hard
+      script file cannot be found in the staging directory, it is a hard
       error. The `MESON_DIST_ROOT` environment variables is set when dist scripts is
       run.
 
@@ -63,6 +63,9 @@ methods:
 
       *(since 0.54.0)* If `meson install` is called with the `--quiet` option, the
       environment variable `MESON_INSTALL_QUIET` will be set.
+
+      *(since 1.1.0)* If `meson install` is called with the `--dry-run` option, the
+      environment variable `MESON_INSTALL_DRY_RUN` will be set.
 
       Meson uses the `DESTDIR` environment variable as set by the
       inherited environment to determine the (temporary) installation
@@ -125,6 +128,15 @@ methods:
           to install only a subset of the files.
           By default the script has no install tag which means it is not being run when
           `meson install --tags` argument is specified.
+      
+      dry_run:
+        type: bool
+        since: 1.1.0
+        default: false
+        description: |
+          If `true` the script will be run even if `--dry-run` option is provided to
+          the `meson install` command. The script can use the `MESON_INSTALL_DRY_RUN`
+          variable to determine if it is in dry run mode or not.
 
   - name: add_postconf_script
     returns: void
@@ -151,6 +163,21 @@ methods:
       - `vs2019`
       - `vs2022`
       - `xcode`
+
+  - name: build_options
+    returns: str
+    since: 1.1.0
+    description: |
+      Returns a string with the configuration line used to set the current project up.
+    notes:
+      - |
+        **Do not try to parse this string!**
+
+        You should use [[cfg_data.set_quoted]] to safely escape any embedded
+        quotes prior to storing it into e.g. a C header macro.
+
+        The contents returned by this function are the same as the
+        "Build Options:" line reported in `<builddir>/meson-logs/meson-log.txt`.
 
   - name: build_root
     returns: str
@@ -206,7 +233,7 @@ methods:
     returns: str
     since: 0.58.0
     description: |
-      Returns a string with the absolute path to the source root directory
+      Returns a string with the absolute path to the source root directory.
       This function will return the source root of the
       main project if called from a subproject, which is usually not what you want.
       It is usually preferable to use [[meson.current_source_dir]] or [[meson.project_source_root]].
@@ -317,8 +344,15 @@ methods:
     returns: void
     description: |
       Installs a manifest file
-      containing a list of all subprojects, their versions and license
-      files to the file name given as the argument.
+      containing a list of all subprojects, their versions and license names
+      to the file name given as the argument.
+
+      If license files are defined as well, they will be copied next to the
+      manifest and referenced in it.
+
+      If this function is not used, the builtin option `licensedir` can
+      be used to install the manifest to a given directory with the name
+      `depmf.json`.
 
     posargs:
       output_name:
@@ -405,6 +439,11 @@ methods:
     returns: list[str]
     since: 0.45.0
     description: Returns the array of licenses specified in [[project]] function call.
+
+  - name: project_license_files
+    returns: list[file]
+    since: 1.1.0
+    description: Returns the array of license files specified in the [[project]] function call.
 
   - name: project_name
     returns: str

@@ -41,6 +41,8 @@ if T.TYPE_CHECKING:
 
         separator: str
 
+_ERROR_MSG_KW: KwargInfo[T.Optional[str]] = KwargInfo('error_message', (str, NoneType))
+
 
 def extract_required_kwarg(kwargs: 'kwargs.ExtractRequired',
                            subproject: 'SubProject',
@@ -81,7 +83,7 @@ def extract_search_dirs(kwargs: 'kwargs.ExtractSearchDirs') -> T.List[str]:
             continue
         if not d.is_absolute():
             raise InvalidCode(f'Search directory {d} is not an absolute path.')
-    return list(map(str, search_dirs))
+    return [str(s) for s in search_dirs]
 
 class FeatureOptionHolder(ObjectHolder[coredata.UserFeatureOption]):
     def __init__(self, option: coredata.UserFeatureOption, interpreter: 'Interpreter'):
@@ -97,6 +99,9 @@ class FeatureOptionHolder(ObjectHolder[coredata.UserFeatureOption]):
                              'auto': self.auto_method,
                              'require': self.require_method,
                              'disable_auto_if': self.disable_auto_if_method,
+                             'enable_auto_if': self.enable_auto_if_method,
+                             'disable_if': self.disable_if_method,
+                             'enable_if': self.enable_if_method,
                              })
 
     @property
@@ -107,6 +112,11 @@ class FeatureOptionHolder(ObjectHolder[coredata.UserFeatureOption]):
         disabled = copy.deepcopy(self.held_object)
         disabled.value = 'disabled'
         return disabled
+
+    def as_enabled(self) -> coredata.UserFeatureOption:
+        enabled = copy.deepcopy(self.held_object)
+        enabled.value = 'enabled'
+        return enabled
 
     @noPosargs
     @noKwargs
@@ -129,22 +139,51 @@ class FeatureOptionHolder(ObjectHolder[coredata.UserFeatureOption]):
     def auto_method(self, args: T.List[TYPE_var], kwargs: TYPE_kwargs) -> bool:
         return self.value == 'auto'
 
-    @FeatureNew('feature_option.require()', '0.59.0')
-    @typed_pos_args('feature_option.require', bool)
-    @typed_kwargs(
-        'feature_option.require',
-        KwargInfo('error_message', (str, NoneType))
-    )
-    def require_method(self, args: T.Tuple[bool], kwargs: 'kwargs.FeatureOptionRequire') -> coredata.UserFeatureOption:
-        if args[0]:
+    def _disable_if(self, condition: bool, message: T.Optional[str]) -> coredata.UserFeatureOption:
+        if not condition:
             return copy.deepcopy(self.held_object)
 
         if self.value == 'enabled':
             err_msg = f'Feature {self.held_object.name} cannot be enabled'
+            if message:
+                err_msg += f': {message}'
+            raise InterpreterException(err_msg)
+        return self.as_disabled()
+
+    @FeatureNew('feature_option.require()', '0.59.0')
+    @typed_pos_args('feature_option.require', bool)
+    @typed_kwargs(
+        'feature_option.require',
+        _ERROR_MSG_KW,
+    )
+    def require_method(self, args: T.Tuple[bool], kwargs: 'kwargs.FeatureOptionRequire') -> coredata.UserFeatureOption:
+        return self._disable_if(not args[0], kwargs['error_message'])
+
+    @FeatureNew('feature_option.disable_if()', '1.1.0')
+    @typed_pos_args('feature_option.disable_if', bool)
+    @typed_kwargs(
+        'feature_option.disable_if',
+        _ERROR_MSG_KW,
+    )
+    def disable_if_method(self, args: T.Tuple[bool], kwargs: 'kwargs.FeatureOptionRequire') -> coredata.UserFeatureOption:
+        return self._disable_if(args[0], kwargs['error_message'])
+
+    @FeatureNew('feature_option.enable_if()', '1.1.0')
+    @typed_pos_args('feature_option.enable_if', bool)
+    @typed_kwargs(
+        'feature_option.enable_if',
+        _ERROR_MSG_KW,
+    )
+    def enable_if_method(self, args: T.Tuple[bool], kwargs: 'kwargs.FeatureOptionRequire') -> coredata.UserFeatureOption:
+        if not args[0]:
+            return copy.deepcopy(self.held_object)
+
+        if self.value == 'disabled':
+            err_msg = f'Feature {self.held_object.name} cannot be disabled'
             if kwargs['error_message']:
                 err_msg += f': {kwargs["error_message"]}'
             raise InterpreterException(err_msg)
-        return self.as_disabled()
+        return self.as_enabled()
 
     @FeatureNew('feature_option.disable_auto_if()', '0.59.0')
     @noKwargs
@@ -152,13 +191,19 @@ class FeatureOptionHolder(ObjectHolder[coredata.UserFeatureOption]):
     def disable_auto_if_method(self, args: T.Tuple[bool], kwargs: TYPE_kwargs) -> coredata.UserFeatureOption:
         return copy.deepcopy(self.held_object) if self.value != 'auto' or not args[0] else self.as_disabled()
 
+    @FeatureNew('feature_option.enable_auto_if()', '1.1.0')
+    @noKwargs
+    @typed_pos_args('feature_option.enable_auto_if', bool)
+    def enable_auto_if_method(self, args: T.Tuple[bool], kwargs: TYPE_kwargs) -> coredata.UserFeatureOption:
+        return self.as_enabled() if self.value == 'auto' and args[0] else copy.deepcopy(self.held_object)
+
 
 class RunProcess(MesonInterpreterObject):
 
     def __init__(self,
                  cmd: ExternalProgram,
                  args: T.List[str],
-                 env: build.EnvironmentVariables,
+                 env: mesonlib.EnvironmentVariables,
                  source_dir: str,
                  build_dir: str,
                  subdir: str,
@@ -179,7 +224,7 @@ class RunProcess(MesonInterpreterObject):
     def run_command(self,
                     cmd: ExternalProgram,
                     args: T.List[str],
-                    env: build.EnvironmentVariables,
+                    env: mesonlib.EnvironmentVariables,
                     source_dir: str,
                     build_dir: str,
                     subdir: str,
@@ -200,7 +245,7 @@ class RunProcess(MesonInterpreterObject):
         child_env.update(menv)
         child_env = env.get_env(child_env)
         stdout = subprocess.PIPE if self.capture else subprocess.DEVNULL
-        mlog.debug('Running command:', ' '.join(command_array))
+        mlog.debug('Running command:', mesonlib.join_args(command_array))
         try:
             p, o, e = Popen_safe(command_array, stdout=stdout, env=child_env, cwd=cwd)
             if self.capture:
@@ -214,11 +259,11 @@ class RunProcess(MesonInterpreterObject):
             mlog.debug('')
 
             if check and p.returncode != 0:
-                raise InterpreterException('Command "{}" failed with status {}.'.format(' '.join(command_array), p.returncode))
+                raise InterpreterException('Command `{}` failed with status {}.'.format(mesonlib.join_args(command_array), p.returncode))
 
             return p.returncode, o, e
         except FileNotFoundError:
-            raise InterpreterException('Could not execute command "%s".' % ' '.join(command_array))
+            raise InterpreterException('Could not execute command `%s`.' % mesonlib.join_args(command_array))
 
     @noPosargs
     @noKwargs
@@ -235,9 +280,9 @@ class RunProcess(MesonInterpreterObject):
     def stderr_method(self, args: T.List[TYPE_var], kwargs: TYPE_kwargs) -> str:
         return self.stderr
 
-class EnvironmentVariablesHolder(ObjectHolder[build.EnvironmentVariables], MutableInterpreterObject):
+class EnvironmentVariablesHolder(ObjectHolder[mesonlib.EnvironmentVariables], MutableInterpreterObject):
 
-    def __init__(self, obj: build.EnvironmentVariables, interpreter: 'Interpreter'):
+    def __init__(self, obj: mesonlib.EnvironmentVariables, interpreter: 'Interpreter'):
         super().__init__(obj, interpreter)
         self.methods.update({'set': self.set_method,
                              'append': self.append_method,
@@ -323,7 +368,7 @@ class ConfigurationDataHolder(ObjectHolder[build.ConfigurationData], MutableInte
     @typed_kwargs('configuration_data.set10', _CONF_DATA_SET_KWS)
     def set10_method(self, args: T.Tuple[str, T.Union[int, bool]], kwargs: 'kwargs.ConfigurationDataSet') -> None:
         self.__check_used()
-        # bool is a subclass of int, so we need to check for bool excplicitly.
+        # bool is a subclass of int, so we need to check for bool explicitly.
         # We already have typed_pos_args checking that this is either a bool or
         # an int.
         if not isinstance(args[1], bool):
@@ -514,8 +559,10 @@ class DependencyHolder(ObjectHolder[Dependency]):
         new_dep = self.held_object.generate_link_whole_dependency()
         return new_dep
 
-class ExternalProgramHolder(ObjectHolder[ExternalProgram]):
-    def __init__(self, ep: ExternalProgram, interpreter: 'Interpreter') -> None:
+_EXTPROG = T.TypeVar('_EXTPROG', bound=ExternalProgram)
+
+class _ExternalProgramHolder(ObjectHolder[_EXTPROG]):
+    def __init__(self, ep: _EXTPROG, interpreter: 'Interpreter') -> None:
         super().__init__(ep, interpreter)
         self.methods.update({'found': self.found_method,
                              'path': self.path_method,
@@ -561,6 +608,9 @@ class ExternalProgramHolder(ObjectHolder[ExternalProgram]):
     def found(self) -> bool:
         return self.held_object.found()
 
+class ExternalProgramHolder(_ExternalProgramHolder[ExternalProgram]):
+    pass
+
 class ExternalLibraryHolder(ObjectHolder[ExternalLibrary]):
     def __init__(self, el: ExternalLibrary, interpreter: 'Interpreter'):
         super().__init__(el, interpreter)
@@ -594,6 +644,8 @@ class MachineHolder(ObjectHolder['MachineInfo']):
                              'cpu': self.cpu_method,
                              'cpu_family': self.cpu_family_method,
                              'endian': self.endian_method,
+                             'kernel': self.kernel_method,
+                             'subsystem': self.subsystem_method,
                              })
 
     @noPosargs
@@ -615,6 +667,21 @@ class MachineHolder(ObjectHolder['MachineInfo']):
     @noKwargs
     def endian_method(self, args: T.List[TYPE_var], kwargs: TYPE_kwargs) -> str:
         return self.held_object.endian
+
+    @noPosargs
+    @noKwargs
+    def kernel_method(self, args: T.List[TYPE_var], kwargs: TYPE_kwargs) -> str:
+        if self.held_object.kernel is not None:
+            return self.held_object.kernel
+        raise InterpreterException('Kernel not defined or could not be autodetected.')
+
+    @noPosargs
+    @noKwargs
+    def subsystem_method(self, args: T.List[TYPE_var], kwargs: TYPE_kwargs) -> str:
+        if self.held_object.subsystem is not None:
+            return self.held_object.subsystem
+        raise InterpreterException('Subsystem not defined or could not be autodetected.')
+
 
 class IncludeDirsHolder(ObjectHolder[build.IncludeDirs]):
     pass
@@ -649,7 +716,7 @@ class Test(MesonInterpreterObject):
                  depends: T.List[T.Union[build.CustomTarget, build.BuildTarget]],
                  is_parallel: bool,
                  cmd_args: T.List[T.Union[str, mesonlib.File, build.Target]],
-                 env: build.EnvironmentVariables,
+                 env: mesonlib.EnvironmentVariables,
                  should_fail: bool, timeout: int, workdir: T.Optional[str], protocol: str,
                  priority: int, verbose: bool):
         super().__init__()
@@ -686,7 +753,8 @@ class SubprojectHolder(MesonInterpreterObject):
                  subdir: str,
                  warnings: int = 0,
                  disabled_feature: T.Optional[str] = None,
-                 exception: T.Optional[Exception] = None) -> None:
+                 exception: T.Optional[Exception] = None,
+                 callstack: T.Optional[T.List[str]] = None) -> None:
         super().__init__()
         self.held_object = subinterpreter
         self.warnings = warnings
@@ -694,6 +762,7 @@ class SubprojectHolder(MesonInterpreterObject):
         self.exception = exception
         self.subdir = PurePath(subdir).as_posix()
         self.cm_interpreter: T.Optional[CMakeInterpreter] = None
+        self.callstack = callstack
         self.methods.update({'get_variable': self.get_variable_method,
                              'found': self.found_method,
                              })
@@ -840,6 +909,9 @@ class BuildTargetHolder(ObjectHolder[_BuildTarget]):
 
     @noPosargs
     @noKwargs
+    @FeatureDeprecated('BuildTarget.get_id', '1.2.0',
+                       'This was never formally documented and does not seem to have a real world use. ' +
+                       'See https://github.com/mesonbuild/meson/pull/6061')
     def get_id_method(self, args: T.List[TYPE_var], kwargs: TYPE_kwargs) -> str:
         return self._target_object.get_id()
 
@@ -902,8 +974,10 @@ class CustomTargetIndexHolder(ObjectHolder[build.CustomTargetIndex]):
         assert self.interpreter.backend is not None
         return self.interpreter.backend.get_target_filename_abs(self.held_object)
 
-class CustomTargetHolder(ObjectHolder[build.CustomTarget]):
-    def __init__(self, target: 'build.CustomTarget', interp: 'Interpreter'):
+_CT = T.TypeVar('_CT', bound=build.CustomTarget)
+
+class _CustomTargetHolder(ObjectHolder[_CT]):
+    def __init__(self, target: _CT, interp: 'Interpreter'):
         super().__init__(target, interp)
         self.methods.update({'full_path': self.full_path_method,
                              'to_list': self.to_list_method,
@@ -939,6 +1013,9 @@ class CustomTargetHolder(ObjectHolder[build.CustomTarget]):
             return self.held_object[other]
         except IndexError:
             raise InvalidArguments(f'Index {other} out of bounds of custom target {self.held_object.name} output of size {len(self.held_object)}.')
+
+class CustomTargetHolder(_CustomTargetHolder[build.CustomTarget]):
+    pass
 
 class RunTargetHolder(ObjectHolder[build.RunTarget]):
     pass

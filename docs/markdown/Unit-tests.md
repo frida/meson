@@ -61,7 +61,7 @@ your build directory.
 ## Parallelism
 
 To reduce test times, Meson will by default run multiple unit tests in
-parallel. It is common to have some tests which can not be run in
+parallel. It is common to have some tests which cannot be run in
 parallel because they require unique hold on some resource such as a
 file or a D-Bus name. You have to specify these tests with a keyword
 argument.
@@ -106,7 +106,7 @@ completed.
 
 ## Skipped tests and hard errors
 
-Sometimes a test can only determine at runtime that it can not be run.
+Sometimes a test can only determine at runtime that it cannot be run.
 
 For the default `exitcode` testing protocol, the GNU standard approach
 in this case is to exit the program with error code 77. Meson will
@@ -152,6 +152,27 @@ Specify test(s) by name like:
 ```console
 $ meson test A D
 ```
+
+You can run tests from specific (sub)project:
+
+```console
+$ meson test (sub)project_name:
+```
+
+or a specific test in a specific project:
+
+```console
+$ meson test (sub)project_name:test_name
+```
+
+Since version *1.2.0*, you can use wildcards in project
+and test names. For instance, to run all tests beginning with
+"foo" and all tests from projects beginning with "bar":
+
+```console
+$ meson test "foo*" "bar*:"
+```
+
 
 Tests belonging to a suite `suite` can be run as follows
 

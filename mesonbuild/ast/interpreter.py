@@ -97,10 +97,10 @@ class AstInterpreter(InterpreterBase):
     def __init__(self, source_root: str, subdir: str, subproject: str, visitors: T.Optional[T.List[AstVisitor]] = None):
         super().__init__(source_root, subdir, subproject)
         self.visitors = visitors if visitors is not None else []
-        self.processed_buildfiles = set() # type: T.Set[str]
-        self.assignments = {}             # type: T.Dict[str, BaseNode]
-        self.assign_vals = {}             # type: T.Dict[str, T.Any]
-        self.reverse_assignment = {}      # type: T.Dict[str, BaseNode]
+        self.processed_buildfiles: T.Set[str] = set()
+        self.assignments: T.Dict[str, BaseNode] = {}
+        self.assign_vals: T.Dict[str, T.Any] = {}
+        self.reverse_assignment: T.Dict[str, BaseNode] = {}
         self.funcs.update({'project': self.func_do_nothing,
                            'test': self.func_do_nothing,
                            'benchmark': self.func_do_nothing,
@@ -274,7 +274,7 @@ class AstInterpreter(InterpreterBase):
                 duplicate_key_error: T.Optional[str] = None,
             ) -> T.Tuple[T.List[TYPE_nvar], TYPE_nkwargs]:
         if isinstance(args, ArgumentNode):
-            kwargs = {}  # type: T.Dict[str, TYPE_nvar]
+            kwargs: T.Dict[str, TYPE_nvar] = {}
             for key, val in args.kwargs.items():
                 kwargs[key_resolver(key)] = val
             if args.incorrect_order():
@@ -352,7 +352,7 @@ class AstInterpreter(InterpreterBase):
             return None # Loop detected
         id_loop_detect += [node.ast_id]
 
-        # Try to evealuate the value of the node
+        # Try to evaluate the value of the node
         if isinstance(node, IdNode):
             result = quick_resolve(node)
 
@@ -383,7 +383,7 @@ class AstInterpreter(InterpreterBase):
         elif isinstance(node, MethodNode):
             src = quick_resolve(node.source_object)
             margs = self.flatten_args(node.args.arguments, include_unknown_args, id_loop_detect)
-            mkwargs = {} # type: T.Dict[str, TYPE_nvar]
+            mkwargs: T.Dict[str, TYPE_nvar] = {}
             try:
                 if isinstance(src, str):
                     result = StringHolder(src, T.cast('Interpreter', self)).method_call(node.name, margs, mkwargs)
@@ -402,7 +402,7 @@ class AstInterpreter(InterpreterBase):
         if isinstance(result, BaseNode):
             result = self.resolve_node(result, include_unknown_args, id_loop_detect)
         elif isinstance(result, list):
-            new_res = []  # type: T.List[TYPE_nvar]
+            new_res: T.List[TYPE_nvar] = []
             for i in result:
                 if isinstance(i, BaseNode):
                     resolved = self.resolve_node(i, include_unknown_args, id_loop_detect)
@@ -421,7 +421,7 @@ class AstInterpreter(InterpreterBase):
         else:
             args = [args_raw]
 
-        flattend_args = []  # type: T.List[TYPE_nvar]
+        flattened_args: T.List[TYPE_nvar] = []
 
         # Resolve the contents of args
         for i in args:
@@ -430,18 +430,18 @@ class AstInterpreter(InterpreterBase):
                 if resolved is not None:
                     if not isinstance(resolved, list):
                         resolved = [resolved]
-                    flattend_args += resolved
+                    flattened_args += resolved
             elif isinstance(i, (str, bool, int, float)) or include_unknown_args:
-                flattend_args += [i]
-        return flattend_args
+                flattened_args += [i]
+        return flattened_args
 
     def flatten_kwargs(self, kwargs: T.Dict[str, TYPE_nvar], include_unknown_args: bool = False) -> T.Dict[str, TYPE_nvar]:
-        flattend_kwargs = {}
+        flattened_kwargs = {}
         for key, val in kwargs.items():
             if isinstance(val, BaseNode):
                 resolved = self.resolve_node(val, include_unknown_args)
                 if resolved is not None:
-                    flattend_kwargs[key] = resolved
+                    flattened_kwargs[key] = resolved
             elif isinstance(val, (str, bool, int, float)) or include_unknown_args:
-                flattend_kwargs[key] = val
-        return flattend_kwargs
+                flattened_kwargs[key] = val
+        return flattened_kwargs

@@ -41,6 +41,9 @@ varargs:
   type: file | str
   description: Header files to install.
 
+warnings:
+  - the `install_mode` kwarg ignored integer values between 0.59.0 -- 1.1.0.
+
 kwargs:
   install_dir:
     type: str
@@ -67,6 +70,6 @@ kwargs:
     since: 0.63.0
     default: false
     description: |
-      Disable stripping child-direcories from header files when installing.
+      Disable stripping child-directories from header files when installing.
 
       This is equivalent to GNU Automake's `nobase` option.

@@ -33,15 +33,15 @@ if T.TYPE_CHECKING:
     from ..mesonlib import MachineChoice
     from ..programs import ExternalProgram
 
-TYPE_result = T.Tuple[int, T.Optional[str], T.Optional[str]]
-TYPE_cache_key = T.Tuple[str, T.Tuple[str, ...], str, T.FrozenSet[T.Tuple[str, str]]]
+    TYPE_result = T.Tuple[int, T.Optional[str], T.Optional[str]]
+    TYPE_cache_key = T.Tuple[str, T.Tuple[str, ...], str, T.FrozenSet[T.Tuple[str, str]]]
 
 class CMakeExecutor:
     # The class's copy of the CMake path. Avoids having to search for it
     # multiple times in the same Meson invocation.
-    class_cmakebin = PerMachine(None, None)   # type: PerMachine[T.Optional[ExternalProgram]]
-    class_cmakevers = PerMachine(None, None)  # type: PerMachine[T.Optional[str]]
-    class_cmake_cache = {}  # type: T.Dict[T.Any, TYPE_result]
+    class_cmakebin: PerMachine[T.Optional[ExternalProgram]] = PerMachine(None, None)
+    class_cmakevers: PerMachine[T.Optional[str]] = PerMachine(None, None)
+    class_cmake_cache: T.Dict[T.Any, TYPE_result] = {}
 
     def __init__(self, environment: 'Environment', version: str, for_machine: MachineChoice, silent: bool = False):
         self.min_version = version
@@ -50,8 +50,8 @@ class CMakeExecutor:
         self.cmakebin, self.cmakevers = self.find_cmake_binary(self.environment, silent=silent)
         self.always_capture_stderr = True
         self.print_cmout = False
-        self.prefix_paths = []      # type: T.List[str]
-        self.extra_cmake_args = []  # type: T.List[str]
+        self.prefix_paths: T.List[str] = []
+        self.extra_cmake_args: T.List[str] = []
 
         if self.cmakebin is None:
             return
@@ -108,23 +108,29 @@ class CMakeExecutor:
             mlog.log(f'Did not find CMake {cmakebin.name!r}')
             return None
         try:
-            p, out = Popen_safe(cmakebin.get_command() + ['--version'])[0:2]
+            cmd = cmakebin.get_command()
+            p, out = Popen_safe(cmd + ['--version'])[0:2]
             if p.returncode != 0:
                 mlog.warning('Found CMake {!r} but couldn\'t run it'
-                             ''.format(' '.join(cmakebin.get_command())))
+                             ''.format(' '.join(cmd)))
                 return None
         except FileNotFoundError:
             mlog.warning('We thought we found CMake {!r} but now it\'s not there. How odd!'
-                         ''.format(' '.join(cmakebin.get_command())))
+                         ''.format(' '.join(cmd)))
             return None
         except PermissionError:
-            msg = 'Found CMake {!r} but didn\'t have permissions to run it.'.format(' '.join(cmakebin.get_command()))
+            msg = 'Found CMake {!r} but didn\'t have permissions to run it.'.format(' '.join(cmd))
             if not is_windows():
                 msg += '\n\nOn Unix-like systems this is often caused by scripts that are not executable.'
             mlog.warning(msg)
             return None
-        cmvers = re.search(r'(cmake|cmake3)\s*version\s*([\d.]+)', out).group(2)
-        return cmvers
+
+        cmvers = re.search(r'(cmake|cmake3)\s*version\s*([\d.]+)', out)
+        if cmvers is not None:
+            return cmvers.group(2)
+        mlog.warning(f'We thought we found CMake {cmd!r}, but it was missing the expected '
+                     'version string in its output.')
+        return None
 
     def set_exec_mode(self, print_cmout: T.Optional[bool] = None, always_capture_stderr: T.Optional[bool] = None) -> None:
         if print_cmout is not None:

@@ -15,22 +15,24 @@ from __future__ import annotations
 
 import subprocess, os.path
 import textwrap
+import re
 import typing as T
 
-from .. import coredata
-from ..mesonlib import EnvironmentException, MesonException, Popen_safe, OptionKey
+from .. import coredata, mlog
+from ..mesonlib import EnvironmentException, MesonException, Popen_safe, OptionKey, join_args
 from .compilers import Compiler, rust_buildtype_args, clike_debug_args
 
 if T.TYPE_CHECKING:
     from ..coredata import MutableKeyedOptionDictType, KeyedOptionDictType
     from ..envconfig import MachineInfo
     from ..environment import Environment  # noqa: F401
-    from ..linkers import DynamicLinker
+    from ..linkers.linkers import DynamicLinker
     from ..mesonlib import MachineChoice
     from ..programs import ExternalProgram
+    from ..dependencies import Dependency
 
 
-rust_optimization_args = {
+rust_optimization_args: T.Dict[str, T.List[str]] = {
     'plain': [],
     '0': [],
     'g': ['-C', 'opt-level=0'],
@@ -38,7 +40,7 @@ rust_optimization_args = {
     '2': ['-C', 'opt-level=2'],
     '3': ['-C', 'opt-level=3'],
     's': ['-C', 'opt-level=s'],
-}  # type: T.Dict[str, T.List[str]]
+}
 
 class RustCompiler(Compiler):
 
@@ -62,9 +64,10 @@ class RustCompiler(Compiler):
                          is_cross=is_cross, full_version=full_version,
                          linker=linker)
         self.exe_wrapper = exe_wrapper
-        self.base_options.add(OptionKey('b_colorout'))
+        self.base_options.update({OptionKey(o) for o in ['b_colorout', 'b_ndebug']})
         if 'link' in self.linker.id:
             self.base_options.add(OptionKey('b_vscrt'))
+        self.native_static_libs: T.List[str] = []
 
     def needs_static_linker(self) -> bool:
         return False
@@ -77,20 +80,17 @@ class RustCompiler(Compiler):
                 '''fn main() {
                 }
                 '''))
-        pc = subprocess.Popen(self.exelist + ['-o', output_name, source_name],
-                              stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE,
-                              cwd=work_dir)
-        _stdo, _stde = pc.communicate()
-        assert isinstance(_stdo, bytes)
-        assert isinstance(_stde, bytes)
-        stdo = _stdo.decode('utf-8', errors='replace')
-        stde = _stde.decode('utf-8', errors='replace')
+
+        cmdlist = self.exelist + ['-o', output_name, source_name]
+        pc, stdo, stde = Popen_safe(cmdlist, cwd=work_dir)
+        mlog.debug('Sanity check compiler command line:', join_args(cmdlist))
+        mlog.debug('Sanity check compile stdout:')
+        mlog.debug(stdo)
+        mlog.debug('-----\nSanity check compile stderr:')
+        mlog.debug(stde)
+        mlog.debug('-----')
         if pc.returncode != 0:
-            raise EnvironmentException('Rust compiler {} can not compile programs.\n{}\n{}'.format(
-                self.name_string(),
-                stdo,
-                stde))
+            raise EnvironmentException(f'Rust compiler {self.name_string()} cannot compile programs.')
         if self.is_cross:
             if self.exe_wrapper is None:
                 # Can't check if the binaries run so we have to assume they do
@@ -101,7 +101,19 @@ class RustCompiler(Compiler):
         pe = subprocess.Popen(cmdlist, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         pe.wait()
         if pe.returncode != 0:
-            raise EnvironmentException('Executables created by Rust compiler %s are not runnable.' % self.name_string())
+            raise EnvironmentException(f'Executables created by Rust compiler {self.name_string()} are not runnable.')
+        # Get libraries needed to link with a Rust staticlib
+        cmdlist = self.exelist + ['--crate-type', 'staticlib', '--print', 'native-static-libs', source_name]
+        p, stdo, stde = Popen_safe(cmdlist, cwd=work_dir)
+        if p.returncode == 0:
+            match = re.search('native-static-libs: (.*)$', stde, re.MULTILINE)
+            if match:
+                # Exclude some well known libraries that we don't need because they
+                # are always part of C/C++ linkers. Rustc probably should not print
+                # them, pkg-config for example never specify them.
+                # FIXME: https://github.com/rust-lang/rust/issues/55120
+                exclude = {'-lc', '-lgcc_s', '-lkernel32', '-ladvapi32'}
+                self.native_static_libs = [i for i in match.group(1).split() if i not in exclude]
 
     def get_dependency_gen_args(self, outtarget: str, outfile: str) -> T.List[str]:
         return ['--dep-info', outfile]
@@ -153,6 +165,12 @@ class RustCompiler(Compiler):
             ),
         }
 
+    def get_dependency_compile_args(self, dep: 'Dependency') -> T.List[str]:
+        # Rust doesn't have dependency compile arguments so simply return
+        # nothing here. Dependencies are linked and all required metadata is
+        # provided by the linker flags.
+        return []
+
     def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
         args = []
         key = OptionKey('std', machine=self.for_machine, lang=self.language)
@@ -189,13 +207,17 @@ class RustCompiler(Compiler):
         return self._WARNING_LEVELS["0"]
 
     def get_pic_args(self) -> T.List[str]:
-        # This defaults to
-        return ['-C', 'relocation-model=pic']
+        # relocation-model=pic is rustc's default already.
+        return []
 
     def get_pie_args(self) -> T.List[str]:
         # Rustc currently has no way to toggle this, it's controlled by whether
         # pic is on by rustc
         return []
+
+    def get_assert_args(self, disable: bool) -> T.List[str]:
+        action = "no" if disable else "yes"
+        return ['-C', f'debug-assertions={action}', '-C', 'overflow-checks=no']
 
 
 class ClippyRustCompiler(RustCompiler):

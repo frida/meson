@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright © 2021 The Meson Developers
 # Copyright © 2021 Intel Corporation
+from __future__ import annotations
 
 """Keyword Argument type annotations."""
 
@@ -11,7 +12,8 @@ from typing_extensions import TypedDict, Literal, Protocol
 from .. import build
 from .. import coredata
 from ..compilers import Compiler
-from ..mesonlib import MachineChoice, File, FileMode, FileOrString
+from ..dependencies.base import Dependency
+from ..mesonlib import EnvironmentVariables, MachineChoice, File, FileMode, FileOrString, OptionKey
 from ..modules.cmake import CMakeSubprojectOptions
 from ..programs import ExternalProgram
 
@@ -41,7 +43,7 @@ class BaseTest(TypedDict):
     workdir: T.Optional[str]
     depends: T.List[T.Union[build.CustomTarget, build.BuildTarget]]
     priority: int
-    env: build.EnvironmentVariables
+    env: EnvironmentVariables
     suite: T.List[str]
 
 
@@ -56,7 +58,7 @@ class FuncTest(FuncBenchmark):
 
     """Keyword Arguments for `test`
 
-    `test` only adds the `is_prallel` argument over benchmark, so inherintance
+    `test` only adds the `is_parallel` argument over benchmark, so inheritance
     is helpful here.
     """
 
@@ -163,7 +165,7 @@ class RunTarget(TypedDict):
 
     command: T.List[T.Union[str, build.BuildTarget, build.CustomTarget, ExternalProgram, File]]
     depends: T.List[T.Union[build.BuildTarget, build.CustomTarget]]
-    env: build.EnvironmentVariables
+    env: EnvironmentVariables
 
 
 class CustomTarget(TypedDict):
@@ -178,7 +180,7 @@ class CustomTarget(TypedDict):
     depend_files: T.List[FileOrString]
     depends: T.List[T.Union[build.BuildTarget, build.CustomTarget]]
     depfile: T.Optional[str]
-    env: build.EnvironmentVariables
+    env: EnvironmentVariables
     feed: bool
     input: T.List[T.Union[str, build.BuildTarget, build.CustomTarget, build.CustomTargetIndex,
                           build.ExtractedObjects, build.GeneratedList, ExternalProgram, File]]
@@ -195,14 +197,14 @@ class AddTestSetup(TypedDict):
     timeout_multiplier: int
     is_default: bool
     exclude_suites: T.List[str]
-    env: build.EnvironmentVariables
+    env: EnvironmentVariables
 
 
 class Project(TypedDict):
 
     version: T.Optional[FileOrString]
     meson_version: T.Optional[str]
-    default_options: T.List[str]
+    default_options: T.Dict[OptionKey, T.Union[str, int, bool, T.List[str]]]
     license: T.List[str]
     subproject_dir: str
 
@@ -211,7 +213,7 @@ class _FoundProto(Protocol):
 
     """Protocol for subdir arguments.
 
-    This allows us to define any objec that has a found(self) -> bool method
+    This allows us to define any object that has a found(self) -> bool method
     """
 
     def found(self) -> bool: ...
@@ -231,6 +233,7 @@ class Summary(TypedDict):
 
 class FindProgram(ExtractRequired, ExtractSearchDirs):
 
+    default_options: T.Dict[OptionKey, T.Union[str, int, bool, T.List[str]]]
     native: MachineChoice
     version: T.List[str]
 
@@ -239,7 +242,7 @@ class RunCommand(TypedDict):
 
     check: bool
     capture: T.Optional[bool]
-    env: build.EnvironmentVariables
+    env: EnvironmentVariables
 
 
 class FeatureOptionRequire(TypedDict):
@@ -297,13 +300,88 @@ class ConfigureFile(TypedDict):
 
 class Subproject(ExtractRequired):
 
-    default_options: T.List[str]
+    default_options: T.Dict[OptionKey, T.Union[str, int, bool, T.List[str]]]
     version: T.List[str]
 
 
 class DoSubproject(ExtractRequired):
 
-    default_options: T.List[str]
+    default_options: T.Dict[OptionKey, T.Union[str, int, bool, T.List[str]]]
     version: T.List[str]
     cmake_options: T.List[str]
     options: T.Optional[CMakeSubprojectOptions]
+
+
+class _BaseBuildTarget(TypedDict):
+
+    """Arguments used by all BuildTarget like functions.
+
+    This really exists because Jar is so different than all of the other
+    BuildTarget functions.
+    """
+
+    override_options: T.Dict[OptionKey, T.Union[str, int, bool, T.List[str]]]
+
+
+class _BuildTarget(_BaseBuildTarget):
+
+    """Arguments shared by non-JAR functions"""
+
+
+class Executable(_BuildTarget):
+
+    gui_app: T.Optional[bool]
+    win_subsystem: T.Optional[str]
+
+
+class StaticLibrary(_BuildTarget):
+    pass
+
+
+class _SharedLibMixin(TypedDict):
+
+    darwin_versions: T.Optional[T.Tuple[str, str]]
+    soversion: T.Optional[str]
+    version: T.Optional[str]
+
+
+class SharedLibrary(_BuildTarget, _SharedLibMixin):
+    pass
+
+
+class SharedModule(_BuildTarget):
+    pass
+
+
+class Library(_BuildTarget, _SharedLibMixin):
+
+    """For library, both_library, and as a base for build_target"""
+
+
+class BuildTarget(Library):
+
+    target_type: Literal['executable', 'shared_library', 'static_library',
+                         'shared_module', 'both_libraries', 'library', 'jar']
+
+
+class Jar(_BaseBuildTarget):
+
+    main_class: str
+    java_resources: T.Optional[build.StructuredSources]
+
+
+class FuncDeclareDependency(TypedDict):
+
+    compile_args: T.List[str]
+    d_import_dirs: T.List[T.Union[build.IncludeDirs, str]]
+    d_module_versions: T.List[T.Union[str, int]]
+    dependencies: T.List[Dependency]
+    extra_files: T.List[FileOrString]
+    include_directories: T.List[T.Union[build.IncludeDirs, str]]
+    link_args: T.List[str]
+    link_whole: T.List[T.Union[build.StaticLibrary, build.CustomTarget, build.CustomTargetIndex]]
+    link_with: T.List[build.LibTypes]
+    objects: T.List[build.ExtractedObjects]
+    sources: T.List[T.Union[FileOrString, build.GeneratedTypes]]
+    variables: T.Dict[str, str]
+    version: T.Optional[str]

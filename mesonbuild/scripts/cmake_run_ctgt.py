@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 
 import argparse
 import subprocess
@@ -8,7 +9,7 @@ from pathlib import Path
 import typing as T
 
 def run(argsv: T.List[str]) -> int:
-    commands = [[]]  # type: T.List[T.List[str]]
+    commands: T.List[T.List[str]] = [[]]
     SEPARATOR = ';;;'
 
     # Generate CMD parameters
@@ -34,7 +35,7 @@ def run(argsv: T.List[str]) -> int:
             commands += [[]]
             continue
 
-        i = i.replace('"', '')  # Remove lefover quotes
+        i = i.replace('"', '')  # Remove leftover quotes
         commands[-1] += [i]
 
     # Execute
@@ -49,10 +50,10 @@ def run(argsv: T.List[str]) -> int:
         capture_file = ''
 
         for j in i:
-            if j in ['>', '>>']:
+            if j in {'>', '>>'}:
                 stdout = subprocess.PIPE
                 continue
-            elif j in ['&>', '&>>']:
+            elif j in {'&>', '&>>'}:
                 stdout = subprocess.PIPE
                 stderr = subprocess.STDOUT
                 continue

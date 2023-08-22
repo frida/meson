@@ -240,7 +240,7 @@ project('pch demo', 'cxx')
 executable('myapp', 'myapp.cpp', pch : 'pch/myapp.hh')
 ```
 
-The main reason other build systems can not provide pch support this
+The main reason other build systems cannot provide pch support this
 easily is because they don't enforce certain best practices. Due to
 the way include paths work, it is impossible to provide pch support
 that always works with both in-source and out-of-source
@@ -251,10 +251,10 @@ Get the code
 --
 
 The code for this experiment can be found at [the Meson
-repository](https://sourceforge.net/p/meson/code/). It should be noted
-that it is not a build system. It is only a proposal for one. It does
-not work reliably yet. You probably should not use it as the build
-system of your project.
+repository](https://github.com/mesonbuild/meson). It should be noted
+that (at the time of writing) it is not a build system. It is only
+a proposal for one. It does not work reliably yet. You probably
+should not use it as the build system of your project.
 
 All that said I hope that this experiment will eventually turn into a
 full blown build system. For that I need your help. Comments and

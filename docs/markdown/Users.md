@@ -13,6 +13,7 @@ here. Some additional projects are listed in the [`meson` GitHub
 topic](https://github.com/topics/meson).
 
  - [2048.cpp](https://github.com/plibither8/2048.cpp), a fully featured terminal version of the game "2048" written in C++
+ - [aawordsearch](https://github.com/theimpossibleastronaut/aawordsearch), generate wordsearch puzzles using random words in different languages
  - [Adwaita Manager](https://github.com/AdwCustomizerTeam/AdwCustomizer), change the look of Adwaita, with ease
  - [Aravis](https://github.com/AravisProject/aravis), a glib/gobject based library for video acquisition using Genicam cameras
  - [Akira](https://github.com/akiraux/Akira), a native Linux app for UI and UX design built in Vala and Gtk
@@ -20,6 +21,7 @@ topic](https://github.com/topics/meson).
  - [Arduino sample project](https://github.com/jpakkane/mesonarduino)
  - [Audacious](https://github.com/audacious-media-player), a lightweight and versatile audio player
  - [bolt](https://gitlab.freedesktop.org/bolt/bolt), userspace daemon to enable security levels for Thunderbolt™ 3 on Linux
+ - [bsdutils](https://github.com/dcantrell/bsdutils), alternative to GNU coreutils using software from FreeBSD
  - [Bubblewrap](https://github.com/containers/bubblewrap), unprivileged sandboxing tool
  - [Budgie Desktop](https://github.com/budgie-desktop/budgie-desktop), a desktop environment built on GNOME technologies
  - [Bzip2](https://gitlab.com/federicomenaquintero/bzip2), the bzip2 compressor/decompressor
@@ -29,6 +31,7 @@ topic](https://github.com/topics/meson).
  - [cglm](https://github.com/recp/cglm), a highly optimized graphics math library for C
  - [cinnamon-desktop](https://github.com/linuxmint/cinnamon-desktop), the cinnamon desktop library
  - [Cozy](https://github.com/geigi/cozy), a modern audio book player for Linux and macOS using GTK+ 3
+ - [Criterion](https://github.com/Snaipe/Criterion), extensible cross-platform C and C++ unit testing framework
  - [dav1d](https://code.videolan.org/videolan/dav1d), an AV1 decoder
  - [dbus-broker](https://github.com/bus1/dbus-broker), Linux D-Bus Message Broker
  - [DOSBox Staging](https://github.com/dosbox-staging/dosbox-staging), DOS/x86 emulator
@@ -46,6 +49,7 @@ topic](https://github.com/topics/meson).
  - [fwupd](https://github.com/hughsie/fwupd), a simple daemon to allow session software to update firmware
  - [GameMode](https://github.com/FeralInteractive/gamemode), a daemon/lib combo for Linux that allows games to request a set of optimisations be temporarily applied to the host OS
  - [Geary](https://wiki.gnome.org/Apps/Geary), an email application built around conversations, for the GNOME 3 desktop.
+ - [GIMP](https://gitlab.gnome.org/GNOME/gimp), an image manipulation program (experimental replacing autoconf)
  - [GLib](https://gitlab.gnome.org/GNOME/glib), cross-platform C library used by GTK+ and GStreamer
  - [Glorytun](https://github.com/angt/glorytun), a multipath UDP tunnel
  - [GNOME Boxes](https://gitlab.gnome.org/GNOME/gnome-boxes), a GNOME hypervisor
@@ -67,6 +71,7 @@ topic](https://github.com/topics/meson).
  - [HelenOS](http://helenos.org), a portable microkernel-based multiserver operating system
  - [HexChat](https://github.com/hexchat/hexchat), a cross-platform IRC client in C
  - [IGT](https://gitlab.freedesktop.org/drm/igt-gpu-tools), Linux kernel graphics driver test suite
+ - [i3](https://i3wm.org), improved tiling window manager
  - [inih](https://github.com/benhoyt/inih) (INI Not Invented Here), a small and simple .INI file parser written in C
  - [Irssi](https://github.com/irssi/irssi), a terminal chat client in C
  - [iSH](https://github.com/tbodt/ish), Linux shell for iOS
@@ -103,7 +108,7 @@ format files
  - [Marker](https://github.com/fabiocolacio/Marker), a GTK-3 markdown editor
  - [Mesa](https://mesa3d.org/), an open source graphics driver project
  - [Miniz](https://github.com/richgel999/miniz), a zlib replacement library
- - [MiracleCast](https://github.com/albfan/miraclecast), connect external monitors to your system via Wifi-Display specification aka Miracast
+ - [MiracleCast](https://github.com/albfan/miraclecast), connect external monitors to your system via WiFi-Display specification aka Miracast
  - [mpv](https://github.com/mpv-player/mpv), a free, open source, and cross-platform media player
  - [mrsh](https://github.com/emersion/mrsh), a minimal POSIX shell
  - [Nautilus](https://gitlab.gnome.org/GNOME/nautilus), the GNOME file manager
@@ -132,16 +137,19 @@ format files
  - [Planner](https://github.com/alainm23/planner), task manager with Todoist support designed for GNU/Linux
  - [Playerctl](https://github.com/acrisci/playerctl), mpris command-line controller and library for spotify, vlc, audacious, bmp, cmus, and others
  - [Polari](https://gitlab.gnome.org/GNOME/polari), an IRC client
+ - [PostgreSQL](https://www.postgresql.org/), an advanced open source relational database
  - [qboot](https://github.com/bonzini/qboot), a minimal x86 firmware for booting Linux kernels
- - [radare2](https://github.com/radare/radare2), unix-like reverse engineering framework and commandline tools (not the default)
- - [rmw](https://remove-to-waste.info), safe-remove utility for the command line
- - [Rizin](https://rizin.re), Free and Open Source Reverse Engineering Framework
  - [QEMU](https://qemu.org), a processor emulator and virtualizer
+ - [radare2](https://github.com/radare/radare2), unix-like reverse engineering framework and commandline tools (not the default)
+ - [refivar](https://github.com/nvinson/refivar), A reimplementation of efivar in Rust.
+ - [Rizin](https://rizin.re), Free and Open Source Reverse Engineering Framework
+ - [rmw](https://remove-to-waste.info), safe-remove utility for the command line
  - [RxDock](https://gitlab.com/rxdock/rxdock), a protein-ligand docking software designed for high throughput virtual screening (fork of rDock)
  - [SciPy](https://scipy.org/), an open-source software for mathematics, science, and engineering
  - [scrcpy](https://github.com/Genymobile/scrcpy), a cross platform application that provides display and control of Android devices connected on USB or over TCP/IP
  - [Sequeler](https://github.com/Alecaddd/sequeler), a friendly SQL client for Linux, built with Vala and Gtk
  - [Siril](https://gitlab.com/free-astro/siril), an image processing software for amateur astronomy
+ - [slapt-get](https://github.com/jaos/slapt-get), an APT like system for Slackware package management
  - [Spot](https://github.com/xou816/spot), Rust based Spotify client for the GNOME desktop
  - [SSHFS](https://github.com/libfuse/sshfs), allows you to mount a remote filesystem using SFTP
  - [sway](https://github.com/swaywm/sway), i3-compatible Wayland compositor

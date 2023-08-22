@@ -17,8 +17,9 @@ from ...interpreterbase import (
     noKwargs,
     noPosargs,
     typed_pos_args,
-
     InvalidArguments,
+    FeatureBroken,
+    stringifyUserArguments,
 )
 
 
@@ -38,6 +39,7 @@ class StringHolder(ObjectHolder[str]):
             'join': self.join_method,
             'replace': self.replace_method,
             'split': self.split_method,
+            'splitlines': self.splitlines_method,
             'strip': self.strip_method,
             'substring': self.substring_method,
             'to_int': self.to_int_method,
@@ -64,6 +66,8 @@ class StringHolder(ObjectHolder[str]):
         self.operators.update({
             MesonOperator.DIV: self.op_div,
             MesonOperator.INDEX: self.op_index,
+            MesonOperator.IN: self.op_in,
+            MesonOperator.NOT_IN: self.op_notin,
         })
 
     def display_name(self) -> str:
@@ -87,12 +91,14 @@ class StringHolder(ObjectHolder[str]):
     @noArgsFlattening
     @noKwargs
     @typed_pos_args('str.format', varargs=object)
-    def format_method(self, args: T.Tuple[T.List[object]], kwargs: TYPE_kwargs) -> str:
+    def format_method(self, args: T.Tuple[T.List[TYPE_var]], kwargs: TYPE_kwargs) -> str:
         arg_strings: T.List[str] = []
         for arg in args[0]:
-            if isinstance(arg, bool): # Python boolean is upper case.
-                arg = str(arg).lower()
-            arg_strings.append(str(arg))
+            try:
+                arg_strings.append(stringifyUserArguments(arg, self.subproject))
+            except InvalidArguments as e:
+                FeatureBroken.single_use(f'str.format: {str(e)}', '1.3.0', self.subproject, location=self.current_node)
+                arg_strings.append(str(arg))
 
         def arg_replace(match: T.Match[str]) -> str:
             idx = int(match.group(1))
@@ -103,11 +109,18 @@ class StringHolder(ObjectHolder[str]):
         return re.sub(r'@(\d+)@', arg_replace, self.held_object)
 
     @noKwargs
+    @noPosargs
+    @FeatureNew('str.splitlines', '1.2.0')
+    def splitlines_method(self, args: T.List[TYPE_var], kwargs: TYPE_kwargs) -> T.List[str]:
+        return self.held_object.splitlines()
+
+    @noKwargs
     @typed_pos_args('str.join', varargs=str)
     def join_method(self, args: T.Tuple[T.List[str]], kwargs: TYPE_kwargs) -> str:
         return self.held_object.join(args[0])
 
     @noKwargs
+    @FeatureNew('str.replace', '0.58.0')
     @typed_pos_args('str.replace', str, str)
     def replace_method(self, args: T.Tuple[str, str], kwargs: TYPE_kwargs) -> str:
         return self.held_object.replace(args[0], args[1])
@@ -120,9 +133,12 @@ class StringHolder(ObjectHolder[str]):
     @noKwargs
     @typed_pos_args('str.strip', optargs=[str])
     def strip_method(self, args: T.Tuple[T.Optional[str]], kwargs: TYPE_kwargs) -> str:
+        if args[0]:
+            FeatureNew.single_use('str.strip with a positional argument', '0.43.0', self.subproject, location=self.current_node)
         return self.held_object.strip(args[0])
 
     @noKwargs
+    @FeatureNew('str.substring', '0.56.0')
     @typed_pos_args('str.substring', optargs=[int, int])
     def substring_method(self, args: T.Tuple[T.Optional[int], T.Optional[int]], kwargs: TYPE_kwargs) -> str:
         start = args[0] if args[0] is not None else 0
@@ -172,6 +188,16 @@ class StringHolder(ObjectHolder[str]):
             return self.held_object[other]
         except IndexError:
             raise InvalidArguments(f'Index {other} out of bounds of string of size {len(self.held_object)}.')
+
+    @FeatureNew('"in" string operator', '1.0.0')
+    @typed_operator(MesonOperator.IN, str)
+    def op_in(self, other: str) -> bool:
+        return other in self.held_object
+
+    @FeatureNew('"not in" string operator', '1.0.0')
+    @typed_operator(MesonOperator.NOT_IN, str)
+    def op_notin(self, other: str) -> bool:
+        return other not in self.held_object
 
 
 class MesonVersionString(str):

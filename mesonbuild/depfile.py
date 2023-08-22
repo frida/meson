@@ -10,6 +10,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 import typing as T
 
@@ -36,7 +37,7 @@ def parse(lines: T.Iterable[str]) -> T.List[T.Tuple[T.List[str], T.List[str]]]:
             if c in {'\\', '$'}:
                 escape = c
                 continue
-            elif c in (' ', '\n'):
+            elif c in {' ', '\n'}:
                 if out != '':
                     if in_deps:
                         deps.append(out)

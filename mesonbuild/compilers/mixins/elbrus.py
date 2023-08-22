@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 """Abstractions for the Elbrus family of compilers."""
 
@@ -41,7 +42,8 @@ class ElbrusCompiler(GnuLikeCompiler):
         self.warn_args = {'0': [],
                           '1': default_warn_args,
                           '2': default_warn_args + ['-Wextra'],
-                          '3': default_warn_args + ['-Wextra', '-Wpedantic']}
+                          '3': default_warn_args + ['-Wextra', '-Wpedantic'],
+                          'everything': default_warn_args + ['-Wextra', '-Wpedantic']}
 
     # FIXME: use _build_wrapper to call this so that linker flags from the env
     # get applied
@@ -72,7 +74,7 @@ class ElbrusCompiler(GnuLikeCompiler):
         os_env['LC_ALL'] = 'C'
         p = subprocess.Popen(self.get_exelist(ccache=False) + ['-xc', '-E', '-v', '-'], env=os_env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stderr = p.stderr.read().decode('utf-8', errors='replace')
-        includes = []
+        includes: T.List[str] = []
         for line in stderr.split('\n'):
             if line.lstrip().startswith('--sys_include'):
                 includes.append(re.sub(r'\s*\\$', '', re.sub(r'^\s*--sys_include\s*', '', line)))
@@ -89,7 +91,7 @@ class ElbrusCompiler(GnuLikeCompiler):
         return 'pch'
 
     def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
-        args = []
+        args: T.List[str] = []
         std = options[OptionKey('std', lang=self.language, machine=self.for_machine)]
         if std.value != 'none':
             args.append('-std=' + std.value)

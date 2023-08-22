@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 import sys, os, subprocess, re
 import typing as T
@@ -26,7 +27,7 @@ def config_vcs_tag(infile: str, outfile: str, fallback: str, source_dir: str, re
         new_data = f.read().replace(replace_string, new_string)
     if os.path.exists(outfile):
         with open(outfile, encoding='utf-8') as f:
-            needs_update = (f.read() != new_data)
+            needs_update = f.read() != new_data
     else:
         needs_update = True
     if needs_update:

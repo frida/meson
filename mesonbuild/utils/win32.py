@@ -13,13 +13,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 """Windows specific implementations of mesonlib functionality."""
 
 import msvcrt
 import typing as T
 
-from .universal import MesonException
+from .core import MesonException
 from .platform import BuildDirLock as BuildDirLockBase
 
 __all__ = ['BuildDirLock']

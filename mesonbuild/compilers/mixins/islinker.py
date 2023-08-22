@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 """Mixins for compilers that *are* linkers.
 
@@ -119,8 +120,8 @@ class BasicLinkerIsCompilerMixin(Compiler):
     def get_buildtype_linker_args(self, buildtype: str) -> T.List[str]:
         return []
 
-    def get_link_debugfile_name(self, targetfile: str) -> str:
-        return ''
+    def get_link_debugfile_name(self, targetfile: str) -> T.Optional[str]:
+        return None
 
     def thread_flags(self, env: 'Environment') -> T.List[str]:
         return []

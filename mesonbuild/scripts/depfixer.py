@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 
 import sys
@@ -83,10 +84,8 @@ class DynamicEntry(DataSizes):
 class SectionHeader(DataSizes):
     def __init__(self, ifile: T.BinaryIO, ptrsize: int, is_le: bool) -> None:
         super().__init__(ptrsize, is_le)
-        if ptrsize == 64:
-            is_64 = True
-        else:
-            is_64 = False
+        is_64 = ptrsize == 64
+
 # Elf64_Word
         self.sh_name = struct.unpack(self.Word, ifile.read(self.WordSize))[0]
 # Elf64_Word
@@ -124,8 +123,8 @@ class Elf(DataSizes):
     def __init__(self, bfile: str, verbose: bool = True) -> None:
         self.bfile = bfile
         self.verbose = verbose
-        self.sections = []  # type: T.List[SectionHeader]
-        self.dynamic = []   # type: T.List[DynamicEntry]
+        self.sections: T.List[SectionHeader] = []
+        self.dynamic: T.List[DynamicEntry] = []
         self.open_bf(bfile)
         try:
             (self.ptrsize, self.is_le) = self.detect_elf_type()
@@ -330,7 +329,7 @@ class Elf(DataSizes):
         old_rpath = self.read_str()
         # Some rpath entries may come from multiple sources.
         # Only add each one once.
-        new_rpaths = OrderedSet()  # type: OrderedSet[bytes]
+        new_rpaths: OrderedSet[bytes] = OrderedSet()
         if new_rpath:
             new_rpaths.update(new_rpath.split(b':'))
         if old_rpath:
@@ -351,7 +350,7 @@ class Elf(DataSizes):
             sys.exit(msg)
         # The linker does read-only string deduplication. If there is a
         # string that shares a suffix with the rpath, they might get
-        # dedupped. This means changing the rpath string might break something
+        # deduped. This means changing the rpath string might break something
         # completely unrelated. This has already happened once with X.org.
         # Thus we want to keep this change as small as possible to minimize
         # the chance of obliterating other strings. It might still happen
@@ -459,7 +458,7 @@ def fix_darwin(fname: str, new_rpath: str, final_path: str, install_name_mapping
         raise SystemExit(err)
 
 def fix_jar(fname: str) -> None:
-    subprocess.check_call(['jar', 'xfv', fname, 'META-INF/MANIFEST.MF'])
+    subprocess.check_call(['jar', 'xf', fname, 'META-INF/MANIFEST.MF'])
     with open('META-INF/MANIFEST.MF', 'r+', encoding='utf-8') as f:
         lines = f.readlines()
         f.seek(0)
@@ -467,7 +466,12 @@ def fix_jar(fname: str) -> None:
             if not line.startswith('Class-Path:'):
                 f.write(line)
         f.truncate()
-    subprocess.check_call(['jar', 'ufm', fname, 'META-INF/MANIFEST.MF'])
+    # jar -um doesn't allow removing existing attributes.  Use -uM instead,
+    # which a) removes the existing manifest from the jar and b) disables
+    # special-casing for the manifest file, so we can re-add it as a normal
+    # archive member.  This puts the manifest at the end of the jar rather
+    # than the beginning, but the spec doesn't forbid that.
+    subprocess.check_call(['jar', 'ufM', fname, 'META-INF/MANIFEST.MF'])
 
 def fix_rpath(fname: str, rpath_dirs_to_remove: T.Set[bytes], new_rpath: T.Union[str, bytes], final_path: str, install_name_mappings: T.Dict[str, str], verbose: bool = True) -> None:
     global INSTALL_NAME_TOOL  # pylint: disable=global-statement

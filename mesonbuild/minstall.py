@@ -14,20 +14,21 @@
 from __future__ import annotations
 
 from glob import glob
-from pathlib import Path
 import argparse
 import errno
 import os
+import selectors
 import shlex
 import shutil
 import subprocess
 import sys
 import typing as T
+import re
 
-from . import build
-from . import environment
+from . import build, environment
 from .backend.backends import InstallData
-from .mesonlib import MesonException, Popen_safe, RealPathAction, is_windows, setup_vsenv, pickle_load, is_osx
+from .mesonlib import (MesonException, Popen_safe, RealPathAction, is_windows,
+                       is_aix, setup_vsenv, pickle_load, is_osx, OptionKey)
 from .scripts import depfixer, destdir_join
 from .scripts.meson_exe import run_exe
 try:
@@ -39,10 +40,10 @@ except ImportError:
 
 if T.TYPE_CHECKING:
     from .backend.backends import (
-            ExecutableSerialisation, InstallDataBase, InstallEmptyDir,
+            InstallDataBase, InstallEmptyDir,
             InstallSymlinkData, TargetInstallData
     )
-    from .mesonlib import FileMode
+    from .mesonlib import FileMode, EnvironOrDict, ExecutableSerialisation
 
     try:
         from typing import Protocol
@@ -130,9 +131,7 @@ class DirMaker:
 
 
 def load_install_data(fname: str) -> InstallData:
-    obj = pickle_load(fname, 'InstallData', InstallData)
-    assert isinstance(obj, InstallData), 'fo mypy'
-    return obj
+    return pickle_load(fname, 'InstallData', InstallData)
 
 def is_executable(path: str, follow_symlinks: bool = False) -> bool:
     '''Checks whether any of the "x" bits are set in the source file mode.'''
@@ -209,10 +208,10 @@ def set_mode(path: str, mode: T.Optional['FileMode'], default_umask: T.Union[str
         except PermissionError as e:
             print(f'{path!r}: Unable to set owner {mode.owner!r} and group {mode.group!r}: {e.strerror}, ignoring...')
         except LookupError:
-            print(f'{path!r}: Non-existent owner {mode.owner!r} or group {mode.group!r}: ignoring...')
+            print(f'{path!r}: Nonexistent owner {mode.owner!r} or group {mode.group!r}: ignoring...')
         except OSError as e:
             if e.errno == errno.EINVAL:
-                print(f'{path!r}: Non-existent numeric owner {mode.owner!r} or group {mode.group!r}: ignoring...')
+                print(f'{path!r}: Nonexistent numeric owner {mode.owner!r} or group {mode.group!r}: ignoring...')
             else:
                 raise
     # Must set permissions *after* setting owner/group otherwise the
@@ -361,9 +360,9 @@ class Installer:
             return p.returncode, o, e
         return 0, '', ''
 
-    def run_exe(self, *args: T.Any, **kwargs: T.Any) -> int:
-        if not self.dry_run:
-            return run_exe(*args, **kwargs)
+    def run_exe(self, exe: ExecutableSerialisation, extra_env: T.Optional[T.Dict[str, str]] = None) -> int:
+        if (not self.dry_run) or exe.dry_run:
+            return run_exe(exe, extra_env)
         return 0
 
     def should_install(self, d: T.Union[TargetInstallData, InstallEmptyDir,
@@ -482,6 +481,8 @@ class Installer:
             raise ValueError(f'dst_dir must be absolute, got {dst_dir}')
         if exclude is not None:
             exclude_files, exclude_dirs = exclude
+            exclude_files = {os.path.normpath(x) for x in exclude_files}
+            exclude_dirs = {os.path.normpath(x) for x in exclude_dirs}
         else:
             exclude_files = exclude_dirs = set()
         for root, dirs, files in os.walk(src_dir):
@@ -556,19 +557,42 @@ class Installer:
                     self.log('Preserved {} unchanged files, see {} for the full list'
                              .format(self.preserved_file_count, os.path.normpath(self.lf.name)))
         except PermissionError:
-            if shutil.which('pkexec') is not None and 'PKEXEC_UID' not in os.environ and destdir == '':
-                print('Installation failed due to insufficient permissions.')
-                print('Attempting to use polkit to gain elevated privileges...')
-                os.execlp('pkexec', 'pkexec', sys.executable, main_file, *sys.argv[1:],
-                          '-C', os.getcwd())
-            else:
+            if is_windows() or destdir != '' or not os.isatty(sys.stdout.fileno()) or not os.isatty(sys.stderr.fileno()):
+                # can't elevate to root except in an interactive unix environment *and* when not doing a destdir install
                 raise
+            rootcmd = os.environ.get('MESON_ROOT_CMD') or shutil.which('sudo') or shutil.which('doas')
+            pkexec = shutil.which('pkexec')
+            if rootcmd is None and pkexec is not None and 'PKEXEC_UID' not in os.environ:
+                rootcmd = pkexec
+
+            if rootcmd is not None:
+                print('Installation failed due to insufficient permissions.')
+                s = selectors.DefaultSelector()
+                s.register(sys.stdin, selectors.EVENT_READ)
+                ans = None
+                for attempt in range(5):
+                    print(f'Attempt to use {rootcmd} to gain elevated privileges? [y/n] ', end='', flush=True)
+                    if s.select(30):
+                        # we waited on sys.stdin *only*
+                        ans = sys.stdin.readline().rstrip('\n')
+                    else:
+                        print()
+                        break
+                    if ans in {'y', 'n'}:
+                        break
+                else:
+                    if ans is not None:
+                        raise MesonException('Answer not one of [y/n]')
+                if ans == 'y':
+                    os.execlp(rootcmd, rootcmd, sys.executable, main_file, *sys.argv[1:],
+                              '-C', os.getcwd(), '--no-rebuild')
+            raise
 
     def do_strip(self, strip_bin: T.List[str], fname: str, outname: str) -> None:
         self.log(f'Stripping target {fname!r}.')
         if is_osx():
             # macOS expects dynamic objects to be stripped with -x maximum.
-            # To also strip the debug info, -S must be added.
+            # To also strip the debug info, -S must be added.
             # See: https://www.unix.com/man-page/osx/1/strip/
             returncode, stdo, stde = self.Popen_safe(strip_bin + ['-S', '-x', outname])
         else:
@@ -649,16 +673,25 @@ class Installer:
     def run_install_script(self, d: InstallData, destdir: str, fullprefix: str) -> None:
         env = {'MESON_SOURCE_ROOT': d.source_dir,
                'MESON_BUILD_ROOT': d.build_dir,
-               'MESON_INSTALL_PREFIX': d.prefix,
-               'MESON_INSTALL_DESTDIR_PREFIX': fullprefix,
                'MESONINTROSPECT': ' '.join([shlex.quote(x) for x in d.mesonintrospect]),
                }
         if self.options.quiet:
             env['MESON_INSTALL_QUIET'] = '1'
+        if self.dry_run:
+            env['MESON_INSTALL_DRY_RUN'] = '1'
 
         for i in d.install_scripts:
             if not self.should_install(i):
                 continue
+
+            if i.installdir_map is not None:
+                mapp = i.installdir_map
+            else:
+                mapp = {'prefix': d.prefix}
+            localenv = env.copy()
+            localenv.update({'MESON_INSTALL_'+k.upper(): os.path.join(d.prefix, v) for k, v in mapp.items()})
+            localenv.update({'MESON_INSTALL_DESTDIR_'+k.upper(): get_destdir_path(destdir, fullprefix, v) for k, v in mapp.items()})
+
             name = ' '.join(i.cmd_args)
             if i.skip_if_destdir and destdir:
                 self.log(f'Skipping custom install script because DESTDIR is set {name!r}')
@@ -666,7 +699,7 @@ class Installer:
             self.did_install_something = True  # Custom script must report itself if it does nothing.
             self.log(f'Running custom install script {name!r}')
             try:
-                rc = self.run_exe(i, env)
+                rc = self.run_exe(i, localenv)
             except OSError:
                 print(f'FAILED: install script \'{name}\' could not be run, stopped')
                 # POSIX shells return 127 when a command could not be found
@@ -677,6 +710,12 @@ class Installer:
 
     def install_targets(self, d: InstallData, dm: DirMaker, destdir: str, fullprefix: str) -> None:
         for t in d.targets:
+            # In AIX, we archive our shared libraries.  When we install any package in AIX we need to
+            # install the archive in which the shared library exists. The below code does the same.
+            # We change the .so files having lt_version or so_version to archive file install.
+            if is_aix():
+                if '.so' in t.fname:
+                    t.fname = re.sub('[.][a]([.]?([0-9]+))*([.]?([a-z]+))*', '.a', t.fname.replace('.so', '.a'))
             if not self.should_install(t):
                 continue
             if not os.path.exists(t.fname):
@@ -731,8 +770,11 @@ class Installer:
                 # file mode needs to be set last, after strip/depfixer editing
                 self.set_mode(outname, install_mode, d.install_umask)
 
-def rebuild_all(wd: str) -> bool:
-    if not (Path(wd) / 'build.ninja').is_file():
+def rebuild_all(wd: str, backend: str) -> bool:
+    if backend == 'none':
+        # nothing to build...
+        return True
+    if backend != 'ninja':
         print('Only ninja backend is supported to rebuild the project before installation.')
         return True
 
@@ -741,7 +783,53 @@ def rebuild_all(wd: str) -> bool:
         print("Can't find ninja, can't rebuild test.")
         return False
 
-    ret = subprocess.run(ninja + ['-C', wd]).returncode
+    def drop_privileges() -> T.Tuple[T.Optional[EnvironOrDict], T.Optional[T.Callable[[], None]]]:
+        if not is_windows() and os.geteuid() == 0:
+            import pwd
+            env = os.environ.copy()
+
+            if os.environ.get('SUDO_USER') is not None:
+                orig_user = env.pop('SUDO_USER')
+                orig_uid = env.pop('SUDO_UID', 0)
+                orig_gid = env.pop('SUDO_GID', 0)
+                try:
+                    homedir = pwd.getpwuid(int(orig_uid)).pw_dir
+                except KeyError:
+                    # `sudo chroot` leaves behind stale variable and builds as root without a user
+                    return None, None
+            elif os.environ.get('DOAS_USER') is not None:
+                orig_user = env.pop('DOAS_USER')
+                try:
+                    pwdata = pwd.getpwnam(orig_user)
+                except KeyError:
+                    # `doas chroot` leaves behind stale variable and builds as root without a user
+                    return None, None
+                orig_uid = pwdata.pw_uid
+                orig_gid = pwdata.pw_gid
+                homedir = pwdata.pw_dir
+            else:
+                return None, None
+
+            if os.stat(os.path.join(wd, 'build.ninja')).st_uid != int(orig_uid):
+                # the entire build process is running with sudo, we can't drop privileges
+                return None, None
+
+            env['USER'] = orig_user
+            env['HOME'] = homedir
+
+            def wrapped() -> None:
+                print(f'Dropping privileges to {orig_user!r} before running ninja...')
+                if orig_gid is not None:
+                    os.setgid(int(orig_gid))
+                if orig_uid is not None:
+                    os.setuid(int(orig_uid))
+
+            return env, wrapped
+        else:
+            return None, None
+
+    env, preexec_fn = drop_privileges()
+    ret = subprocess.run(ninja + ['-C', wd], env=env, preexec_fn=preexec_fn).returncode
     if ret != 0:
         print(f'Could not rebuild {wd}')
         return False
@@ -757,8 +845,10 @@ def run(opts: 'ArgumentType') -> int:
         sys.exit('Install data not found. Run this command in build directory root.')
     if not opts.no_rebuild:
         b = build.load(opts.wd)
-        setup_vsenv(b.need_vsenv)
-        if not rebuild_all(opts.wd):
+        need_vsenv = T.cast('bool', b.environment.coredata.get_option(OptionKey('vsenv')))
+        setup_vsenv(need_vsenv)
+        backend = T.cast('str', b.environment.coredata.get_option(OptionKey('backend')))
+        if not rebuild_all(opts.wd, backend):
             sys.exit(-1)
     os.chdir(opts.wd)
     with open(os.path.join(log_dir, 'install-log.txt'), 'w', encoding='utf-8') as lf:

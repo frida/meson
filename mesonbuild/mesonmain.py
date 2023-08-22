@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 # Work around some pathlib bugs...
 
@@ -139,11 +140,11 @@ class CommandLineParser:
         parser.add_argument('script_args', nargs=argparse.REMAINDER)
 
     def run_runpython_command(self, options):
-        import runpy
+        sys.argv[1:] = options.script_args
         if options.eval_arg:
             exec(options.script_file)
         else:
-            sys.argv[1:] = options.script_args
+            import runpy
             sys.path.insert(0, os.path.dirname(options.script_file))
             runpy.run_path(options.script_file, run_name='__main__')
         return 0
@@ -160,7 +161,6 @@ class CommandLineParser:
 
     def run(self, args):
         implicit_setup_command_notice = False
-        pending_python_deprecation_notice = False
         # If first arg is not a known command, assume user wants to run the setup
         # command.
         known_commands = list(self.commands.keys()) + ['-h', '--help']
@@ -187,8 +187,8 @@ class CommandLineParser:
         # Bump the version here in order to add a pre-exit warning that we are phasing out
         # support for old python. If this is already the oldest supported version, then
         # this can never be true and does nothing.
-        if command in ('setup', 'compile', 'test', 'install') and sys.version_info < (3, 7):
-            pending_python_deprecation_notice = True
+        pending_python_deprecation_notice = \
+            command in {'setup', 'compile', 'test', 'install'} and sys.version_info < (3, 7)
 
         try:
             return options.run_func(options)
@@ -236,6 +236,13 @@ def set_meson_command(mainfile):
     mesonlib.set_meson_command(mainfile)
 
 def run(original_args, mainfile):
+    if os.environ.get('MESON_SHOW_DEPRECATIONS'):
+        # workaround for https://bugs.python.org/issue34624
+        import warnings
+        for typ in [DeprecationWarning, SyntaxWarning, FutureWarning, PendingDeprecationWarning]:
+            warnings.filterwarnings('error', category=typ, module='mesonbuild')
+        warnings.filterwarnings('ignore', message=".*importlib-resources.*")
+
     if sys.version_info >= (3, 10) and os.environ.get('MESON_RUNNING_IN_PROJECT_TESTS'):
         # workaround for https://bugs.python.org/issue34624
         import warnings
@@ -283,7 +290,7 @@ def main():
         assert os.path.isabs(sys.executable)
         launcher = sys.executable
     else:
-        launcher = os.path.realpath(sys.argv[0])
+        launcher = os.path.abspath(sys.argv[0])
     return run(sys.argv[1:], launcher)
 
 if __name__ == '__main__':

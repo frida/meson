@@ -3,7 +3,7 @@ if ($LastExitCode -ne 0) {
   exit 0
 }
 
-# remove Chocolately, MinGW, Strawberry Perl from path, so we don't find gcc/gfortran and try to use it
+# remove Chocolatey, MinGW, Strawberry Perl from path, so we don't find gcc/gfortran and try to use it
 # remove PostgreSQL from path so we don't pickup a broken zlib from it
 $env:Path = ($env:Path.Split(';') | Where-Object { $_ -notmatch 'mingw|Strawberry|Chocolatey|PostgreSQL' }) -join ';'
 
@@ -59,6 +59,9 @@ if ($env:arch -eq 'x64') {
     Expand-Archive $env:AGENT_WORKFOLDER\pypy38.zip -DestinationPath $env:AGENT_WORKFOLDER\pypy38
     $ENV:Path = $ENV:Path + ";$ENV:AGENT_WORKFOLDER\pypy38\pypy3.8-v7.3.9-win64;$ENV:AGENT_WORKFOLDER\pypy38\pypy3.8-v7.3.9-win64\Scripts"
     pypy3 -m ensurepip
+
+    DownloadFile -Source https://www.python.org/ftp/python/2.7.18/python-2.7.18.amd64.msi -Destination $env:AGENT_WORKFOLDER\python27.msi
+    Start-Process msiexec.exe -Wait -ArgumentList "/I $env:AGENT_WORKFOLDER\python27.msi /quiet"
 }
 
 
@@ -76,7 +79,7 @@ foreach ($prog in $progs) {
 
 
 echo ""
-echo "Ninja / MSBuld version:"
+echo "Ninja / MSBuild version:"
 if ($env:backend -eq 'ninja') {
   ninja --version
 } else {
@@ -91,6 +94,9 @@ python --version
 echo ""
 python -m pip --disable-pip-version-check install --upgrade pefile pytest-xdist pytest-subtests jsonschema coverage
 
+# Needed for running the Cython tests
+python -m pip --disable-pip-version-check install cython
+
 echo ""
 echo "=== Start running tests ==="
 # Starting from VS2019 Powershell(?) will fail the test run
@@ -98,21 +104,4 @@ echo "=== Start running tests ==="
 # does that by default so we need to forward it.
 cmd /c "python 2>&1 ./tools/run_with_cov.py  run_tests.py --backend $env:backend $env:extraargs"
 
-$result = $LastExitCode
-
-echo ""
-echo ""
-echo "=== Gathering coverage report ==="
-echo ""
-
-python3 -m coverage combine
-python3 -m coverage xml
-python3 -m coverage report
-
-# Currently codecov.py does not handle Azure, use this fork of a fork to get it
-# working without requiring a token
-git clone https://github.com/mensinda/codecov-python
-python3 -m pip install --ignore-installed ./codecov-python
-python3 -m codecov -f .coverage/coverage.xml -n "VS$env:compiler $env:arch $env:backend" -c $env:SOURCE_VERSION
-
-exit $result
+exit $LastExitCode

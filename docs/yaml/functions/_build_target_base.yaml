@@ -89,7 +89,7 @@ kwargs:
     default: false
     description: |
       When set to true flags this target as a GUI application
-      on platforms where this makes a differerence, **deprecated** since
+      on platforms where this makes a difference, **deprecated** since
       0.56.0, use `win_subsystem` instead.
 
   link_args:
@@ -123,8 +123,10 @@ kwargs:
     type: list[lib | custom_tgt | custom_idx]
     since: 0.40.0
     description: |
-      Links all contents of the given static libraries
-      whether they are used by not, equivalent to the `-Wl,--whole-archive` argument flag of GCC.
+      Links all contents of the given static libraries whether they are used or
+      not, equivalent to the `-Wl,--whole-archive` argument flag of GCC, or the
+      '/WHOLEARCHIVE' MSVC linker option. This allows the linked target to
+      re-export symbols from all objects in the static libraries.
 
       *(since 0.41.0)* If passed a list that list will be flattened.
 
@@ -191,11 +193,14 @@ kwargs:
       (but *not* before that). On Windows, this argument has no effect.
 
   objects:
-    type: list[extracted_obj]
+    type: list[extracted_obj | file | str]
     description: |
-      List of prebuilt object files (usually for third party
-      products you don't have source to) that should be linked in this
-      target, **never** use this for object files that you build yourself.
+      List of object files that should be linked in this target.
+
+      **Since 1.1.0** this can include generated files in addition to
+      object files that you don't have source to or that object files
+      produced by other build targets.  In earlier release, generated
+      object files had to be placed in `sources`.
 
   name_prefix:
     type: str | list[void]
@@ -225,12 +230,13 @@ kwargs:
       Set this to `[]`, or omit the keyword argument for the default behaviour.
 
   override_options:
-    type: list[str]
+    type: list[str] | dict[str | bool | int | list[str]]
     since: 0.40.0
     description: |
       takes an array of strings in the same format as `project`'s `default_options`
       overriding the values of these options
       for this target only.
+      *(since 1.2.0)*: A dictionary may now be passed.
 
   gnu_symbol_visibility:
     type: str
@@ -296,6 +302,16 @@ kwargs:
       If it is a [[shared_library]] it defaults to "lib", and may be "lib",
       "dylib", "cdylib", or "proc-macro". If "lib" then Rustc will pick a
       default, "cdylib" means a C ABI library, "dylib" means a Rust ABI, and
-      "proc-macro" is a special rust proceedural macro crate.
+      "proc-macro" is a special rust procedural macro crate.
 
       "proc-macro" is new in 0.62.0.
+
+  rust_dependency_map:
+    type: dict[str]
+    since: 1.2.0
+    description: |
+      On rust targets this provides a map of library names to the crate name
+      with which it would be available inside the rust code.
+
+      This allows renaming similar to the dependency renaming feature of cargo
+      or `extern crate foo as bar` inside rust code.

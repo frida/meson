@@ -20,10 +20,11 @@ from .. import coredata
 from .compilers import (
     clike_debug_args,
     Compiler,
+    CompileCheckMode,
 )
 from .mixins.clike import CLikeCompiler
 from .mixins.gnu import (
-    GnuCompiler, gnulike_buildtype_args, gnu_optimization_args,
+    GnuCompiler, gnulike_buildtype_args, gnu_optimization_args
 )
 from .mixins.intel import IntelGnuLikeCompiler, IntelVisualStudioLikeCompiler
 from .mixins.clang import ClangCompiler
@@ -40,10 +41,9 @@ if T.TYPE_CHECKING:
     from ..dependencies import Dependency
     from ..envconfig import MachineInfo
     from ..environment import Environment
-    from ..linkers import DynamicLinker
+    from ..linkers.linkers import DynamicLinker
     from ..mesonlib import MachineChoice
     from ..programs import ExternalProgram
-    from .compilers import CompileCheckMode
 
 
 class FortranCompiler(CLikeCompiler, Compiler):
@@ -105,9 +105,9 @@ class FortranCompiler(CLikeCompiler, Compiler):
     def module_name_to_filename(self, module_name: str) -> str:
         if '_' in module_name:  # submodule
             s = module_name.lower()
-            if self.id in ('gcc', 'intel', 'intel-cl'):
+            if self.id in {'gcc', 'intel', 'intel-cl'}:
                 filename = s.replace('_', '@') + '.smod'
-            elif self.id in ('pgi', 'flang'):
+            elif self.id in {'pgi', 'flang'}:
                 filename = s.replace('_', '-') + '.mod'
             else:
                 filename = s + '.mod'
@@ -117,9 +117,9 @@ class FortranCompiler(CLikeCompiler, Compiler):
         return filename
 
     def find_library(self, libname: str, env: 'Environment', extra_dirs: T.List[str],
-                     libtype: LibType = LibType.PREFER_SHARED) -> T.Optional[T.List[str]]:
+                     libtype: LibType = LibType.PREFER_SHARED, lib_prefix_warning: bool = True) -> T.Optional[T.List[str]]:
         code = 'stop; end program'
-        return self._find_library_impl(libname, env, extra_dirs, code, libtype)
+        return self._find_library_impl(libname, env, extra_dirs, code, libtype, lib_prefix_warning)
 
     def has_multi_arguments(self, args: T.List[str], env: 'Environment') -> T.Tuple[bool, bool]:
         return self._has_multi_arguments(args, env, 'stop; end program')
@@ -155,7 +155,8 @@ class GnuFortranCompiler(GnuCompiler, FortranCompiler):
         self.warn_args = {'0': [],
                           '1': default_warn_args,
                           '2': default_warn_args + ['-Wextra'],
-                          '3': default_warn_args + ['-Wextra', '-Wpedantic', '-fimplicit-none']}
+                          '3': default_warn_args + ['-Wextra', '-Wpedantic', '-fimplicit-none'],
+                          'everything': default_warn_args + ['-Wextra', '-Wpedantic', '-fimplicit-none']}
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = FortranCompiler.get_options(self)
@@ -169,7 +170,7 @@ class GnuFortranCompiler(GnuCompiler, FortranCompiler):
         return opts
 
     def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
-        args = []
+        args: T.List[str] = []
         key = OptionKey('std', machine=self.for_machine, lang=self.language)
         std = options[key]
         if std.value != 'none':
@@ -206,7 +207,7 @@ class GnuFortranCompiler(GnuCompiler, FortranCompiler):
         '''
         code = f'{prefix}\n#include <{hname}>'
         return self.compiles(code, env, extra_args=extra_args,
-                             dependencies=dependencies, mode='preprocess', disable_cache=disable_cache)
+                             dependencies=dependencies, mode=CompileCheckMode.PREPROCESS, disable_cache=disable_cache)
 
 
 class ElbrusFortranCompiler(ElbrusCompiler, FortranCompiler):
@@ -246,7 +247,8 @@ class G95FortranCompiler(FortranCompiler):
         self.warn_args = {'0': [],
                           '1': default_warn_args,
                           '2': default_warn_args + ['-Wextra'],
-                          '3': default_warn_args + ['-Wextra', '-pedantic']}
+                          '3': default_warn_args + ['-Wextra', '-pedantic'],
+                          'everything': default_warn_args + ['-Wextra', '-pedantic']}
 
     def get_module_outdir_args(self, path: str) -> T.List[str]:
         return ['-fmod=' + path]
@@ -299,7 +301,8 @@ class IntelFortranCompiler(IntelGnuLikeCompiler, FortranCompiler):
         self.warn_args = {'0': [],
                           '1': default_warn_args,
                           '2': default_warn_args + ['-warn', 'unused'],
-                          '3': ['-warn', 'all']}
+                          '3': ['-warn', 'all'],
+                          'everything': ['-warn', 'all']}
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = FortranCompiler.get_options(self)
@@ -308,7 +311,7 @@ class IntelFortranCompiler(IntelGnuLikeCompiler, FortranCompiler):
         return opts
 
     def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
-        args = []
+        args: T.List[str] = []
         key = OptionKey('std', machine=self.for_machine, lang=self.language)
         std = options[key]
         stds = {'legacy': 'none', 'f95': 'f95', 'f2003': 'f03', 'f2008': 'f08', 'f2018': 'f18'}
@@ -351,7 +354,8 @@ class IntelClFortranCompiler(IntelVisualStudioLikeCompiler, FortranCompiler):
         self.warn_args = {'0': [],
                           '1': default_warn_args,
                           '2': default_warn_args + ['/warn:unused'],
-                          '3': ['/warn:all']}
+                          '3': ['/warn:all'],
+                          'everything': ['/warn:all']}
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = FortranCompiler.get_options(self)
@@ -360,7 +364,7 @@ class IntelClFortranCompiler(IntelVisualStudioLikeCompiler, FortranCompiler):
         return opts
 
     def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
-        args = []
+        args: T.List[str] = []
         key = OptionKey('std', machine=self.for_machine, lang=self.language)
         std = options[key]
         stds = {'legacy': 'none', 'f95': 'f95', 'f2003': 'f03', 'f2008': 'f08', 'f2018': 'f18'}
@@ -391,7 +395,8 @@ class PathScaleFortranCompiler(FortranCompiler):
         self.warn_args = {'0': [],
                           '1': default_warn_args,
                           '2': default_warn_args,
-                          '3': default_warn_args}
+                          '3': default_warn_args,
+                          'everything': default_warn_args}
 
     def openmp_flags(self) -> T.List[str]:
         return ['-mp']
@@ -412,7 +417,8 @@ class PGIFortranCompiler(PGICompiler, FortranCompiler):
         self.warn_args = {'0': [],
                           '1': default_warn_args,
                           '2': default_warn_args,
-                          '3': default_warn_args + ['-Mdclchk']}
+                          '3': default_warn_args + ['-Mdclchk'],
+                          'everything': default_warn_args + ['-Mdclchk']}
 
     def language_stdlib_only_link_flags(self, env: 'Environment') -> T.List[str]:
         # TODO: needs default search path added
@@ -437,7 +443,8 @@ class NvidiaHPC_FortranCompiler(PGICompiler, FortranCompiler):
         self.warn_args = {'0': [],
                           '1': default_warn_args,
                           '2': default_warn_args,
-                          '3': default_warn_args + ['-Mdclchk']}
+                          '3': default_warn_args + ['-Mdclchk'],
+                          'everything': default_warn_args + ['-Mdclchk']}
 
 
 class FlangFortranCompiler(ClangCompiler, FortranCompiler):
@@ -456,7 +463,8 @@ class FlangFortranCompiler(ClangCompiler, FortranCompiler):
         self.warn_args = {'0': [],
                           '1': default_warn_args,
                           '2': default_warn_args,
-                          '3': default_warn_args}
+                          '3': default_warn_args,
+                          'everything': default_warn_args}
 
     def language_stdlib_only_link_flags(self, env: 'Environment') -> T.List[str]:
         # We need to apply the search prefix here, as these link arguments may
@@ -488,7 +496,8 @@ class Open64FortranCompiler(FortranCompiler):
         self.warn_args = {'0': [],
                           '1': default_warn_args,
                           '2': default_warn_args,
-                          '3': default_warn_args}
+                          '3': default_warn_args,
+                          'everything': default_warn_args}
 
     def openmp_flags(self) -> T.List[str]:
         return ['-mp']
@@ -511,6 +520,7 @@ class NAGFortranCompiler(FortranCompiler):
             '1': [],
             '2': [],
             '3': [],
+            'everything': [],
         }
 
     def get_always_args(self) -> T.List[str]:

@@ -22,8 +22,9 @@ description: |
   *(since 0.56.0)* The build machine compilers for the specified
   languages are not required.
 
-  Supported values for languages are `c`, `cpp` (for `C++`), `cuda`, `d`,
-  `objc`, `objcpp`, `fortran`, `java`, `cs` (for `C#`), `vala` and `rust`.
+  Supported values for languages are `c`, `cpp` (for `C++`), `cuda`,
+  `cython`, `d`, `objc`, `objcpp`, `fortran`, `java`, `cs` (for `C#`),
+  `vala` and `rust`.
 
 posargs:
   project_name:
@@ -37,9 +38,9 @@ varargs:
 
 kwargs:
   default_options:
-    type: list[str]
+    type: list[str] | dict[str | bool | int | list[str]]
     description: |
-      Accecpts strings in the form `key=value`
+      Accepts strings in the form `key=value`
       which have the same format as options to `meson configure`.
       For example to set the default project type you would
       set this: `default_options : ['buildtype=debugoptimized']`. Note
@@ -47,6 +48,13 @@ kwargs:
       time. Global options such as `buildtype` can only be specified in
       the master project, settings in subprojects are ignored. Project
       specific options are used normally even in subprojects.
+
+      Note that some options can override the default behavior;
+      for example, using `c_args` here means that the `CFLAGS`
+      environment variable is not used. Consider using
+      [[add_project_arguments()]] instead.
+
+      *(since 1.2.0)*: A dictionary may now be passed.
 
   version:
     type: str | file
@@ -76,7 +84,7 @@ kwargs:
 
       For backwards compatibility reasons you can also pass an array of
       licenses here. This is not recommended, as it is ambiguous: `license :
-      ['Apache-2.0', 'GPL-2.0-only']` instead use an SPDX espression: `license
+      ['Apache-2.0', 'GPL-2.0-only']` instead use an SPDX expression: `license
       : 'Apache-2.0 OR GPL-2.0-only'`, which makes it clear that the license
       mean OR, not AND.
 
@@ -84,6 +92,22 @@ kwargs:
       manifest. Meson does not do any license validation, you are responsible
       for verifying that you abide by all licensing terms. You can access the
       value in your Meson build files with `meson.project_license()`.
+
+  license_files:
+    type: str | list[str]
+    since: 1.1.0
+    description: |
+      Takes a string or array of strings with the paths to the license file(s)
+      the code is under.
+
+      This enhances the value of the `license` kwarg by allowing to specify both
+      the short license name and the full license text. Usually this would be
+      something like `license_files: ['COPYING']`.
+
+      Note that the files are informal and are only installed with the dependency
+      manifest. Meson does not do any license validation, you are responsible
+      for verifying that you abide by all licensing terms. You can access the
+      value in your Meson build files with [[meson.project_license_files]].
 
   subproject_dir:
     type: str

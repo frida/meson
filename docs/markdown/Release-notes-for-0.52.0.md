@@ -60,7 +60,7 @@ improved, and one can reasonably expect projects to compile.
 ## Splitting of Compiler.get_function_attribute('visibility')
 
 On macOS there is no `protected` visibility, which results in the
-visbility check always failing. 0.52.0 introduces two changes to
+visibility check always failing. 0.52.0 introduces two changes to
 improve this situation:
 
 1. the "visibility" check no longer includes "protected"
@@ -94,7 +94,7 @@ linker internal re-architecture this has become possible
 
 ## Compiler and dynamic linker representation split
 
-0.52.0 includes a massive refactor of the representaitons of compilers to
+0.52.0 includes a massive refactor of the representations of compilers to
 tease apart the representations of compilers and dynamic linkers (ld). This
 fixes a number of compiler/linker combinations. In particular this fixes
 use GCC and vanilla clang on macOS.
@@ -160,7 +160,7 @@ lib2 = static_library(other_sources, link_whole : lib1, install : true)
 ```
 - `link_with:` of a static library with an uninstalled static library. In the
 example below, lib2 now implicitly promote `link_with:` to `link_whole:` because
-the installed lib2 would oterhwise be unusable.
+the installed lib2 would otherwise be unusable.
 ```meson
 lib1 = static_library(sources, install : false)
 lib2 = static_library(sources, link_with : lib1, install : true)

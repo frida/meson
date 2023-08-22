@@ -7,7 +7,7 @@ short-description: Configuring a pre-generated build directory
 Often you want to change the settings of your build after it has been
 generated. For example you might want to change from a debug build
 into a release build, set custom compiler flags, change the build
-options provided in your `meson_options.txt` file and so on.
+options provided in your `meson.options` file and so on.
 
 The main tool for this is the `meson configure` command.
 
@@ -34,7 +34,7 @@ a sample output for a simple project.
       prefer_static   false         [true, false]                                              Whether to try static linking before shared linking
       strip           false         [true, false]                                              Strip targets on install
       unity           off           [on, off, subprojects]                                     Unity build
-      warning_level   1             [0, 1, 2, 3]                                               Compiler warning level to use
+      warning_level   1             [0, 1, 2, 3, everything]                                   Compiler warning level to use
       werror          false         [true, false]                                              Treat warnings as errors
 
     Backend options:

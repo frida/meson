@@ -12,6 +12,7 @@ from mesonbuild.mesonlib import version_compare
 modules = [
     # fully typed submodules
     # 'mesonbuild/ast/',
+    'mesonbuild/cargo/',
     'mesonbuild/cmake/',
     'mesonbuild/compilers/',
     'mesonbuild/dependencies/',
@@ -19,6 +20,7 @@ modules = [
     'mesonbuild/interpreterbase/',
     'mesonbuild/linkers/',
     'mesonbuild/scripts/',
+    'mesonbuild/templates/',
     'mesonbuild/wrap/',
 
     # specific files
@@ -33,13 +35,17 @@ modules = [
     'mesonbuild/interpreter/type_checking.py',
     'mesonbuild/mcompile.py',
     'mesonbuild/mdevenv.py',
+    'mesonbuild/utils/core.py',
     'mesonbuild/utils/platform.py',
     'mesonbuild/utils/universal.py',
+    'mesonbuild/mconf.py',
+    'mesonbuild/mdist.py',
     'mesonbuild/minit.py',
     'mesonbuild/minstall.py',
     'mesonbuild/mintro.py',
     'mesonbuild/mlog.py',
     'mesonbuild/msubprojects.py',
+    'mesonbuild/modules/__init__.py',
     'mesonbuild/modules/external_project.py',
     'mesonbuild/modules/fs.py',
     'mesonbuild/modules/gnome.py',
@@ -50,6 +56,9 @@ modules = [
     'mesonbuild/modules/modtest.py',
     'mesonbuild/modules/pkgconfig.py',
     'mesonbuild/modules/qt.py',
+    'mesonbuild/modules/qt4.py',
+    'mesonbuild/modules/qt5.py',
+    'mesonbuild/modules/qt6.py',
     'mesonbuild/modules/rust.py',
     'mesonbuild/modules/sourceset.py',
     'mesonbuild/modules/wayland.py',
@@ -88,15 +97,16 @@ def main() -> int:
     check_mypy()
 
     root = Path(__file__).absolute().parent
-    args = []  # type: T.List[str]
 
     parser = argparse.ArgumentParser(description='Process some integers.')
     parser.add_argument('files', nargs='*')
+    parser.add_argument('--mypy', help='path to mypy executable')
     parser.add_argument('-q', '--quiet', action='store_true', help='do not print informational messages')
     parser.add_argument('-p', '--pretty', action='store_true', help='pretty print mypy errors')
     parser.add_argument('-C', '--clear', action='store_true', help='clear the terminal before running mypy')
+    parser.add_argument('--allver', action='store_true', help='Check all supported versions of python')
 
-    opts = parser.parse_args()
+    opts, args = parser.parse_known_args()
     if opts.pretty:
         args.append('--pretty')
 
@@ -117,13 +127,18 @@ def main() -> int:
         to_check.extend(modules)
 
     if to_check:
+        command = [opts.mypy] if opts.mypy else [sys.executable, '-m', 'mypy']
         if not opts.quiet:
             print('Running mypy (this can take some time) ...')
-        p = subprocess.run(
-            [sys.executable, '-m', 'mypy'] + args + to_check,
-            cwd=root,
-        )
-        return p.returncode
+        retcode = subprocess.run(command + args + to_check, cwd=root).returncode
+        if opts.allver and retcode == 0:
+            for minor in range(7, sys.version_info[1]):
+                if not opts.quiet:
+                    print(f'Checking mypy with python version: 3.{minor}')
+                p = subprocess.run(command + args + to_check + [f'--python-version=3.{minor}'], cwd=root)
+                if p.returncode != 0:
+                    retcode = p.returncode
+        return retcode
     else:
         if not opts.quiet:
             print('nothing to do...')

@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 import os
 import subprocess
@@ -47,7 +48,7 @@ def run(args: T.List[str]) -> int:
     tool_name = args[0]
     srcdir_name = args[1]
     os.chdir(srcdir_name)
-    assert tool_name in ['cscope', 'ctags', 'etags']
+    assert tool_name in {'cscope', 'ctags', 'etags'}
     res = globals()[tool_name]()
     assert isinstance(res, int)
     return res

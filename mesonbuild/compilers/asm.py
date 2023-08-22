@@ -1,13 +1,17 @@
 import os
 import typing as T
 
-from ..mesonlib import EnvironmentException, get_meson_command
+from ..mesonlib import EnvironmentException, OptionKey, get_meson_command
 from .compilers import Compiler
+from .mixins.metrowerks import MetrowerksCompiler, mwasmarm_instruction_set_args, mwasmeppc_instruction_set_args
 
 if T.TYPE_CHECKING:
     from ..environment import Environment
+    from ..linkers.linkers import DynamicLinker
+    from ..mesonlib import MachineChoice
+    from ..envconfig import MachineInfo
 
-nasm_optimization_args = {
+nasm_optimization_args: T.Dict[str, T.List[str]] = {
     'plain': [],
     '0': ['-O0'],
     'g': ['-O0'],
@@ -15,12 +19,29 @@ nasm_optimization_args = {
     '2': ['-Ox'],
     '3': ['-Ox'],
     's': ['-Ox'],
-}  # type: T.Dict[str, T.List[str]]
+}
 
 
 class NasmCompiler(Compiler):
     language = 'nasm'
     id = 'nasm'
+
+    # https://learn.microsoft.com/en-us/cpp/c-runtime-library/crt-library-features
+    crt_args: T.Dict[str, T.List[str]] = {
+        'none': [],
+        'md': ['/DEFAULTLIB:ucrt.lib', '/DEFAULTLIB:vcruntime.lib', '/DEFAULTLIB:msvcrt.lib'],
+        'mdd': ['/DEFAULTLIB:ucrtd.lib', '/DEFAULTLIB:vcruntimed.lib', '/DEFAULTLIB:msvcrtd.lib'],
+        'mt': ['/DEFAULTLIB:libucrt.lib', '/DEFAULTLIB:libvcruntime.lib', '/DEFAULTLIB:libcmt.lib'],
+        'mtd': ['/DEFAULTLIB:libucrtd.lib', '/DEFAULTLIB:libvcruntimed.lib', '/DEFAULTLIB:libcmtd.lib'],
+    }
+
+    def __init__(self, ccache: T.List[str], exelist: T.List[str], version: str,
+                 for_machine: 'MachineChoice', info: 'MachineInfo',
+                 linker: T.Optional['DynamicLinker'] = None,
+                 full_version: T.Optional[str] = None, is_cross: bool = False):
+        super().__init__(ccache, exelist, version, for_machine, info, linker, full_version, is_cross)
+        if 'link' in self.linker.id:
+            self.base_options.add(OptionKey('b_vscrt'))
 
     def needs_static_linker(self) -> bool:
         return True
@@ -47,6 +68,14 @@ class NasmCompiler(Compiler):
     def get_output_args(self, outputname: str) -> T.List[str]:
         return ['-o', outputname]
 
+    def unix_args_to_native(self, args: T.List[str]) -> T.List[str]:
+        outargs: T.List[str] = []
+        for arg in args:
+            if arg == '-pthread':
+                continue
+            outargs.append(arg)
+        return outargs
+
     def get_optimization_args(self, optimization_level: str) -> T.List[str]:
         return nasm_optimization_args[optimization_level]
 
@@ -61,7 +90,7 @@ class NasmCompiler(Compiler):
         return 'd'
 
     def get_dependency_gen_args(self, outtarget: str, outfile: str) -> T.List[str]:
-        return ['-MD', '-MQ', outtarget, '-MF', outfile]
+        return ['-MD', outfile, '-MQ', outtarget]
 
     def sanity_check(self, work_dir: str, environment: 'Environment') -> None:
         if self.info.cpu_family not in {'x86', 'x86_64'}:
@@ -89,8 +118,41 @@ class NasmCompiler(Compiler):
     def get_crt_compile_args(self, crt_val: str, buildtype: str) -> T.List[str]:
         return []
 
+    # Linking ASM-only objects into an executable or DLL
+    # require this, otherwise it'll fail to find
+    # _WinMain or _DllMainCRTStartup.
+    def get_crt_link_args(self, crt_val: str, buildtype: str) -> T.List[str]:
+        if not self.info.is_windows():
+            return []
+        if crt_val in self.crt_args:
+            return self.crt_args[crt_val]
+        assert crt_val in {'from_buildtype', 'static_from_buildtype'}
+        dbg = 'mdd'
+        rel = 'md'
+        if crt_val == 'static_from_buildtype':
+            dbg = 'mtd'
+            rel = 'mt'
+        # Match what build type flags used to do.
+        if buildtype == 'plain':
+            return []
+        elif buildtype == 'debug':
+            return self.crt_args[dbg]
+        elif buildtype == 'debugoptimized':
+            return self.crt_args[rel]
+        elif buildtype == 'release':
+            return self.crt_args[rel]
+        elif buildtype == 'minsize':
+            return self.crt_args[rel]
+        else:
+            assert buildtype == 'custom'
+            raise EnvironmentException('Requested C runtime based on buildtype, but buildtype is "custom".')
+
 class YasmCompiler(NasmCompiler):
     id = 'yasm'
+
+    def get_optimization_args(self, optimization_level: str) -> T.List[str]:
+        # Yasm is incompatible with Nasm optimization flags.
+        return []
 
     def get_exelist(self, ccache: bool = True) -> T.List[str]:
         # Wrap yasm executable with an internal script that will write depfile.
@@ -221,3 +283,53 @@ class MasmARMCompiler(Compiler):
 
     def depfile_for_object(self, objfile: str) -> T.Optional[str]:
         return None
+
+
+class MetrowerksAsmCompiler(MetrowerksCompiler, Compiler):
+    language = 'nasm'
+
+    def __init__(self, ccache: T.List[str], exelist: T.List[str], version: str,
+                 for_machine: 'MachineChoice', info: 'MachineInfo',
+                 linker: T.Optional['DynamicLinker'] = None,
+                 full_version: T.Optional[str] = None, is_cross: bool = False):
+        Compiler.__init__(self, ccache, exelist, version, for_machine, info, linker, full_version, is_cross)
+        MetrowerksCompiler.__init__(self)
+
+        self.warn_args: T.Dict[str, T.List[str]] = {
+            '0': [],
+            '1': [],
+            '2': [],
+            '3': [],
+            'everything': []}
+        self.can_compile_suffixes.add('s')
+
+    def get_crt_compile_args(self, crt_val: str, buildtype: str) -> T.List[str]:
+        return []
+
+    def get_pic_args(self) -> T.List[str]:
+        return []
+
+    def needs_static_linker(self) -> bool:
+        return True
+
+
+class MetrowerksAsmCompilerARM(MetrowerksAsmCompiler):
+    id = 'mwasmarm'
+
+    def get_instruction_set_args(self, instruction_set: str) -> T.Optional[T.List[str]]:
+        return mwasmarm_instruction_set_args.get(instruction_set, None)
+
+    def sanity_check(self, work_dir: str, environment: 'Environment') -> None:
+        if self.info.cpu_family not in {'arm'}:
+            raise EnvironmentException(f'ASM compiler {self.id!r} does not support {self.info.cpu_family} CPU family')
+
+
+class MetrowerksAsmCompilerEmbeddedPowerPC(MetrowerksAsmCompiler):
+    id = 'mwasmeppc'
+
+    def get_instruction_set_args(self, instruction_set: str) -> T.Optional[T.List[str]]:
+        return mwasmeppc_instruction_set_args.get(instruction_set, None)
+
+    def sanity_check(self, work_dir: str, environment: 'Environment') -> None:
+        if self.info.cpu_family not in {'ppc'}:
+            raise EnvironmentException(f'ASM compiler {self.id!r} does not support {self.info.cpu_family} CPU family')

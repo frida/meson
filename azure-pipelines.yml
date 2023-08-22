@@ -19,7 +19,7 @@ trigger:
     include:
     - 'master'
     # Release branches
-    - '0.*'
+    - '1.*'
   paths:
     include:
       - 'mesonbuild'
@@ -94,6 +94,8 @@ jobs:
   - bash: ci/intel-scripts/cache_exclude_windows.sh
     displayName: exclude unused files from cache
     condition: and(ne(variables.CACHE_RESTORED, 'true'), eq(variables.ifort, 'true'))
+  - script: choco install -y nasm
+    displayName: install NASM
   - task: UsePythonVersion@0
     inputs:
       versionSpec: '3.7'
@@ -112,3 +114,8 @@ jobs:
       filePath: .\ci\run.ps1
     env:
       MESON_CI_JOBNAME: azure-$(System.JobName)
+  - task: PowerShell@2
+    displayName: Gathering coverage report
+    inputs:
+      targetType: 'filePath'
+      filePath: .\ci\coverage.ps1

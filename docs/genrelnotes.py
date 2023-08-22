@@ -20,6 +20,7 @@ import argparse
 import subprocess
 import re
 import shutil
+import datetime
 from pathlib import Path
 
 RELNOTE_TEMPLATE = '''---
@@ -49,7 +50,10 @@ def add_to_sitemap(sitemap, output_sitemap):
                 m = re.match(r'[\s]*Release-notes-for-([0-9]+)\.([0-9]+)\.([0-9]+)\.md', line)
                 if m:
                     from_version = f'{m[1]}.{m[2]}.{m[3]}'
-                    to_version = f'{m[1]}.{int(m[2]) + 1}.{m[3]}'
+                    if from_version == '0.64.0':
+                        to_version = '1.0.0'
+                    else:
+                        to_version = f'{m[1]}.{int(m[2]) + 1}.{m[3]}'
                     new_line = line.replace(from_version, to_version)
                     relnotes = new_line.strip()
                     s_f.write(new_line)
@@ -70,6 +74,10 @@ def generate(relnotes, to_version, source_dir, output_dir):
     output.parent.mkdir(exist_ok=True, parents=True)
     with output.open('w', encoding='utf-8') as ofile:
         ofile.write(RELNOTE_TEMPLATE.format(title, to_version, title_suffix))
+        if not output_dir:
+            date = datetime.date.today()
+            date_str = date.strftime("%d %B %Y")
+            ofile.write(f'Meson {to_version} was released on {date_str}\n')
         for snippetfile in sorted(Path(source_dir, 'markdown/snippets').glob('*.md')):
             snippet = snippetfile.read_text(encoding='utf-8')
             ofile.write(snippet)

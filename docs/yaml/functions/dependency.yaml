@@ -66,7 +66,7 @@ varargs:
   since: 0.60.0
   min_varargs: 1
   description: |
-    The names of the dependency too look up. The dependencies are looked up in
+    The names of the dependency to look up. The dependencies are looked up in
     the order they are provided here. The first found dependency will then be
     used. The fallback subproject will be used only if none of the names are
     found on the system. Once one of the name has been found, all other names
@@ -78,14 +78,15 @@ varargs:
 
 kwargs:
   default_options:
-    type: list[str]
+    type: list[str] | dict[str | bool | int | list[str]]
     since: 0.38.0
     description: |
       An array of default option values
-      that override those set in the subproject's `meson_options.txt`
+      that override those set in the subproject's `meson.options`
       (like `default_options` in [[project]], they only have
       effect when Meson is run for the first time, and command line
       arguments override any default options in build files)
+      *(since 1.2.0)*: A dictionary may now be passed.
 
   allow_fallback:
     type: bool
@@ -158,9 +159,13 @@ kwargs:
     type: bool | feature
     default: true
     description: |
-      when set to false, Meson will proceed with the build
-      even if the dependency is not found. *(since 0.47.0)* The value of a
-      [`feature`](Build-options.md#features) option can also be passed.
+      When set to `false`, Meson will proceed with the build
+      even if the dependency is not found.
+
+      When set to a [`feature`](Build-options.md#features) option, the feature
+      will control if it is searched and whether to fail if not found.
+
+      *(since 0.47.0)* The value of a `feature` option can also be passed.
 
   static:
     type: bool

@@ -25,6 +25,8 @@ These are return values of the `get_id` (Compiler family) and
 | lcc       | Elbrus C/C++/Fortran Compiler    |                 |
 | llvm      | LLVM-based compiler (Swift, D)   |                 |
 | mono      | Xamarin C# compiler              |                 |
+| mwccarm   | Metrowerks C/C++ compiler for Embedded ARM         |                 |
+| mwcceppc  | Metrowerks C/C++ compiler for Embedded PowerPC     |                 |
 | msvc      | Microsoft Visual Studio          | msvc            |
 | nagfor    | The NAG Fortran compiler         |                 |
 | nvidia_hpc| NVidia HPC SDK compilers         |                 |
@@ -42,6 +44,8 @@ These are return values of the `get_id` (Compiler family) and
 | yasm      | The YASM compiler (Since 0.64.0) |                 |
 | ml        | Microsoft Macro Assembler for x86 and x86_64 (Since 0.64.0) | msvc |
 | armasm    | Microsoft Macro Assembler for ARM and AARCH64 (Since 0.64.0) | |
+| mwasmarm        | Metrowerks Assembler for Embedded ARM | |
+| mwasmeppc       | Metrowerks Assembler for Embedded PowerPC | |
 
 ## Linker ids
 
@@ -56,6 +60,7 @@ These are return values of the `get_linker_id` method in a compiler object.
 | ld.solaris | Solaris and illumos                         |
 | ld.wasm    | emscripten's wasm-ld linker                 |
 | ld64       | Apple ld64                                  |
+| ld64.lld   | The LLVM linker, with the ld64 interface    |
 | link       | MSVC linker                                 |
 | lld-link   | The LLVM linker, with the MSVC interface    |
 | xilink     | Used with Intel-cl only, MSVC like          |
@@ -68,6 +73,8 @@ These are return values of the `get_linker_id` method in a compiler object.
 | pgi        | Portland/Nvidia PGI                         |
 | nvlink     | Nvidia Linker used with cuda                |
 | ccomp      | CompCert used as the linker driver          |
+| mwldarm    | The Metrowerks Linker with the ARM interface, used with mwccarm only |
+| mwldeppc   | The Metrowerks Linker with the PowerPC interface, used with mwcceppc only |
 
 For languages that don't have separate dynamic linkers such as C# and Java, the
 `get_linker_id` will return the compiler name.
@@ -143,7 +150,7 @@ These are provided by the `.system()` method call.
 | cygwin              | The Cygwin environment for Windows |
 | darwin              | Either OSX or iOS |
 | dragonfly           | DragonFly BSD |
-| emscripten          | Emscripten's Javascript environment |
+| emscripten          | Emscripten's JavaScript environment |
 | freebsd             | FreeBSD and its derivatives |
 | gnu                 | GNU Hurd |
 | haiku               | |
@@ -156,9 +163,45 @@ These are provided by the `.system()` method call.
 Any string not listed above is not guaranteed to remain stable in
 future releases.
 
+## Kernel names (since 1.2.0)
+
+Native names as returned by the `.kernel()` method.
+
+| Value               | Comment                         |
+| -----               | -------                         |
+| linux   | |
+| freebsd | |
+| openbsd | |
+| netbsd  | |
+| nt      | |
+| xnu                 | Kernel of various Apple OSes    |
+| illumos             | Kernel derived from OpenSolaris by community efforts |
+| solaris             | Kernel derived from OpenSolaris by Oracle |
+| dragonfly | |
+| haiku| |
+| none                 | For e.g. bare metal embedded    |
+
+
+## Subsystem names (since 1.2.0)
+
+A more specific description of the system in question. Most values are
+meant to be used in cross files only, as those platforms can not run
+Meson natively.
+
+| Value               | Comment                         |
+| -----               | -------                         |
+| macos               | Apple macOS (formerly OSX)      |
+| ios                 | Apple iOS                       |
+| ios-simulator       |                                 |
+| tvos                | Apple tvOS                      |
+| tvos-simulator      |                                 |
+| watchos             | Apple watchOS                   |
+| watchos-simulator   |                                 |
+
 ## Language arguments parameter names
 
-These are the parameter names for passing language specific arguments to your build target.
+These are the parameter names for passing language specific arguments
+to your build target.
 
 | Language      | compiler name | linker name       |
 | ------------- | ------------- | ----------------- |
@@ -258,6 +301,7 @@ which are supported by GCC, Clang, and other compilers.
 | sentinel⁵                |
 | unused                   |
 | used                     |
+| vector_size⁶             |
 | visibility*              |
 | visibility:default†      |
 | visibility:hidden†       |
@@ -279,6 +323,8 @@ which are supported by GCC, Clang, and other compilers.
 ⁴ *New in 0.62.0*
 
 ⁵ *New in 0.63.0*
+
+⁶ *New in 1.1.0*
 
 ### MSVC __declspec
 
@@ -325,7 +371,7 @@ machine](#Environment-variables-per-machine) section for details.
 | C#            | CSC      | CSC       | The linker is the compiler                  |
 | nasm          | NASM     |           | Uses the C linker                           |
 
-*The old environment variales are still supported, but are deprecated
+*The old environment variables are still supported, but are deprecated
 and will be removed in a future version of Meson.*
 
 ## Environment variables per machine

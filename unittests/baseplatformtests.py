@@ -15,6 +15,7 @@
 from pathlib import PurePath
 from unittest import mock, TestCase, SkipTest
 import json
+import io
 import os
 import re
 import subprocess
@@ -32,7 +33,7 @@ import mesonbuild.environment
 import mesonbuild.coredata
 import mesonbuild.modules.gnome
 from mesonbuild.mesonlib import (
-    is_cygwin, join_args, windows_proof_rmtree, python_command
+    is_cygwin, join_args, split_args, windows_proof_rmtree, python_command
 )
 import mesonbuild.modules.pkgconfig
 
@@ -40,9 +41,14 @@ import mesonbuild.modules.pkgconfig
 from run_tests import (
     Backend, ensure_backend_detects_changes, get_backend_commands,
     get_builddir_target_args, get_meson_script, run_configure_inprocess,
-    run_mtest_inprocess
+    run_mtest_inprocess, handle_meson_skip_test,
 )
 
+
+# magic attribute used by unittest.result.TestResult._is_relevant_tb_level
+# This causes tracebacks to hide these internal implementation details,
+# e.g. for assertXXX helpers.
+__unittest = True
 
 class BasePlatformTests(TestCase):
     prefix = '/usr'
@@ -54,8 +60,10 @@ class BasePlatformTests(TestCase):
         src_root = str(PurePath(__file__).parents[1])
         self.src_root = src_root
         # Get the backend
-        self.backend = getattr(Backend, os.environ['MESON_UNIT_TEST_BACKEND'])
-        self.meson_args = ['--backend=' + self.backend.name]
+        self.backend_name = os.environ['MESON_UNIT_TEST_BACKEND']
+        backend_type = 'vs' if self.backend_name.startswith('vs') else self.backend_name
+        self.backend = getattr(Backend, backend_type)
+        self.meson_args = ['--backend=' + self.backend_name]
         self.meson_native_files = []
         self.meson_cross_files = []
         self.meson_command = python_command + [get_meson_script()]
@@ -69,6 +77,7 @@ class BasePlatformTests(TestCase):
             self.uninstall_command = get_backend_commands(self.backend)
         # Test directories
         self.common_test_dir = os.path.join(src_root, 'test cases/common')
+        self.python_test_dir = os.path.join(src_root, 'test cases/python')
         self.rust_test_dir = os.path.join(src_root, 'test cases/rust')
         self.vala_test_dir = os.path.join(src_root, 'test cases/vala')
         self.framework_test_dir = os.path.join(src_root, 'test cases/frameworks')
@@ -86,6 +95,7 @@ class BasePlatformTests(TestCase):
             # VS doesn't have a stable output when no changes are done
             # XCode backend is untested with unit tests, help welcome!
             self.no_rebuild_stdout = [f'UNKNOWN BACKEND {self.backend.name!r}']
+        os.environ['COLUMNS'] = '80'
 
         self.builddirs = []
         self.new_builddir()
@@ -120,13 +130,17 @@ class BasePlatformTests(TestCase):
         newdir = os.path.realpath(newdir)
         self.change_builddir(newdir)
 
-    def _get_meson_log(self) -> T.Optional[str]:
+    def _open_meson_log(self) -> io.TextIOWrapper:
         log = os.path.join(self.logdir, 'meson-log.txt')
-        if not os.path.isfile(log):
-            print(f"{log!r} doesn't exist", file=sys.stderr)
+        return open(log, encoding='utf-8')
+
+    def _get_meson_log(self) -> T.Optional[str]:
+        try:
+            with self._open_meson_log() as f:
+                return f.read()
+        except FileNotFoundError as e:
+            print(f"{e.filename!r} doesn't exist", file=sys.stderr)
             return None
-        with open(log, encoding='utf-8') as f:
-            return f.read()
 
     def _print_meson_log(self) -> None:
         log = self._get_meson_log()
@@ -157,22 +171,23 @@ class BasePlatformTests(TestCase):
             env = os.environ.copy()
             env.update(override_envvars)
 
-        p = subprocess.run(command, stdout=subprocess.PIPE,
-                           stderr=subprocess.STDOUT if stderr else subprocess.PIPE,
-                           env=env,
-                           encoding='utf-8',
-                           text=True, cwd=workdir, timeout=60 * 5)
+        proc = subprocess.run(command, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT if stderr else subprocess.PIPE,
+                              env=env,
+                              encoding='utf-8',
+                              text=True, cwd=workdir, timeout=60 * 5)
         print('$', join_args(command))
         print('stdout:')
-        print(p.stdout)
+        print(proc.stdout)
         if not stderr:
             print('stderr:')
-            print(p.stderr)
-        if p.returncode != 0:
-            if 'MESON_SKIP_TEST' in p.stdout:
-                raise SkipTest('Project requested skipping.')
-            raise subprocess.CalledProcessError(p.returncode, command, output=p.stdout)
-        return p.stdout
+            print(proc.stderr)
+        if proc.returncode != 0:
+            skipped, reason = handle_meson_skip_test(proc.stdout)
+            if skipped:
+                raise SkipTest(f'Project requested skipping: {reason}')
+            raise subprocess.CalledProcessError(proc.returncode, command, output=proc.stdout)
+        return proc.stdout
 
     def init(self, srcdir, *,
              extra_args=None,
@@ -193,7 +208,8 @@ class BasePlatformTests(TestCase):
             extra_args = []
         if not isinstance(extra_args, list):
             extra_args = [extra_args]
-        args = [srcdir, self.builddir]
+        build_and_src_dir_args = [self.builddir, srcdir]
+        args = []
         if default_args:
             args += ['--prefix', self.prefix]
             if self.libdir:
@@ -205,7 +221,7 @@ class BasePlatformTests(TestCase):
         self.privatedir = os.path.join(self.builddir, 'meson-private')
         if inprocess:
             try:
-                returncode, out, err = run_configure_inprocess(['setup'] + self.meson_args + args + extra_args, override_envvars)
+                returncode, out, err = run_configure_inprocess(['setup'] + self.meson_args + args + extra_args + build_and_src_dir_args, override_envvars)
             except Exception as e:
                 if not allow_fail:
                     self._print_meson_log()
@@ -216,11 +232,12 @@ class BasePlatformTests(TestCase):
             finally:
                 # Close log file to satisfy Windows file locking
                 mesonbuild.mlog.shutdown()
-                mesonbuild.mlog.log_dir = None
-                mesonbuild.mlog.log_file = None
+                mesonbuild.mlog._logger.log_dir = None
+                mesonbuild.mlog._logger.log_file = None
 
-            if 'MESON_SKIP_TEST' in out:
-                raise SkipTest('Project requested skipping.')
+            skipped, reason = handle_meson_skip_test(out)
+            if skipped:
+                raise SkipTest(f'Project requested skipping: {reason}')
             if returncode != 0:
                 self._print_meson_log()
                 print('Stdout:\n')
@@ -231,9 +248,7 @@ class BasePlatformTests(TestCase):
                     raise RuntimeError('Configure failed')
         else:
             try:
-                out = self._run(self.setup_command + args + extra_args, override_envvars=override_envvars, workdir=workdir)
-            except SkipTest:
-                raise SkipTest('Project requested skipping: ' + srcdir)
+                out = self._run(self.setup_command + args + extra_args + build_and_src_dir_args, override_envvars=override_envvars, workdir=workdir)
             except Exception:
                 if not allow_fail:
                     self._print_meson_log()
@@ -317,8 +332,12 @@ class BasePlatformTests(TestCase):
                     each['command'] = compiler + ' ' + f.read()
         return contents
 
+    def get_meson_log_raw(self):
+        with self._open_meson_log() as f:
+            return f.read()
+
     def get_meson_log(self):
-        with open(os.path.join(self.builddir, 'meson-logs', 'meson-log.txt'), encoding='utf-8') as f:
+        with self._open_meson_log() as f:
             return f.readlines()
 
     def get_meson_log_compiler_checks(self):
@@ -326,19 +345,20 @@ class BasePlatformTests(TestCase):
         Fetch a list command-lines run by meson for compiler checks.
         Each command-line is returned as a list of arguments.
         '''
-        log = self.get_meson_log()
-        prefix = 'Command line:'
-        cmds = [l[len(prefix):].split() for l in log if l.startswith(prefix)]
-        return cmds
+        prefix = 'Command line: `'
+        suffix = '` -> 0\n'
+        with self._open_meson_log() as log:
+            cmds = [split_args(l[len(prefix):-len(suffix)]) for l in log if l.startswith(prefix)]
+            return cmds
 
     def get_meson_log_sanitychecks(self):
         '''
         Same as above, but for the sanity checks that were run
         '''
-        log = self.get_meson_log()
         prefix = 'Sanity check compiler command line:'
-        cmds = [l[len(prefix):].split() for l in log if l.startswith(prefix)]
-        return cmds
+        with self._open_meson_log() as log:
+            cmds = [l[len(prefix):].split() for l in log if l.startswith(prefix)]
+            return cmds
 
     def introspect(self, args):
         if isinstance(args, str):
@@ -472,3 +492,6 @@ class BasePlatformTests(TestCase):
     def assertPathDoesNotExist(self, path):
         m = f'Path {path!r} should not exist'
         self.assertFalse(os.path.exists(path), msg=m)
+
+    def assertLength(self, val, length):
+        assert len(val) == length, f'{val} is not length {length}'

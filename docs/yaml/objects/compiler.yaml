@@ -78,13 +78,15 @@ methods:
   description: You have found a bug if you can see this!
   kwargs:
     prefix:
-      type: str
+      type: str | list[str]
       description: |
         Used to add `#include`s and other things that are required
-        for the symbol to be declared. System definitions should be
-        passed via compiler args (eg: `_GNU_SOURCE` is often required for
-        some symbols to be exposed on Linux, and it should be passed via
-        `args` keyword argument).
+        for the symbol to be declared. Since 1.0.0 an array is accepted
+        too. When an array is passed, the items are concatenated together
+        separated by a newline.
+        System definitions should be passed via compiler args
+        (eg: `_GNU_SOURCE` is often required for some symbols to be exposed
+        on Linux, and it should be passed via `args` keyword argument).
 
 - name: _no_builtin_args
   returns: void
@@ -125,6 +127,7 @@ methods:
     - compiler._dependencies
     - compiler._no_builtin_args
     - compiler._name
+    - compiler._werror
 
 - name: _header
   returns: void
@@ -135,8 +138,35 @@ methods:
       type: bool | feature
       default: false
       since: 0.50.0
-      description: If set to `true`, Meson will halt if the header check fails.
+      description:
+        When set to `true`, Meson will halt if the header check fails.
 
+        When set to a [`feature`](Build-options.md#features) option, the feature
+        will control if it is searched and whether to fail if not found.
+
+- name: _required
+  returns: void
+  description: You have found a bug if you can see this!
+  kwargs:
+    required:
+      type: bool | feature
+      default: false
+      since: 1.3.0
+      description:
+        When set to `true`, Meson will halt if the check fails.
+
+        When set to a [`feature`](Build-options.md#features) option, the feature
+        will control if it is searched and whether to fail if not found.
+
+- name: _werror
+  returns: void
+  description: You have found a bug if you can see this!
+  kwargs:
+    werror:
+      type: bool
+      default: false
+      description: When set to `true`, compiler warnings are treated as error.
+      since: 1.3.0
 
 # Star of the actual functions
 - name: version
@@ -190,7 +220,9 @@ methods:
 - name: has_member
   returns: bool
   description: Returns true if the type has the specified member.
-  kwargs_inherit: compiler._common
+  kwargs_inherit:
+    - compiler._common
+    - compiler._required
   posargs:
     typename:
       type: str
@@ -202,7 +234,9 @@ methods:
 - name: has_members
   returns: bool
   description: Returns `true` if the type has *all* the specified members.
-  kwargs_inherit: compiler._common
+  kwargs_inherit:
+    - compiler._common
+    - compiler._required
   posargs:
     typename:
       type: str
@@ -219,7 +253,9 @@ methods:
     Returns true if the given function is provided
     by the standard library or a library passed in with the `args` keyword.
 
-  kwargs_inherit: compiler._common
+  kwargs_inherit:
+    - compiler._common
+    - compiler._required
   posargs:
     funcname:
       type: str
@@ -228,7 +264,9 @@ methods:
 - name: has_type
   returns: bool
   description: Returns `true` if the specified token is a type.
-  kwargs_inherit: compiler._common
+  kwargs_inherit:
+    - compiler._common
+    - compiler._required
   posargs:
     typename:
       type: str
@@ -365,8 +403,10 @@ methods:
         be found. Otherwise, Meson will continue and the found method of the
         returned object will return `false`.
 
-        *(since 0.47.0)* The value of a [`feature`](Build-options.md#features)
-        option can also be passed here.
+        When set to a [`feature`](Build-options.md#features) option, the feature
+        will control if it is searched and whether to fail if not found.
+
+        *(since 0.47.0)* The value of a `feature` option can also be passed here.
 
     has_headers:
       type: list[str]
@@ -449,6 +489,8 @@ methods:
     argument:
       type: str
       description: The argument to check.
+  kwargs_inherit:
+    - compiler._required
 
 - name: has_multi_arguments
   since: 0.37.0
@@ -461,6 +503,8 @@ methods:
     name: arg
     type: str
     description: The arguments to check.
+  kwargs_inherit:
+    - compiler._required
 
 - name: get_supported_arguments
   returns: list[str]
@@ -477,7 +521,7 @@ methods:
       default: "'off'"
       description: |
         Supported values:
-          - `'off'`: Quietely ignore unsupported arguments
+          - `'off'`: Quietly ignore unsupported arguments
           - `'warn'`: Print a warning for unsupported arguments
           - `'require'`: Abort if at least one argument is not supported
 
@@ -507,6 +551,8 @@ methods:
     argument:
       type: str
       description: The argument to check.
+  kwargs_inherit:
+    - compiler._required
 
 - name: has_multi_link_arguments
   since: 0.46.0
@@ -519,6 +565,8 @@ methods:
     name: arg
     type: str
     description: The link arguments to check.
+  kwargs_inherit:
+    - compiler._required
 
 - name: get_supported_link_arguments
   returns: list[str]
@@ -536,7 +584,7 @@ methods:
   #     default: "'off'"
   #     description: |
   #       Supported values:
-  #         - `'off'`: Quietely ignore unsupported arguments
+  #         - `'off'`: Quietly ignore unsupported arguments
   #         - `'warn'`: Print a warning for unsupported arguments
   #         - `'require'`: Abort if at least one argument is not supported
 
@@ -547,10 +595,6 @@ methods:
   description: |
     Given a list of strings, returns the first argument that passes the
     [[compiler.has_link_argument]] test or an empty array if none pass.
-
-
-
-
 
 - name: has_function_attribute
   returns: bool
@@ -565,6 +609,8 @@ methods:
     name:
       type: str
       description: The attribute name to check.
+  kwargs_inherit:
+    - compiler._required
 
 - name: get_supported_function_attributes
   returns: list[str]
@@ -596,6 +642,8 @@ methods:
     normal compilation. That includes for example args added with
     `add_project_arguments()`, or on the command line with `-Dc_args=-DFOO`.
   varargs_inherit: _build_target_base
+  kwargs_inherit:
+    - compiler._include_directories
   kwargs:
     output:
       type: str
@@ -607,4 +655,7 @@ methods:
       type: list[str]
       description: |
         Extra flags to pass to the preprocessor
-
+    dependencies:
+      type: dep | list[dep]
+      description: Additionally dependencies required.
+      since: 1.1.0
