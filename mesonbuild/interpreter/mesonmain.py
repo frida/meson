@@ -220,7 +220,7 @@ class MesonMain(MesonInterpreterObject):
         sub = self.interpreter.subdir
         if sub == '':
             return src
-        return os.path.join(src, sub)
+        return os.path.join(src, self.interpreter.environment.build_output_rpath(sub))
 
     @noPosargs
     @noKwargs
@@ -384,7 +384,7 @@ class MesonMain(MesonInterpreterObject):
         else:
             nkwargs['static'] = static
         identifier = dependencies.get_dep_identifier(name, nkwargs)
-        for_machine = kwargs['native']
+        for_machine = self.interpreter.kwarg_options_to_machine(kwargs)
         override = self.build.dependency_overrides[for_machine].get(identifier)
         if override:
             if permissive:
