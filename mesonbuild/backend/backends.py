@@ -1,16 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2012-2016 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 from collections import OrderedDict
@@ -172,6 +162,7 @@ class InstallDataBase:
     subproject: str
     tag: T.Optional[str] = None
     data_type: T.Optional[str] = None
+    follow_symlinks: T.Optional[bool] = None
 
 @dataclass(eq=False)
 class InstallSymlinkData:
@@ -186,8 +177,9 @@ class InstallSymlinkData:
 class SubdirInstallData(InstallDataBase):
     def __init__(self, path: str, install_path: str, install_path_name: str,
                  install_mode: 'FileMode', exclude: T.Tuple[T.Set[str], T.Set[str]],
-                 subproject: str, tag: T.Optional[str] = None, data_type: T.Optional[str] = None):
-        super().__init__(path, install_path, install_path_name, install_mode, subproject, tag, data_type)
+                 subproject: str, tag: T.Optional[str] = None, data_type: T.Optional[str] = None,
+                 follow_symlinks: T.Optional[bool] = None):
+        super().__init__(path, install_path, install_path_name, install_mode, subproject, tag, data_type, follow_symlinks)
         self.exclude = exclude
 
 
@@ -314,6 +306,20 @@ class Backend:
     def get_target_filename_abs(self, target: T.Union[build.Target, build.CustomTargetIndex]) -> str:
         return os.path.join(self.environment.get_build_dir(), self.get_target_filename(target))
 
+    def get_target_debug_filename(self, target: build.BuildTarget) -> T.Optional[str]:
+        assert isinstance(target, build.BuildTarget), target
+        if target.get_debug_filename():
+            debug_filename = target.get_debug_filename()
+            return os.path.join(self.get_target_dir(target), debug_filename)
+        else:
+            return None
+
+    def get_target_debug_filename_abs(self, target: build.BuildTarget) -> T.Optional[str]:
+        assert isinstance(target, build.BuildTarget), target
+        if not target.get_debug_filename():
+            return None
+        return os.path.join(self.environment.get_build_dir(), self.get_target_debug_filename(target))
+
     def get_source_dir_include_args(self, target: build.BuildTarget, compiler: 'Compiler', *, absolute_path: bool = False) -> T.List[str]:
         curdir = target.get_subdir()
         if absolute_path:
@@ -339,16 +345,19 @@ class Backend:
         # On all other platforms, we link to the library directly.
         if isinstance(target, build.SharedLibrary):
             link_lib = target.get_import_filename() or target.get_filename()
-            return os.path.join(self.get_target_dir(target), link_lib)
+            # In AIX, if we archive .so, the blibpath must link to archived shared library otherwise to the .so file.
+            if mesonlib.is_aix() and target.aix_so_archive:
+                link_lib = re.sub('[.][a]([.]?([0-9]+))*([.]?([a-z]+))*', '.a', link_lib.replace('.so', '.a'))
+            return Path(self.get_target_dir(target), link_lib).as_posix()
         elif isinstance(target, build.StaticLibrary):
-            return os.path.join(self.get_target_dir(target), target.get_filename())
+            return Path(self.get_target_dir(target), target.get_filename()).as_posix()
         elif isinstance(target, (build.CustomTarget, build.CustomTargetIndex)):
             if not target.is_linkable_target():
                 raise MesonException(f'Tried to link against custom target "{target.name}", which is not linkable.')
-            return os.path.join(self.get_target_dir(target), target.get_filename())
+            return Path(self.get_target_dir(target), target.get_filename()).as_posix()
         elif isinstance(target, build.Executable):
             if target.import_filename:
-                return os.path.join(self.get_target_dir(target), target.get_import_filename())
+                return Path(self.get_target_dir(target), target.get_import_filename()).as_posix()
             else:
                 return None
         raise AssertionError(f'BUG: Tried to link to {target!r} which is not linkable')
@@ -755,7 +764,7 @@ class Backend:
         srcdir = self.environment.get_source_dir()
 
         for dep in target.external_deps:
-            if dep.type_name not in {'library', 'pkgconfig'}:
+            if dep.type_name not in {'library', 'pkgconfig', 'cmake'}:
                 continue
             for libpath in dep.link_args:
                 # For all link args that are absolute paths to a library file, add RPATH args
@@ -771,7 +780,11 @@ class Backend:
                 # Windows doesn't support rpaths, but we use this function to
                 # emulate rpaths by setting PATH
                 # .dll is there for mingw gcc
-                if os.path.splitext(libpath)[1] not in {'.dll', '.lib', '.so', '.dylib'}:
+                # .so's may be extended with version information, e.g. libxyz.so.1.2.3
+                if not (
+                    os.path.splitext(libpath)[1] in {'.dll', '.lib', '.so', '.dylib'}
+                    or re.match(r'.+\.so(\.|$)', os.path.basename(libpath))
+                ):
                     continue
 
                 try:
@@ -821,7 +834,7 @@ class Backend:
             fname = fname.replace(ch, '_')
         return hashed + fname
 
-    def object_filename_from_source(self, target: build.BuildTarget, source: 'FileOrString') -> str:
+    def object_filename_from_source(self, target: build.BuildTarget, source: 'FileOrString', targetdir: T.Optional[str] = None) -> str:
         assert isinstance(source, mesonlib.File)
         if isinstance(target, build.CompileTarget):
             return target.sources_map[source]
@@ -842,9 +855,8 @@ class Backend:
         elif source.is_built:
             if os.path.isabs(rel_src):
                 rel_src = rel_src[len(build_dir) + 1:]
-            targetdir = self.get_target_private_dir(target)
             # A meson- prefixed directory is reserved; hopefully no-one creates a file name with such a weird prefix.
-            gen_source = 'meson-generated_' + os.path.relpath(rel_src, targetdir)
+            gen_source = 'meson-generated_' + os.path.relpath(rel_src, self.get_target_private_dir(target))
         else:
             if os.path.isabs(rel_src):
                 # Use the absolute path directly to avoid file name conflicts
@@ -853,7 +865,10 @@ class Backend:
                 gen_source = os.path.relpath(os.path.join(build_dir, rel_src),
                                              os.path.join(self.environment.get_source_dir(), target.get_subdir()))
         machine = self.environment.machines[target.for_machine]
-        return self.canonicalize_filename(gen_source) + '.' + machine.get_object_suffix()
+        ret = self.canonicalize_filename(gen_source) + '.' + machine.get_object_suffix()
+        if targetdir is not None:
+            return os.path.join(targetdir, ret)
+        return ret
 
     def _determine_ext_objs(self, extobj: 'build.ExtractedObjects', proj_dir_to_build_root: str) -> T.List[str]:
         result: T.List[str] = []
@@ -877,7 +892,7 @@ class Backend:
                 result.append(s.relative_name())
 
         # MSVC generate an object file for PCH
-        if extobj.pch:
+        if extobj.pch and self.target_uses_pch(extobj.target):
             for lang, pch in extobj.target.pch.items():
                 compiler = extobj.target.compilers[lang]
                 if compiler.get_argument_syntax() == 'msvc':
@@ -901,14 +916,14 @@ class Backend:
                 if comp.language in LANGS_CANT_UNITY:
                     sources += srcs
                     continue
-                for i in range(len(srcs) // unity_size + 1):
+                for i in range((len(srcs) + unity_size - 1) // unity_size):
                     _src = self.get_unity_source_file(extobj.target,
                                                       comp.get_default_suffix(), i)
                     sources.append(_src)
 
         for osrc in sources:
-            objname = self.object_filename_from_source(extobj.target, osrc)
-            objpath = os.path.join(proj_dir_to_build_root, targetdir, objname)
+            objname = self.object_filename_from_source(extobj.target, osrc, targetdir)
+            objpath = os.path.join(proj_dir_to_build_root, objname)
             result.append(objpath)
 
         return result
@@ -967,7 +982,7 @@ class Backend:
             return compiler.get_no_stdinc_args()
         return []
 
-    def generate_basic_compiler_args(self, target: build.BuildTarget, compiler: 'Compiler', no_warn_args: bool = False) -> 'CompilerArgs':
+    def generate_basic_compiler_args(self, target: build.BuildTarget, compiler: 'Compiler') -> 'CompilerArgs':
         # Create an empty commands list, and start adding arguments from
         # various sources in the order in which they must override each other
         # starting from hard-coded defaults followed by build options and so on.
@@ -980,27 +995,17 @@ class Backend:
         commands += self.get_no_stdlib_args(target, compiler)
         # Add things like /NOLOGO or -pipe; usually can't be overridden
         commands += compiler.get_always_args()
-        # Only add warning-flags by default if the buildtype enables it, and if
-        # we weren't explicitly asked to not emit warnings (for Vala, f.ex)
-        if no_warn_args:
-            commands += compiler.get_no_warn_args()
-        else:
-            # warning_level is a string, but mypy can't determine that
-            commands += compiler.get_warn_args(T.cast('str', target.get_option(OptionKey('warning_level'))))
+        # warning_level is a string, but mypy can't determine that
+        commands += compiler.get_warn_args(T.cast('str', target.get_option(OptionKey('warning_level'))))
         # Add -Werror if werror=true is set in the build options set on the
         # command-line or default_options inside project(). This only sets the
         # action to be done for warnings if/when they are emitted, so it's ok
-        # to set it after get_no_warn_args() or get_warn_args().
+        # to set it after or get_warn_args().
         if target.get_option(OptionKey('werror')):
             commands += compiler.get_werror_args()
         # Add compile args for c_* or cpp_* build options set on the
         # command-line or default_options inside project().
         commands += compiler.get_option_compile_args(copt_proxy)
-
-        # Add buildtype args: optimization level, debugging, etc.
-        buildtype = target.get_option(OptionKey('buildtype'))
-        assert isinstance(buildtype, str), 'for mypy'
-        commands += compiler.get_buildtype_args(buildtype)
 
         optimization = target.get_option(OptionKey('optimization'))
         assert isinstance(optimization, str), 'for mypy'
@@ -1141,7 +1146,7 @@ class Backend:
 
             if dep.type_name == 'pkgconfig':
                 # If by chance pkg-config knows the bin dir...
-                bindir = dep.get_pkgconfig_variable('bindir', [], default='')
+                bindir = dep.get_variable(pkgconfig='bindir', default_value='')
                 if bindir:
                     results.add(bindir)
                     continue
@@ -1459,7 +1464,7 @@ class Backend:
             srcs += fname
         return srcs
 
-    def get_custom_target_depend_files(self, target: build.CustomTarget, absolute_paths: bool = False) -> T.List[str]:
+    def get_target_depend_files(self, target: T.Union[build.CustomTarget, build.BuildTarget], absolute_paths: bool = False) -> T.List[str]:
         deps: T.List[str] = []
         for i in target.depend_files:
             if isinstance(i, mesonlib.File):
@@ -1829,10 +1834,8 @@ class Backend:
                     outdir_name = os.path.join('{includedir}', subdir)
 
             for f in h.get_sources():
-                if not isinstance(f, File):
-                    raise MesonException(f'Invalid header type {f!r} can\'t be installed')
                 abspath = f.absolute_path(srcdir, builddir)
-                i = InstallDataBase(abspath, outdir, outdir_name, h.get_custom_install_mode(), h.subproject, tag='devel')
+                i = InstallDataBase(abspath, outdir, outdir_name, h.get_custom_install_mode(), h.subproject, tag='devel', follow_symlinks=h.follow_symlinks)
                 d.headers.append(i)
 
     def generate_man_install(self, d: InstallData) -> None:
@@ -1877,7 +1880,8 @@ class Backend:
                 dstdir_name = os.path.join(subdir_name, dst_name)
                 tag = de.install_tag or self.guess_install_tag(dst_abs)
                 i = InstallDataBase(src_file.absolute_path(srcdir, builddir), dst_abs, dstdir_name,
-                                    de.install_mode, de.subproject, tag=tag, data_type=de.data_type)
+                                    de.install_mode, de.subproject, tag=tag, data_type=de.data_type,
+                                    follow_symlinks=de.follow_symlinks)
                 d.data.append(i)
 
     def generate_symlink_install(self, d: InstallData) -> None:
@@ -1908,7 +1912,8 @@ class Backend:
                 dst_dir = os.path.join(dst_dir, os.path.basename(src_dir))
                 dst_name = os.path.join(dst_name, os.path.basename(src_dir))
             tag = sd.install_tag or self.guess_install_tag(os.path.join(sd.install_dir, 'dummy'))
-            i = SubdirInstallData(src_dir, dst_dir, dst_name, sd.install_mode, sd.exclude, sd.subproject, tag)
+            i = SubdirInstallData(src_dir, dst_dir, dst_name, sd.install_mode, sd.exclude, sd.subproject, tag,
+                                  follow_symlinks=sd.follow_symlinks)
             d.install_subdirs.append(i)
 
     def get_introspection_data(self, target_id: str, target: build.Target) -> T.List['TargetIntrospectionData']:
@@ -2009,7 +2014,9 @@ class Backend:
     def compiler_to_generator(self, target: build.BuildTarget,
                               compiler: 'Compiler',
                               sources: _ALL_SOURCES_TYPE,
-                              output_templ: str) -> build.GeneratedList:
+                              output_templ: str,
+                              depends: T.Optional[T.List[T.Union[build.BuildTarget, build.CustomTarget, build.CustomTargetIndex]]] = None,
+                              ) -> build.GeneratedList:
         '''
         Some backends don't support custom compilers. This is a convenience
         method to convert a Compiler to a Generator.
@@ -2024,9 +2031,15 @@ class Backend:
         commands += compiler.get_compile_only_args() + ['@INPUT@']
         commands += self.get_source_dir_include_args(target, compiler)
         commands += self.get_build_dir_include_args(target, compiler)
-        generator = build.Generator(exe, args + commands.to_native(), [output_templ], depfile='@PLAINNAME@.d')
+        # Add per-target compile args, f.ex, `c_args : ['-DFOO']`. We set these
+        # near the end since these are supposed to override everything else.
+        commands += self.escape_extra_args(target.get_extra_args(compiler.get_language()))
+        generator = build.Generator(exe, args + commands.to_native(),
+                                    [output_templ], depfile='@PLAINNAME@.d',
+                                    depends=depends)
         return generator.process_files(sources, self.interpreter)
 
     def compile_target_to_generator(self, target: build.CompileTarget) -> build.GeneratedList:
         all_sources = T.cast('_ALL_SOURCES_TYPE', target.sources) + T.cast('_ALL_SOURCES_TYPE', target.generated)
-        return self.compiler_to_generator(target, target.compiler, all_sources, target.output_templ)
+        return self.compiler_to_generator(target, target.compiler, all_sources,
+                                          target.output_templ, target.depends)

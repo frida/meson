@@ -1,16 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2012-2017 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 from collections import OrderedDict
@@ -24,7 +14,6 @@ import json
 import os
 import pickle
 import re
-import shlex
 import subprocess
 import typing as T
 
@@ -77,16 +66,6 @@ def cmd_quote(arg: str) -> str:
 
     return arg
 
-def gcc_rsp_quote(s: str) -> str:
-    # see: the function buildargv() in libiberty
-    #
-    # this differs from sh-quoting in that a backslash *always* escapes the
-    # following character, even inside single quotes.
-
-    s = s.replace('\\', '\\\\')
-
-    return shlex.quote(s)
-
 # How ninja executes command lines differs between Unix and Windows
 # (see https://ninja-build.org/manual.html#ref_rule_command)
 if mesonlib.is_windows():
@@ -98,6 +77,15 @@ else:
     execute_wrapper = []
     rmfile_prefix = ['rm', '-f', '{}', '&&']
 
+def gcc_rsp_quote(s: str) -> str:
+    # see: the function buildargv() in libiberty
+    #
+    # this differs from sh-quoting in that a backslash *always* escapes the
+    # following character, even inside single quotes.
+
+    s = s.replace('\\', '\\\\')
+
+    return quote_func(s)
 
 def get_rsp_threshold() -> int:
     '''Return a conservative estimate of the commandline size in bytes
@@ -237,8 +225,10 @@ class NinjaRule:
         return ninja_quote(qf(str(x)))
 
     def write(self, outfile: T.TextIO) -> None:
+        rspfile_args = self.args
         if self.rspfile_quote_style is RSPFileSyntax.MSVC:
             rspfile_quote_func = cmd_quote
+            rspfile_args = [NinjaCommandArg('$in_newline', arg.quoting) if arg.s == '$in' else arg for arg in rspfile_args]
         else:
             rspfile_quote_func = gcc_rsp_quote
 
@@ -253,7 +243,7 @@ class NinjaRule:
             if rsp == '_RSP':
                 outfile.write(' command = {} @$out.rsp\n'.format(' '.join([self._quoter(x) for x in self.command])))
                 outfile.write(' rspfile = $out.rsp\n')
-                outfile.write(' rspfile_content = {}\n'.format(' '.join([self._quoter(x, rspfile_quote_func) for x in self.args])))
+                outfile.write(' rspfile_content = {}\n'.format(' '.join([self._quoter(x, rspfile_quote_func) for x in rspfile_args])))
             else:
                 outfile.write(' command = {}\n'.format(' '.join([self._quoter(x) for x in self.command + self.args])))
             if self.deps:
@@ -640,7 +630,7 @@ class NinjaBackend(backends.Backend):
             key = OptionKey('b_coverage')
             if (key in self.environment.coredata.options and
                     self.environment.coredata.options[key].value):
-                gcovr_exe, gcovr_version, lcov_exe, genhtml_exe, _ = environment.find_coverage_tools()
+                gcovr_exe, gcovr_version, lcov_exe, lcov_version, genhtml_exe, _ = environment.find_coverage_tools()
                 if gcovr_exe or (lcov_exe and genhtml_exe):
                     self.add_build_comment(NinjaComment('Coverage rules'))
                     self.generate_coverage_rules(gcovr_exe, gcovr_version)
@@ -728,6 +718,8 @@ class NinjaBackend(backends.Backend):
         for dep in itertools.chain(target.link_targets, target.link_whole_targets):
             if isinstance(dep, (build.StaticLibrary, build.SharedLibrary)):
                 header_deps += self.get_generated_headers(dep)
+        if isinstance(target, build.CompileTarget):
+            header_deps.extend(target.get_generated_headers())
         target.cached_generated_headers = header_deps
         return header_deps
 
@@ -968,8 +960,7 @@ class NinjaBackend(backends.Backend):
             if self.environment.is_llvm_ir(src):
                 o, s = self.generate_llvm_ir_compile(target, src)
             else:
-                o, s = self.generate_single_compile(target, src, True,
-                                                    order_deps=header_deps)
+                o, s = self.generate_single_compile(target, src, True, order_deps=header_deps)
             compiled_sources.append(s)
             source2object[s] = o
             obj_list.append(o)
@@ -992,13 +983,15 @@ class NinjaBackend(backends.Backend):
             fortran_inc_args = mesonlib.listify([target.compilers['fortran'].get_include_args(
                 self.get_target_private_dir(t), is_system=False) for t in obj_targets])
 
-        # Generate compilation targets for C sources generated from Vala
-        # sources. This can be extended to other $LANG->C compilers later if
-        # necessary. This needs to be separate for at least Vala
+        # Generate compilation targets for sources generated by transpilers.
         #
-        # Do not try to unity-build the generated c files from vala, as these
-        # often contain duplicate symbols and will fail to compile properly
-        vala_generated_source_files = []
+        # Do not try to unity-build the generated source files, as these
+        # often contain duplicate symbols and will fail to compile properly.
+        #
+        # Gather all generated source files and header before generating the
+        # compilation rules, to be able to add correct dependencies on the
+        # generated headers.
+        transpiled_source_files = []
         for src in transpiled_sources:
             raw_src = File.from_built_relative(src)
             # Generated targets are ordered deps because the must exist
@@ -1009,14 +1002,9 @@ class NinjaBackend(backends.Backend):
             if self.environment.is_header(src):
                 header_deps.append(raw_src)
             else:
-                # We gather all these and generate compile rules below
-                # after `header_deps` (above) is fully generated
-                vala_generated_source_files.append(raw_src)
-        for src in vala_generated_source_files:
-            # Passing 'vala' here signifies that we want the compile
-            # arguments to be specialized for C code generated by
-            # valac. For instance, no warnings should be emitted.
-            o, s = self.generate_single_compile(target, src, 'vala', [], header_deps)
+                transpiled_source_files.append(raw_src)
+        for src in transpiled_source_files:
+            o, s = self.generate_single_compile(target, src, True, [], header_deps)
             obj_list.append(o)
 
         # Generate compile targets for all the preexisting sources for this target
@@ -1058,8 +1046,9 @@ class NinjaBackend(backends.Backend):
         #In AIX, we archive shared libraries. If the instance is a shared library, we add a command to archive the shared library
         #object and create the build element.
         if isinstance(target, build.SharedLibrary) and self.environment.machines[target.for_machine].is_aix():
-            elem = NinjaBuildElement(self.all_outputs, linker.get_archive_name(outname), 'AIX_LINKER', [outname])
-            self.add_build(elem)
+            if target.aix_so_archive:
+                elem = NinjaBuildElement(self.all_outputs, linker.get_archive_name(outname), 'AIX_LINKER', [outname])
+                self.add_build(elem)
 
     def should_use_dyndeps_for_target(self, target: 'build.BuildTarget') -> bool:
         if mesonlib.version_compare(self.ninja_version, '<1.10.0'):
@@ -1068,7 +1057,7 @@ class NinjaBackend(backends.Backend):
             return True
         if 'cpp' not in target.compilers:
             return False
-        if '-fmodules-ts' in target.extra_args.get('cpp', []):
+        if '-fmodules-ts' in target.extra_args['cpp']:
             return True
         # Currently only the preview version of Visual Studio is supported.
         cpp = target.compilers['cpp']
@@ -1151,7 +1140,7 @@ class NinjaBackend(backends.Backend):
         self.custom_target_generator_inputs(target)
         (srcs, ofilenames, cmd) = self.eval_custom_target_command(target)
         deps = self.unwrap_dep_list(target)
-        deps += self.get_custom_target_depend_files(target)
+        deps += self.get_target_depend_files(target)
         if target.build_always_stale:
             deps.append('PHONY')
         if target.depfile is None:
@@ -1214,7 +1203,7 @@ class NinjaBackend(backends.Backend):
             elem.add_item('description', f'Running external command {target.name}{cmd_type}')
             elem.add_item('pool', 'console')
         deps = self.unwrap_dep_list(target)
-        deps += self.get_custom_target_depend_files(target)
+        deps += self.get_target_depend_files(target)
         elem.add_dep(deps)
         self.add_build(elem)
         self.processed_targets.add(target.get_id())
@@ -1455,15 +1444,13 @@ class NinjaBackend(backends.Backend):
         return args, deps
 
     def generate_cs_target(self, target: build.BuildTarget):
-        buildtype = target.get_option(OptionKey('buildtype'))
         fname = target.get_filename()
         outname_rel = os.path.join(self.get_target_dir(target), fname)
         src_list = target.get_sources()
         compiler = target.compilers['cs']
         rel_srcs = [os.path.normpath(s.rel_to_builddir(self.build_to_src)) for s in src_list]
         deps = []
-        commands = compiler.compiler_args(target.extra_args.get('cs', []))
-        commands += compiler.get_buildtype_args(buildtype)
+        commands = compiler.compiler_args(target.extra_args['cs'])
         commands += compiler.get_optimization_args(target.get_option(OptionKey('optimization')))
         commands += compiler.get_debug_args(target.get_option(OptionKey('debug')))
         if isinstance(target, build.Executable):
@@ -1506,7 +1493,6 @@ class NinjaBackend(backends.Backend):
 
     def determine_single_java_compile_args(self, target, compiler):
         args = []
-        args += compiler.get_buildtype_args(target.get_option(OptionKey('buildtype')))
         args += self.build.get_global_args(compiler, target.for_machine)
         args += self.build.get_project_args(compiler, target.subproject, target.for_machine)
         args += target.get_java_args()
@@ -1694,8 +1680,6 @@ class NinjaBackend(backends.Backend):
             # Without this, it will write it inside c_out_dir
             args += ['--vapi', os.path.join('..', target.vala_vapi)]
             valac_outputs.append(vapiname)
-            target.outputs += [target.vala_header, target.vala_vapi]
-            target.install_tag += ['devel', 'devel']
             # Install header and vapi to default locations if user requests this
             if len(target.install_dir) > 1 and target.install_dir[1] is True:
                 target.install_dir[1] = self.environment.get_includedir()
@@ -1706,28 +1690,28 @@ class NinjaBackend(backends.Backend):
                 girname = os.path.join(self.get_target_dir(target), target.vala_gir)
                 args += ['--gir', os.path.join('..', target.vala_gir)]
                 valac_outputs.append(girname)
-                target.outputs.append(target.vala_gir)
-                target.install_tag.append('devel')
                 # Install GIR to default location if requested by user
                 if len(target.install_dir) > 3 and target.install_dir[3] is True:
                     target.install_dir[3] = os.path.join(self.environment.get_datadir(), 'gir-1.0')
-        # Detect gresources and add --gresources arguments for each
+        # Detect gresources and add --gresources/--gresourcesdir arguments for each
+        gres_dirs = []
         for gensrc in other_src[1].values():
             if isinstance(gensrc, modules.GResourceTarget):
                 gres_xml, = self.get_custom_target_sources(gensrc)
                 args += ['--gresources=' + gres_xml]
-        extra_args = []
-
-        for a in target.extra_args.get('vala', []):
-            if isinstance(a, File):
-                relname = a.rel_to_builddir(self.build_to_src)
-                extra_dep_files.append(relname)
-                extra_args.append(relname)
-            else:
-                extra_args.append(a)
+                for source_dir in gensrc.source_dirs:
+                    gres_dirs += [os.path.join(self.get_target_dir(gensrc), source_dir)]
+                # Ensure that resources are built before vala sources
+                # This is required since vala code using [GtkTemplate] effectively depends on .ui files
+                # GResourceHeaderTarget is not suitable due to lacking depfile
+                gres_c, = gensrc.get_outputs()
+                extra_dep_files += [os.path.join(self.get_target_dir(gensrc), gres_c)]
+        for gres_dir in OrderedSet(gres_dirs):
+            args += [f'--gresourcesdir={gres_dir}']
         dependency_vapis = self.determine_dep_vapis(target)
         extra_dep_files += dependency_vapis
-        args += extra_args
+        extra_dep_files.extend(self.get_target_depend_files(target))
+        args += target.get_extra_args('vala')
         element = NinjaBuildElement(self.all_outputs, valac_outputs,
                                     self.compiler_to_rule_name(valac),
                                     all_files + dependency_vapis)
@@ -1739,10 +1723,8 @@ class NinjaBackend(backends.Backend):
 
     def generate_cython_transpile(self, target: build.BuildTarget) -> \
             T.Tuple[T.MutableMapping[str, File], T.MutableMapping[str, File], T.List[str]]:
-        """Generate rules for transpiling Cython files to C or C++
+        """Generate rules for transpiling Cython files to C or C++"""
 
-        XXX: Currently only C is handled.
-        """
         static_sources: T.MutableMapping[str, File] = OrderedDict()
         generated_sources: T.MutableMapping[str, File] = OrderedDict()
         cython_sources: T.List[str] = []
@@ -1751,7 +1733,6 @@ class NinjaBackend(backends.Backend):
 
         args: T.List[str] = []
         args += cython.get_always_args()
-        args += cython.get_buildtype_args(target.get_option(OptionKey('buildtype')))
         args += cython.get_debug_args(target.get_option(OptionKey('debug')))
         args += cython.get_optimization_args(target.get_option(OptionKey('optimization')))
         args += cython.get_option_compile_args(target.get_options())
@@ -1886,10 +1867,7 @@ class NinjaBackend(backends.Backend):
         self.generate_generator_list_rules(target)
 
         # dependencies need to cause a relink, they're not just for ordering
-        deps = [
-            os.path.join(t.subdir, t.get_filename())
-            for t in itertools.chain(target.link_targets, target.link_whole_targets)
-        ]
+        deps: T.List[str] = []
 
         # Dependencies for rust-project.json
         project_deps: T.List[RustDep] = []
@@ -1941,16 +1919,7 @@ class NinjaBackend(backends.Backend):
         if main_rust_file is None:
             raise RuntimeError('A Rust target has no Rust sources. This is weird. Also a bug. Please report')
         target_name = os.path.join(target.subdir, target.get_filename())
-        if isinstance(target, build.Executable):
-            cratetype = 'bin'
-        elif hasattr(target, 'rust_crate_type'):
-            cratetype = target.rust_crate_type
-        elif isinstance(target, build.SharedLibrary):
-            cratetype = 'dylib'
-        elif isinstance(target, build.StaticLibrary):
-            cratetype = 'rlib'
-        else:
-            raise InvalidArguments('Unknown target type for rustc.')
+        cratetype = target.rust_crate_type
         args.extend(['--crate-type', cratetype])
 
         # If we're dynamically linking, add those arguments
@@ -1960,66 +1929,52 @@ class NinjaBackend(backends.Backend):
         if cratetype in {'bin', 'dylib'}:
             args.extend(rustc.get_linker_always_args())
 
-        args += self.generate_basic_compiler_args(target, rustc, False)
+        args += self.generate_basic_compiler_args(target, rustc)
         # Rustc replaces - with _. spaces or dots are not allowed, so we replace them with underscores
         args += ['--crate-name', target.name.replace('-', '_').replace(' ', '_').replace('.', '_')]
         depfile = os.path.join(target.subdir, target.name + '.d')
-        args += ['--emit', f'dep-info={depfile}', '--emit', 'link']
+        args += ['--emit', f'dep-info={depfile}', '--emit', f'link={target_name}']
+        args += ['--out-dir', self.get_target_private_dir(target)]
+        args += ['-C', 'metadata=' + target.get_id()]
         args += target.get_extra_args('rust')
-        output = rustc.get_output_args(os.path.join(target.subdir, target.get_filename()))
-        args += output
+
+        # Rustc always use non-debug Windows runtime. Inject the one selected
+        # by Meson options instead.
+        # https://github.com/rust-lang/rust/issues/39016
+        if not isinstance(target, build.StaticLibrary):
+            try:
+                buildtype = target.get_option(OptionKey('buildtype'))
+                crt = target.get_option(OptionKey('b_vscrt'))
+                args += rustc.get_crt_link_args(crt, buildtype)
+            except KeyError:
+                pass
+
+        if mesonlib.version_compare(rustc.version, '>= 1.67.0'):
+            verbatim = '+verbatim'
+        else:
+            verbatim = ''
+
+        def _link_library(libname: str, static: bool, bundle: bool = False):
+            type_ = 'static' if static else 'dylib'
+            modifiers = []
+            if not bundle and static:
+                modifiers.append('-bundle')
+            if verbatim:
+                modifiers.append(verbatim)
+            if modifiers:
+                type_ += ':' + ','.join(modifiers)
+            args.append(f'-l{type_}={libname}')
+
         linkdirs = mesonlib.OrderedSet()
         external_deps = target.external_deps.copy()
-
-        # Have we already injected msvc-crt args?
-        #
-        # If we don't have A C, C++, or Fortran compiler that is
-        # VisualStudioLike treat this as if we've already injected them
-        #
-        # We handle this here rather than in the rust compiler because in
-        # general we don't want to link rust targets to a non-default crt.
-        # However, because of the way that MSCRTs work you can only link to one
-        # per target, so if A links to the debug one, and B links to the normal
-        # one you can't link A and B. Rust is hardcoded to the default one,
-        # so if we compile C/C++ code and link against a non-default MSCRT then
-        # linking will fail. We can work around this by injecting MSCRT link
-        # arguments early in the rustc command line
-        # https://github.com/rust-lang/rust/issues/39016
-        crt_args_injected = not any(x is not None and x.get_argument_syntax() == 'msvc' for x in
-                                    (self.environment.coredata.compilers[target.for_machine].get(l)
-                                     for l in ['c', 'cpp', 'fortran']))
-
-        crt_link_args: T.List[str] = []
-        try:
-            buildtype = target.get_option(OptionKey('buildtype'))
-            crt = target.get_option(OptionKey('b_vscrt'))
-            is_debug = buildtype == 'debug'
-
-            if crt == 'from_buildtype':
-                crt = 'mdd' if is_debug else 'md'
-            elif crt == 'static_from_buildtype':
-                crt = 'mtd' if is_debug else 'mt'
-
-            if crt == 'mdd':
-                crt_link_args = ['-l', 'static=msvcrtd']
-            elif crt == 'md':
-                # this is the default, no need to inject anything
-                crt_args_injected = True
-            elif crt == 'mtd':
-                crt_link_args = ['-l', 'static=libcmtd']
-            elif crt == 'mt':
-                crt_link_args = ['-l', 'static=libcmt']
-
-        except KeyError:
-            crt_args_injected = True
-
-        # TODO: we likely need to use verbatim to handle name_prefix and name_suffix
-        for d in target.link_targets:
+        target_deps = target.get_dependencies()
+        for d in target_deps:
             linkdirs.add(d.subdir)
-            # staticlib and cdylib provide a plain C ABI, i.e. contain no Rust
-            # metadata. As such they should be treated like any other external
-            # link target
-            if d.uses_rust() and d.rust_crate_type not in ['staticlib', 'cdylib']:
+            deps.append(self.get_dependency_filename(d))
+            if d.uses_rust_abi():
+                if d not in itertools.chain(target.link_targets, target.link_whole_targets):
+                    # Indirect Rust ABI dependency, we only need its path in linkdirs.
+                    continue
                 # specify `extern CRATE_NAME=OUTPUT_FILE` for each Rust
                 # dependency, so that collisions with libraries in rustc's
                 # sysroot don't cause ambiguity
@@ -2028,104 +1983,60 @@ class NinjaBackend(backends.Backend):
                 project_deps.append(RustDep(d_name, self.rust_crates[d.name].order))
                 continue
 
-            if not crt_args_injected and not {'c', 'cpp', 'fortran'}.isdisjoint(d.compilers):
-                args += crt_link_args
-                crt_args_injected = True
+            # Link a C ABI library
 
             if isinstance(d, build.StaticLibrary):
-                # Rustc doesn't follow Meson's convention that static libraries
-                # are called .a, and import libraries are .lib, so we have to
-                # manually handle that.
-                if rustc.linker.id in {'link', 'lld-link'}:
-                    args += ['-C', f'link-arg={self.get_target_filename_for_linking(d)}']
-                else:
-                    args += ['-l', f'static={d.name}']
                 external_deps.extend(d.external_deps)
+
+            # Pass native libraries directly to the linker with "-C link-arg"
+            # because rustc's "-l:+verbatim=" is not portable and we cannot rely
+            # on linker to find the right library without using verbatim filename.
+            # For example "-lfoo" won't find "foo.so" in the case name_prefix set
+            # to "", or would always pick the shared library when both "libfoo.so"
+            # and "libfoo.a" are available.
+            # See https://doc.rust-lang.org/rustc/command-line-arguments.html#linking-modifiers-verbatim.
+            #
+            # However, rustc static linker (rlib and staticlib) requires using
+            # "-l" argument and does not rely on platform specific dynamic linker.
+            lib = self.get_target_filename_for_linking(d)
+            link_whole = d in target.link_whole_targets
+            if isinstance(target, build.StaticLibrary) or (isinstance(target, build.Executable) and rustc.get_crt_static()):
+                static = isinstance(d, build.StaticLibrary)
+                libname = os.path.basename(lib) if verbatim else d.name
+                _link_library(libname, static, bundle=link_whole)
+            elif link_whole:
+                link_whole_args = rustc.linker.get_link_whole_for([lib])
+                args += [f'-Clink-arg={a}' for a in link_whole_args]
             else:
-                # Rust uses -l for non rust dependencies, but we still need to
-                # add dylib=foo
-                args += ['-l', f'dylib={d.name}']
+                args.append(f'-Clink-arg={lib}')
 
-        # Since 1.61.0 Rust has a special modifier for whole-archive linking,
-        # before that it would treat linking two static libraries as
-        # whole-archive linking. However, to make this work we have to disable
-        # bundling, which can't be done until 1.63.0… So for 1.61–1.62 we just
-        # have to hope that the default cases of +whole-archive are sufficient.
-        # See: https://github.com/rust-lang/rust/issues/99429
-        if mesonlib.version_compare(rustc.version, '>= 1.63.0'):
-            whole_archive = ':+whole-archive,-bundle'
-        else:
-            whole_archive = ''
-
-        if mesonlib.version_compare(rustc.version, '>= 1.67.0'):
-            verbatim = ',+verbatim'
-        else:
-            verbatim = ''
-
-        for d in target.link_whole_targets:
-            linkdirs.add(d.subdir)
-            if d.uses_rust():
-                # specify `extern CRATE_NAME=OUTPUT_FILE` for each Rust
-                # dependency, so that collisions with libraries in rustc's
-                # sysroot don't cause ambiguity
-                d_name = self._get_rust_dependency_name(target, d)
-                args += ['--extern', '{}={}'.format(d_name, os.path.join(d.subdir, d.filename))]
-                project_deps.append(RustDep(d_name, self.rust_crates[d.name].order))
-            else:
-                if not crt_args_injected and not {'c', 'cpp', 'fortran'}.isdisjoint(d.compilers):
-                    crt_args_injected = True
-                    crt_args_injected = True
-
-                if rustc.linker.id in {'link', 'lld-link'}:
-                    if verbatim:
-                        # If we can use the verbatim modifier, then everything is great
-                        args += ['-l', f'static{whole_archive}{verbatim}={d.get_outputs()[0]}']
-                    elif isinstance(target, build.StaticLibrary):
-                        # If we don't, for static libraries the only option is
-                        # to make a copy, since we can't pass objects in, or
-                        # directly affect the archiver. but we're not going to
-                        # do that given how quickly rustc versions go out of
-                        # support unless there's a compelling reason to do so.
-                        # This only affects 1.61–1.66
-                        mlog.warning('Due to limitations in Rustc versions 1.61–1.66 and meson library naming',
-                                     'whole-archive linking with MSVC may or may not work. Upgrade rustc to',
-                                     '>= 1.67. A best effort is being made, but likely won\'t work')
-                        args += ['-l', f'static={d.name}']
-                    else:
-                        # When doing dynamic linking (binaries and [c]dylibs),
-                        # we can instead just proxy the correct arguments to the linker
-                        for link_whole_arg in rustc.linker.get_link_whole_for([self.get_target_filename_for_linking(d)]):
-                            args += ['-C', f'link-arg={link_whole_arg}']
-                else:
-                    args += ['-l', f'static{whole_archive}={d.name}']
-                external_deps.extend(d.external_deps)
         for e in external_deps:
             for a in e.get_link_args():
                 if a in rustc.native_static_libs:
                     # Exclude link args that rustc already add by default
-                    continue
-                if a.endswith(('.dll', '.so', '.dylib')):
-                    dir_, lib = os.path.split(a)
-                    linkdirs.add(dir_)
-                    lib, ext = os.path.splitext(lib)
-                    if lib.startswith('lib'):
-                        lib = lib[3:]
-                    args.extend(['-l', f'dylib={lib}'])
+                    pass
                 elif a.startswith('-L'):
                     args.append(a)
-                elif a.startswith('-l'):
-                    _type = 'static' if e.static else 'dylib'
-                    args.extend(['-l', f'{_type}={a[2:]}'])
+                elif a.endswith(('.dll', '.so', '.dylib', '.a', '.lib')) and isinstance(target, build.StaticLibrary):
+                    dir_, lib = os.path.split(a)
+                    linkdirs.add(dir_)
+                    if not verbatim:
+                        lib, ext = os.path.splitext(lib)
+                        if lib.startswith('lib'):
+                            lib = lib[3:]
+                    static = a.endswith(('.a', '.lib'))
+                    _link_library(lib, static)
+                else:
+                    args.append(f'-Clink-arg={a}')
+
         for d in linkdirs:
-            if d == '':
-                d = '.'
-            args += ['-L', d]
+            d = d or '.'
+            args.append(f'-L{d}')
 
         # Because of the way rustc links, this must come after any potential
         # library need to link with their stdlibs (C++ and Fortran, for example)
-        args.extend(target.get_used_stdlib_args('rust'))
+        args.extend(f'-Clink-arg={a}' for a in target.get_used_stdlib_args('rust'))
 
-        target_deps = target.get_dependencies()
         has_shared_deps = any(isinstance(dep, build.SharedLibrary) for dep in target_deps)
         has_rust_shared_deps = any(dep.uses_rust()
                                    and dep.rust_crate_type == 'dylib'
@@ -2271,6 +2182,7 @@ class NinjaBackend(backends.Backend):
                 srctreedir = os.path.normpath(os.path.join(self.environment.get_build_dir(), self.build_to_src, expdir))
                 sargs = swiftc.get_include_args(srctreedir, False)
                 compile_args += sargs
+        compile_args += target.get_extra_args('swift')
         link_args = swiftc.get_output_args(os.path.join(self.environment.get_build_dir(), self.get_target_filename(target)))
         link_args += self.build.get_project_link_args(swiftc, target.subproject, target.for_machine)
         link_args += self.build.get_global_link_args(swiftc, target.for_machine)
@@ -2350,7 +2262,7 @@ class NinjaBackend(backends.Backend):
             if static_linker is None:
                 continue
             rule = 'STATIC_LINKER{}'.format(self.get_rule_suffix(for_machine))
-            cmdlist = []
+            cmdlist: T.List[T.Union[str, NinjaCommandArg]] = []
             args = ['$in']
             # FIXME: Must normalize file names with pathlib.Path before writing
             #        them out to fix this properly on Windows. See:
@@ -2364,6 +2276,22 @@ class NinjaBackend(backends.Backend):
             cmdlist += static_linker.get_exelist()
             cmdlist += ['$LINK_ARGS']
             cmdlist += NinjaCommandArg.list(static_linker.get_output_args('$out'), Quoting.none)
+            # The default ar on MacOS (at least through version 12), does not
+            # add extern'd variables to the symbol table by default, and
+            # requires that apple's ranlib be called with a special flag
+            # instead after linking
+            if static_linker.id == 'applear':
+                # This is a bit of a hack, but we assume that that we won't need
+                # an rspfile on MacOS, otherwise the arguments are passed to
+                # ranlib, not to ar
+                cmdlist.extend(args)
+                args = []
+                # Ensure that we use the user-specified ranlib if any, and
+                # fallback to just picking up some ranlib otherwise
+                ranlib = self.environment.lookup_binary_entry(for_machine, 'ranlib')
+                if ranlib is None:
+                    ranlib = ['ranlib']
+                cmdlist.extend(['&&'] + ranlib + ['-c', '$out'])
             description = 'Linking static target $out'
             if num_pools > 0:
                 pool = 'pool = link_pool'
@@ -2530,7 +2458,11 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             # See also: https://github.com/ninja-build/ninja/pull/2275
             options['extra'] = 'restat = 1'
         rule = self.compiler_to_rule_name(compiler)
-        depargs = NinjaCommandArg.list(compiler.get_dependency_gen_args('$out', '$DEPFILE'), Quoting.none)
+        if langname == 'cuda':
+            # for cuda, we manually escape target name ($out) as $CUDA_ESCAPED_TARGET because nvcc doesn't support `-MQ` flag
+            depargs = NinjaCommandArg.list(compiler.get_dependency_gen_args('$CUDA_ESCAPED_TARGET', '$DEPFILE'), Quoting.none)
+        else:
+            depargs = NinjaCommandArg.list(compiler.get_dependency_gen_args('$out', '$DEPFILE'), Quoting.none)
         command = compiler.get_exelist()
         args = ['$ARGS'] + depargs + NinjaCommandArg.list(compiler.get_output_args('$out'), Quoting.none) + compiler.get_compile_only_args() + ['$in']
         description = f'Compiling {compiler.get_display_language()} object $out'
@@ -2624,7 +2556,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         exe = generator.get_exe()
         infilelist = genlist.get_inputs()
         outfilelist = genlist.get_outputs()
-        extra_dependencies = self.get_custom_target_depend_files(genlist)
+        extra_dependencies = self.get_target_depend_files(genlist)
         for i, curfile in enumerate(infilelist):
             if len(generator.outputs) == 1:
                 sole_output = os.path.join(self.get_target_private_dir(target), outfilelist[i])
@@ -2651,7 +2583,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             args = self.replace_paths(target, args, override_subdir=subdir)
             cmdlist, reason = self.as_meson_exe_cmdline(exe,
                                                         self.replace_extra_args(args, genlist),
-                                                        capture=outfiles[0] if generator.capture else None)
+                                                        capture=outfiles[0] if generator.capture else None,
+                                                        env=genlist.env)
             abs_pdir = os.path.join(self.environment.get_build_dir(), self.get_target_dir(target))
             os.makedirs(abs_pdir, exist_ok=True)
 
@@ -2799,16 +2732,18 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # this is actually doable, please send patches.
 
         if target.has_pch():
-            tfilename = self.get_target_filename_abs(target)
+            tfilename = self.get_target_debug_filename_abs(target)
+            if not tfilename:
+                tfilename = self.get_target_filename_abs(target)
             return compiler.get_compile_debugfile_args(tfilename, pch=True)
         else:
             return compiler.get_compile_debugfile_args(objfile, pch=False)
 
-    def get_link_debugfile_name(self, linker, target, outname) -> T.Optional[str]:
-        return linker.get_link_debugfile_name(outname)
+    def get_link_debugfile_name(self, linker, target) -> T.Optional[str]:
+        return linker.get_link_debugfile_name(self.get_target_debug_filename(target))
 
-    def get_link_debugfile_args(self, linker, target, outname):
-        return linker.get_link_debugfile_args(outname)
+    def get_link_debugfile_args(self, linker, target):
+        return linker.get_link_debugfile_args(self.get_target_debug_filename(target))
 
     def generate_llvm_ir_compile(self, target, src):
         base_proxy = target.get_options()
@@ -2864,10 +2799,9 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             bargs = []
         return (sargs, bargs)
 
-    def _generate_single_compile(self, target: build.BuildTarget, compiler: 'Compiler',
-                                 is_generated: bool = False) -> 'CompilerArgs':
+    def _generate_single_compile(self, target: build.BuildTarget, compiler: Compiler) -> CompilerArgs:
         commands = self._generate_single_compile_base_args(target, compiler)
-        commands += self._generate_single_compile_target_args(target, compiler, is_generated)
+        commands += self._generate_single_compile_target_args(target, compiler)
         return commands
 
     def _generate_single_compile_base_args(self, target: build.BuildTarget, compiler: 'Compiler') -> 'CompilerArgs':
@@ -2885,14 +2819,10 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         return commands
 
     @lru_cache(maxsize=None)
-    def _generate_single_compile_target_args(self, target: build.BuildTarget, compiler: 'Compiler',
-                                             is_generated: bool = False) -> 'ImmutableListProtocol[str]':
-        # The code generated by valac is usually crap and has tons of unused
-        # variables and such, so disable warnings for Vala C sources.
-        no_warn_args = is_generated == 'vala'
+    def _generate_single_compile_target_args(self, target: build.BuildTarget, compiler: Compiler) -> ImmutableListProtocol[str]:
         # Add compiler args and include paths from several sources; defaults,
         # build options, external dependencies, etc.
-        commands = self.generate_basic_compiler_args(target, compiler, no_warn_args)
+        commands = self.generate_basic_compiler_args(target, compiler)
         # Add custom target dirs as includes automatically, but before
         # target-specific include directories.
         if target.implicit_include_directories:
@@ -2961,7 +2891,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             if use_pch and 'mw' not in compiler.id:
                 commands += self.get_pch_include_args(compiler, target)
 
-            commands += self._generate_single_compile_target_args(target, compiler, is_generated=False)
+            commands += self._generate_single_compile_target_args(target, compiler)
 
             # Metrowerks compilers require PCH include args to come after intraprocedural analysis args
             if use_pch and 'mw' in compiler.id:
@@ -2973,7 +2903,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         return src_type_to_args
 
     def generate_single_compile(self, target: build.BuildTarget, src,
-                                is_generated=False, header_deps=None,
+                                is_generated: bool = False, header_deps=None,
                                 order_deps: T.Optional[T.List['mesonlib.FileOrString']] = None,
                                 extra_args: T.Optional[T.List[str]] = None,
                                 unity_sources: T.Optional[T.List[mesonlib.FileOrString]] = None) -> None:
@@ -2991,11 +2921,11 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
 
         # Include PCH header as first thing as it must be the first one or it will be
         # ignored by gcc https://gcc.gnu.org/bugzilla/show_bug.cgi?id=100462
-        use_pch = self.target_uses_pch(target) and is_generated != 'pch'
+        use_pch = self.target_uses_pch(target)
         if use_pch and 'mw' not in compiler.id:
             commands += self.get_pch_include_args(compiler, target)
 
-        commands += self._generate_single_compile_target_args(target, compiler, is_generated)
+        commands += self._generate_single_compile_target_args(target, compiler)
 
         # Metrowerks compilers require PCH include args to come after intraprocedural analysis args
         if use_pch and 'mw' in compiler.id:
@@ -3087,6 +3017,28 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             element.add_orderdep(i)
         if dep_file:
             element.add_item('DEPFILE', dep_file)
+        if compiler.get_language() == 'cuda':
+            # for cuda, we manually escape target name ($out) as $CUDA_ESCAPED_TARGET because nvcc doesn't support `-MQ` flag
+            def quote_make_target(targetName: str) -> str:
+                # this escape implementation is taken from llvm
+                result = ''
+                for (i, c) in enumerate(targetName):
+                    if c in {' ', '\t'}:
+                        # Escape the preceding backslashes
+                        for j in range(i - 1, -1, -1):
+                            if targetName[j] == '\\':
+                                result += '\\'
+                            else:
+                                break
+                        # Escape the space/tab
+                        result += '\\'
+                    elif c == '$':
+                        result += '$'
+                    elif c == '#':
+                        result += '\\'
+                    result += c
+                return result
+            element.add_item('CUDA_ESCAPED_TARGET', quote_make_target(rel_obj))
         element.add_item('ARGS', commands)
 
         self.add_dependency_scanner_entries_to_element(target, compiler, element, src)
@@ -3250,6 +3202,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 commands += linker.gen_import_library_args(self.get_import_filename(target))
             if target.pie:
                 commands += linker.get_pie_link_args()
+            if target.vs_module_defs and hasattr(linker, 'gen_vs_module_defs_args'):
+                commands += linker.gen_vs_module_defs_args(target.vs_module_defs.rel_to_builddir(self.build_to_src))
         elif isinstance(target, build.SharedLibrary):
             if isinstance(target, build.SharedModule):
                 commands += linker.get_std_shared_module_link_args(target.get_options())
@@ -3437,11 +3391,11 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # Add things like /NOLOGO; usually can't be overridden
         commands += linker.get_linker_always_args()
         # Add buildtype linker args: optimization level, etc.
-        commands += linker.get_buildtype_linker_args(target.get_option(OptionKey('buildtype')))
+        commands += linker.get_optimization_link_args(target.get_option(OptionKey('optimization')))
         # Add /DEBUG and the pdb filename when using MSVC
         if target.get_option(OptionKey('debug')):
-            commands += self.get_link_debugfile_args(linker, target, outname)
-            debugfile = self.get_link_debugfile_name(linker, target, outname)
+            commands += self.get_link_debugfile_args(linker, target)
+            debugfile = self.get_link_debugfile_name(linker, target)
             if debugfile is not None:
                 implicit_outs += [debugfile]
         # Add link args specific to this BuildTarget type, such as soname args,
@@ -3494,11 +3448,6 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         else:
             dependencies = target.get_dependencies()
         internal = self.build_target_link_arguments(linker, dependencies)
-        #In AIX since shared libraries are archived the dependencies must
-        #depend on .a file with the .so and not directly on the .so file.
-        if self.environment.machines[target.for_machine].is_aix():
-            for i, val in enumerate(internal):
-                internal[i] = linker.get_archive_name(val)
         commands += internal
         # Only non-static built targets need link args and link dependencies
         if not isinstance(target, build.StaticLibrary):
@@ -3624,7 +3573,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         if 'scan-build' in self.all_outputs:
             return
         cmd = self.environment.get_build_command() + \
-            ['--internal', 'scanbuild', self.environment.source_dir, self.environment.build_dir] + \
+            ['--internal', 'scanbuild', self.environment.source_dir, self.environment.build_dir, self.build.get_subproject_dir()] + \
             self.environment.get_build_command() + self.get_user_option_args()
         elem = self.create_phony_target('scan-build', 'CUSTOM_COMMAND', 'PHONY')
         elem.add_item('COMMAND', cmd)
@@ -3661,6 +3610,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         if not shutil.which('clang-tidy'):
             return
         self.generate_clangtool('tidy')
+        self.generate_clangtool('tidy', 'fix')
 
     def generate_tags(self, tool: str, target_name: str) -> None:
         import shutil
@@ -3703,7 +3653,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 # Add the first output of each target to the 'all' target so that
                 # they are all built
                 #Add archive file if shared library in AIX for build all.
-                if isinstance(t, build.SharedLibrary):
+                if isinstance(t, build.SharedLibrary) and t.aix_so_archive:
                     if self.environment.machines[t.for_machine].is_aix():
                         linker, stdlib_args = self.determine_linker_and_stdlib_args(t)
                         t.get_outputs()[0] = linker.get_archive_name(t.get_outputs()[0])

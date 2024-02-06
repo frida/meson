@@ -58,13 +58,16 @@ Builds a default or a specified target of a configured Meson project.
 
 *(since 0.55.0)*
 
-`TARGET` has the following syntax `[PATH/]NAME[:TYPE]`, where:
+`TARGET` has the following syntax `[PATH/]NAME.SUFFIX[:TYPE]`, where:
 - `NAME`: name of the target from `meson.build` (e.g. `foo` from `executable('foo', ...)`).
+- `SUFFIX`: name of the suffix of the target from `meson.build` (e.g. `exe` from `executable('foo', suffix: 'exe', ...)`).
 - `PATH`: path to the target relative to the root `meson.build` file. Note: relative path for a target specified in the root `meson.build` is `./`.
 - `TYPE`: type of the target. Can be one of the following: 'executable', 'static_library', 'shared_library', 'shared_module', 'custom', 'alias', 'run', 'jar'.
 
-`PATH` and/or `TYPE` can be omitted if the resulting `TARGET` can be
+`PATH`, `SUFFIX`, and `TYPE` can all be omitted if the resulting `TARGET` can be
 used to uniquely identify the target in `meson.build`.
+
+Note that `SUFFIX` did not exist prior to 1.3.0.
 
 #### Backend specific arguments
 
@@ -111,7 +114,7 @@ meson compile foo:shared_library foo:static_library bar
 Produce a coverage html report (if available):
 
 ```
-meson compile coverage-html
+ninja coverage-html
 ```
 
 ### dist
@@ -243,6 +246,17 @@ Configures a build directory for the Meson project.
 *Deprecated since 0.64.0*: This is the default Meson command (invoked if there
 was no COMMAND supplied). However, supplying the command is necessary to avoid
 clashes with future added commands, so "setup" should be used explicitly.
+
+*Since 1.1.0* `--reconfigure` is allowed even if the build directory does not
+already exist, that argument is ignored in that case.
+
+*Since 1.3.0* If the build directory already exists, options are updated with
+their new value given on the command line (`-Dopt=value`). Unless `--reconfigure`
+is also specified, this won't reconfigure immediately. This has the same behaviour
+as `meson configure <builddir> -Dopt=value`.
+
+*Since 1.3.0* It is possible to clear the cache and reconfigure in a single command
+with `meson setup --clearcache --reconfigure <builddir>`.
 
 {{ setup_arguments.inc }}
 

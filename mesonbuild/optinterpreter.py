@@ -1,16 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2013-2014 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 import re
@@ -20,7 +10,7 @@ from . import coredata
 from . import mesonlib
 from . import mparser
 from . import mlog
-from .interpreterbase import FeatureNew, typed_pos_args, typed_kwargs, ContainerTypeInfo, KwargInfo
+from .interpreterbase import FeatureNew, FeatureDeprecated, typed_pos_args, typed_kwargs, ContainerTypeInfo, KwargInfo
 from .interpreter.type_checking import NoneType, in_set_validator
 
 if T.TYPE_CHECKING:
@@ -113,7 +103,9 @@ class OptionInterpreter:
     def reduce_single(self, arg: T.Union[str, mparser.BaseNode]) -> 'TYPE_var':
         if isinstance(arg, str):
             return arg
-        elif isinstance(arg, (mparser.StringNode, mparser.BooleanNode,
+        if isinstance(arg, mparser.ParenthesizedNode):
+            return self.reduce_single(arg.inner)
+        elif isinstance(arg, (mparser.BaseStringNode, mparser.BooleanNode,
                               mparser.NumberNode)):
             return arg.value
         elif isinstance(arg, mparser.ArrayNode):
@@ -121,7 +113,7 @@ class OptionInterpreter:
         elif isinstance(arg, mparser.DictNode):
             d = {}
             for k, v in arg.args.kwargs.items():
-                if not isinstance(k, mparser.StringNode):
+                if not isinstance(k, mparser.BaseStringNode):
                     raise OptionException('Dictionary keys must be a string literal')
                 d[k.value] = self.reduce_single(v)
             return d
@@ -162,7 +154,7 @@ class OptionInterpreter:
     def evaluate_statement(self, node: mparser.BaseNode) -> None:
         if not isinstance(node, mparser.FunctionNode):
             raise OptionException('Option file may only contain option definitions')
-        func_name = node.func_name
+        func_name = node.func_name.value
         if func_name != 'option':
             raise OptionException('Only calls to option() are allowed in option files.')
         (posargs, kwargs) = self.reduce_arguments(node.args)
@@ -266,6 +258,11 @@ class OptionInterpreter:
     def string_array_parser(self, description: str, args: T.Tuple[bool, _DEPRECATED_ARGS], kwargs: StringArrayArgs) -> coredata.UserOption:
         choices = kwargs['choices']
         value = kwargs['value'] if kwargs['value'] is not None else choices
+        if isinstance(value, str):
+            if value.startswith('['):
+                FeatureDeprecated('String value for array option', '1.3.0').use(self.subproject)
+            else:
+                raise mesonlib.MesonException('Value does not define an array: ' + value)
         return coredata.UserArrayOption(description, value,
                                         choices=choices,
                                         yielding=args[0],

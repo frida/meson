@@ -6,6 +6,10 @@ concurrency:
 
 on:
   push:
+    branches:
+      - master
+      # Stable branches such as 0.56 or 1.0
+      - '[0-9]+.[0-9]+'
     paths:
       - "mesonbuild/**"
       - "test cases/**"
@@ -33,13 +37,14 @@ jobs:
         python-version: '3.x'
     - run: |
         python -m pip install --upgrade pip
-        python -m pip install pytest pytest-xdist pytest-subtests jsonschema coverage
+        python -m pip install pytest pytest-xdist pytest-subtests fastjsonschema coverage
     - run: brew install pkg-config ninja llvm qt@5
     - env:
         CPPFLAGS: "-I/usr/local/include"
         LDFLAGS: "-L/usr/local/lib"
         MESON_CI_JOBNAME: unittests-appleclang
         MESON_UNIT_TEST_BACKEND: ninja
+        HOMEBREW_NO_AUTO_UPDATE: 1
         # These cannot evaluate anything, so we cannot set PATH or SDKROOT here
       run: |
         export SDKROOT="$(xcodebuild -version -sdk macosx Path)"
@@ -73,6 +78,7 @@ jobs:
     name: ${{ matrix.NAME }}
     env:
       MESON_CI_JOBNAME: ${{ matrix.NAME }}
+      HOMEBREW_NO_AUTO_UPDATE: 1
 
     steps:
     - uses: actions/checkout@v3
@@ -117,6 +123,8 @@ jobs:
 
   Qt4macos:
     runs-on: macos-latest
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
     steps:
     - uses: actions/checkout@v3
     - uses: actions/setup-python@v4

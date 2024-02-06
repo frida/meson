@@ -166,7 +166,7 @@ execute permissions, the generated file will have them too.
 First initialize the build directory with this command.
 
 ```console
-$ meson <other flags> -Db_coverage=true
+$ meson setup <other flags> -Db_coverage=true
 ```
 
 Then issue the following commands.
@@ -174,7 +174,7 @@ Then issue the following commands.
 ```console
 $ meson compile
 $ meson test
-$ meson compile coverage-html (or coverage-xml)
+$ ninja coverage-html (or coverage-xml)
 ```
 
 The coverage report can be found in the meson-logs subdirectory.
@@ -202,7 +202,7 @@ sanitizer](https://clang.llvm.org/docs/AddressSanitizer.html). Meson
 has native support for these with the `b_sanitize` option.
 
 ```console
-$ meson <other options> -Db_sanitize=address
+$ meson setup <other options> -Db_sanitize=address
 ```
 
 After this you just compile your code and run the test suite. Address

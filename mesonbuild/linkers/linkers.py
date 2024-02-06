@@ -1,16 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2012-2022 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 import abc
@@ -55,7 +45,7 @@ class StaticLinker:
     def get_std_link_args(self, env: 'Environment', is_thin: bool) -> T.List[str]:
         return []
 
-    def get_buildtype_linker_args(self, buildtype: str) -> T.List[str]:
+    def get_optimization_link_args(self, optimization_level: str) -> T.List[str]:
         return []
 
     def get_output_args(self, target: str) -> T.List[str]:
@@ -113,13 +103,14 @@ class DynamicLinker(metaclass=abc.ABCMeta):
 
     """Base class for dynamic linkers."""
 
-    _BUILDTYPE_ARGS: T.Dict[str, T.List[str]] = {
+    _OPTIMIZATION_ARGS: T.Dict[str, T.List[str]] = {
         'plain': [],
-        'debug': [],
-        'debugoptimized': [],
-        'release': [],
-        'minsize': [],
-        'custom': [],
+        '0': [],
+        'g': [],
+        '1': [],
+        '2': [],
+        '3': [],
+        's': [],
     }
 
     @abc.abstractproperty
@@ -199,6 +190,11 @@ class DynamicLinker(metaclass=abc.ABCMeta):
         """
         return []
 
+    def get_optimization_link_args(self, optimization_level: str) -> T.List[str]:
+        # We can override these in children by just overriding the
+        # _OPTIMIZATION_ARGS value.
+        return mesonlib.listify([self._apply_prefix(a) for a in self._OPTIMIZATION_ARGS[optimization_level]])
+
     def get_std_shared_lib_args(self) -> T.List[str]:
         return []
 
@@ -219,11 +215,6 @@ class DynamicLinker(metaclass=abc.ABCMeta):
 
     def sanitizer_args(self, value: str) -> T.List[str]:
         return []
-
-    def get_buildtype_args(self, buildtype: str) -> T.List[str]:
-        # We can override these in children by just overriding the
-        # _BUILDTYPE_ARGS value.
-        return self._BUILDTYPE_ARGS[buildtype]
 
     def get_asneeded_args(self) -> T.List[str]:
         return []
@@ -349,6 +340,8 @@ class VisualStudioLinker(VisualStudioLikeLinker, StaticLinker):
 
     """Microsoft's lib static linker."""
 
+    id = 'lib'
+
     def __init__(self, exelist: T.List[str], machine: str):
         StaticLinker.__init__(self, exelist)
         VisualStudioLikeLinker.__init__(self, machine)
@@ -357,6 +350,8 @@ class VisualStudioLinker(VisualStudioLikeLinker, StaticLinker):
 class IntelVisualStudioLinker(VisualStudioLikeLinker, StaticLinker):
 
     """Intel's xilib static linker."""
+
+    id = 'xilib'
 
     def __init__(self, exelist: T.List[str], machine: str):
         StaticLinker.__init__(self, exelist)
@@ -586,13 +581,14 @@ class GnuLikeDynamicLinkerMixin(DynamicLinkerBase):
         for_machine = MachineChoice.HOST
         def _apply_prefix(self, arg: T.Union[str, T.List[str]]) -> T.List[str]: ...
 
-    _BUILDTYPE_ARGS: T.Dict[str, T.List[str]] = {
+    _OPTIMIZATION_ARGS: T.Dict[str, T.List[str]] = {
         'plain': [],
-        'debug': [],
-        'debugoptimized': [],
-        'release': ['-O1'],
-        'minsize': [],
-        'custom': [],
+        '0': [],
+        'g': [],
+        '1': [],
+        '2': [],
+        '3': ['-O1'],
+        's': [],
     }
 
     _SUBSYSTEMS: T.Dict[str, str] = {
@@ -606,11 +602,6 @@ class GnuLikeDynamicLinkerMixin(DynamicLinkerBase):
         "efi_rom": "13",
         "boot_application": "16",
     }
-
-    def get_buildtype_args(self, buildtype: str) -> T.List[str]:
-        # We can override these in children by just overriding the
-        # _BUILDTYPE_ARGS value.
-        return mesonlib.listify([self._apply_prefix(a) for a in self._BUILDTYPE_ARGS[buildtype]])
 
     def get_pie_args(self) -> T.List[str]:
         return ['-pie']
@@ -788,7 +779,15 @@ class AppleDynamicLinker(PosixDynamicLinkerMixin, DynamicLinker):
         return ['-fsanitize=' + value]
 
     def no_undefined_args(self) -> T.List[str]:
-        return self._apply_prefix('-undefined,error')
+        # We used to emit -undefined,error, but starting with Xcode 15 /
+        # Sonoma, doing so triggers "ld: warning: -undefined error is
+        # deprecated". Given that "-undefined error" is documented to be the
+        # linker's default behaviour, this warning seems ill advised. However,
+        # it does create a lot of noise.  As "-undefined error" is the default
+        # behaviour, the least bad way to deal with this seems to be to just
+        # not emit anything here. Of course that only works as long as nothing
+        # else injects -undefined dynamic_lookup, or such. Complain to Apple.
+        return []
 
     def headerpad_args(self) -> T.List[str]:
         return self._apply_prefix('-headerpad_max_install_names')
@@ -1229,15 +1228,16 @@ class VisualStudioLikeLinkerMixin(DynamicLinkerBase):
         for_machine = MachineChoice.HOST
         def _apply_prefix(self, arg: T.Union[str, T.List[str]]) -> T.List[str]: ...
 
-    _BUILDTYPE_ARGS: T.Dict[str, T.List[str]] = {
+    _OPTIMIZATION_ARGS: T.Dict[str, T.List[str]] = {
         'plain': [],
-        'debug': [],
-        'debugoptimized': [],
+        '0': [],
+        'g': [],
+        '1': [],
+        '2': [],
         # The otherwise implicit REF and ICF linker optimisations are disabled by
         # /DEBUG. REF implies ICF.
-        'release': ['/OPT:REF'],
-        'minsize': ['/INCREMENTAL:NO', '/OPT:REF'],
-        'custom': [],
+        '3': ['/OPT:REF'],
+        's': ['/INCREMENTAL:NO', '/OPT:REF'],
     }
 
     def __init__(self, exelist: T.List[str], for_machine: mesonlib.MachineChoice,
@@ -1247,9 +1247,6 @@ class VisualStudioLikeLinkerMixin(DynamicLinkerBase):
         super().__init__(exelist, for_machine, prefix_arg, always_args, version=version)
         self.machine = machine
         self.direct = direct
-
-    def get_buildtype_args(self, buildtype: str) -> T.List[str]:
-        return mesonlib.listify([self._apply_prefix(a) for a in self._BUILDTYPE_ARGS[buildtype]])
 
     def invoked_by_compiler(self) -> bool:
         return not self.direct
@@ -1268,8 +1265,7 @@ class VisualStudioLikeLinkerMixin(DynamicLinkerBase):
         return self._apply_prefix('/DLL')
 
     def get_debugfile_name(self, targetfile: str) -> str:
-        basename = targetfile.rsplit('.', maxsplit=1)[0]
-        return basename + '.pdb'
+        return targetfile
 
     def get_debugfile_args(self, targetfile: str) -> T.List[str]:
         return self._apply_prefix(['/DEBUG', '/PDB:' + self.get_debugfile_name(targetfile)])
@@ -1312,7 +1308,7 @@ class MSVCDynamicLinker(VisualStudioLikeLinkerMixin, DynamicLinker):
                          prefix, always_args, machine=machine, version=version, direct=direct)
 
     def get_always_args(self) -> T.List[str]:
-        return self._apply_prefix(['/nologo', '/release']) + super().get_always_args()
+        return self._apply_prefix(['/release']) + super().get_always_args()
 
     def get_win_subsystem_args(self, value: str) -> T.List[str]:
         return self._apply_prefix([f'/SUBSYSTEM:{value.upper()}'])

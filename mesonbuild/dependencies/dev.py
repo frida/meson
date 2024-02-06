@@ -1,19 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2013-2019 The Meson development team
-
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-# This file contains the detection logic for external dependencies useful for
-# development purposes, such as testing, debugging, etc..
 
 from __future__ import annotations
 
@@ -232,6 +218,7 @@ class LLVMDependencyConfigTool(ConfigToolDependency):
 
         cargs = mesonlib.OrderedSet(self.get_config_value(['--cppflags'], 'compile_args'))
         self.compile_args = list(cargs.difference(self.__cpp_blacklist))
+        self.compile_args = strip_system_includedirs(environment, self.for_machine, self.compile_args)
 
         if version_compare(self.version, '>= 3.9'):
             self._set_new_link_args(environment)
@@ -536,7 +523,7 @@ class ZlibSystemDependency(SystemDependency):
             else:
                 libs = ['z']
             for lib in libs:
-                l = self.clib_compiler.find_library(lib, environment, [])
+                l = self.clib_compiler.find_library(lib, environment, [], self.libtype)
                 h = self.clib_compiler.has_header('zlib.h', '', environment, dependencies=[self])
                 if l and h[0]:
                     self.is_found = True

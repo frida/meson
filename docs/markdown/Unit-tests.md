@@ -38,6 +38,12 @@ set to a random value between 1..255. This can help find memory leaks on
 configurations using glibc, including with non-GCC compilers. This feature
 can be disabled as discussed in [[test]].
 
+### ASAN_OPTIONS and UBSAN_OPTIONS
+
+By default, the environment variables `ASAN_OPTIONS` and `UBSAN_OPTIONS` are
+set to enable aborting on detected violations and to give a backtrace. This
+feature can be disabled as discussed in [[test]].
+
 ## Coverage
 
 If you enable coverage measurements by giving Meson the command line
@@ -49,7 +55,7 @@ targets. These targets are `coverage-xml` and `coverage-text` which
 are both provided by [Gcovr](http://gcovr.com) (version 3.3 or higher)
 `coverage-sonarqube` which is provided by [Gcovr](http://gcovr.com) (version 4.2 or higher)
 and `coverage-html`, which requires
-[Lcov](https://ltp.sourceforge.io/coverage/lcov.php) and
+[lcov](https://github.com/linux-test-project/lcov) and
 [GenHTML](https://linux.die.net/man/1/genhtml) or
 [Gcovr](http://gcovr.com). As a convenience, a high-level `coverage`
 target is also generated which will produce all 3 coverage report

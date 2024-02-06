@@ -1,16 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2016-2021 The Meson development team
-
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import subprocess
 import re
@@ -394,7 +383,7 @@ class AllPlatformTests(BasePlatformTests):
         self.init(testdir)
         # Get name of static library
         targets = self.introspect('--targets')
-        self.assertEqual(len(targets), 1)
+        self.assertGreaterEqual(len(targets), 1)
         libname = targets[0]['filename'][0]
         # Build and get contents of static library
         self.build()
@@ -474,7 +463,7 @@ class AllPlatformTests(BasePlatformTests):
         '''
         if not shutil.which('xmllint'):
             raise SkipTest('xmllint not installed')
-        testdir = os.path.join(self.unit_test_dir, '110 replace unencodable xml chars')
+        testdir = os.path.join(self.unit_test_dir, '111 replace unencodable xml chars')
         self.init(testdir)
         tests_command_output = self.run_tests()
         junit_xml_logs = Path(self.logdir, 'testlog.junit.xml')
@@ -1675,6 +1664,14 @@ class AllPlatformTests(BasePlatformTests):
             shared_suffix = 'so'
         return (cc, stlinker, object_suffix, shared_suffix)
 
+    def detect_prebuild_env_versioned(self):
+        (cc, stlinker, object_suffix, shared_suffix) = self.detect_prebuild_env()
+        shared_suffixes = [shared_suffix]
+        if shared_suffix == 'so':
+            # .so may have version information integrated into the filename
+            shared_suffixes += ['so.1', 'so.1.2.3', '1.so', '1.so.2.3']
+        return (cc, stlinker, object_suffix, shared_suffixes)
+
     def pbcompile(self, compiler, source, objectfile, extra_args=None):
         cmd = compiler.get_exelist()
         extra_args = extra_args or []
@@ -1797,6 +1794,90 @@ class AllPlatformTests(BasePlatformTests):
             self.init(tdir, extra_args=[f'-Dsearch_dir={d}'])
             self.build()
             self.run_tests()
+
+    @skipIfNoPkgconfig
+    def test_prebuilt_shared_lib_pkg_config(self) -> None:
+        (cc, _, object_suffix, shared_suffixes) = self.detect_prebuild_env_versioned()
+        tdir = os.path.join(self.unit_test_dir, '17 prebuilt shared')
+        for shared_suffix in shared_suffixes:
+            with tempfile.TemporaryDirectory() as d:
+                source = os.path.join(tdir, 'alexandria.c')
+                objectfile = os.path.join(d, 'alexandria.' + object_suffix)
+                impfile = os.path.join(d, 'alexandria.lib')
+                if cc.get_argument_syntax() == 'msvc':
+                    shlibfile = os.path.join(d, 'alexandria.' + shared_suffix)
+                    linkfile = impfile  # MSVC links against the *.lib instead of the *.dll
+                elif is_cygwin():
+                    shlibfile = os.path.join(d, 'cygalexandria.' + shared_suffix)
+                    linkfile = shlibfile
+                else:
+                    shlibfile = os.path.join(d, 'libalexandria.' + shared_suffix)
+                    linkfile = shlibfile
+                # Ensure MSVC extra files end up in the directory that gets deleted
+                # at the end
+                with chdir(d):
+                    self.build_shared_lib(cc, source, objectfile, shlibfile, impfile)
+
+                with open(os.path.join(d, 'alexandria.pc'), 'w',
+                          encoding='utf-8') as f:
+                    f.write(textwrap.dedent('''
+                        Name: alexandria
+                        Description: alexandria
+                        Version: 1.0.0
+                        Libs: {}
+                        ''').format(
+                            Path(linkfile).as_posix().replace(' ', r'\ '),
+                        ))
+
+                # Run the test
+                self.init(tdir, override_envvars={'PKG_CONFIG_PATH': d},
+                        extra_args=['-Dmethod=pkg-config'])
+                self.build()
+                self.run_tests()
+
+                self.wipe()
+
+    @skip_if_no_cmake
+    def test_prebuilt_shared_lib_cmake(self) -> None:
+        (cc, _, object_suffix, shared_suffixes) = self.detect_prebuild_env_versioned()
+        tdir = os.path.join(self.unit_test_dir, '17 prebuilt shared')
+        for shared_suffix in shared_suffixes:
+            with tempfile.TemporaryDirectory() as d:
+                source = os.path.join(tdir, 'alexandria.c')
+                objectfile = os.path.join(d, 'alexandria.' + object_suffix)
+                impfile = os.path.join(d, 'alexandria.lib')
+                if cc.get_argument_syntax() == 'msvc':
+                    shlibfile = os.path.join(d, 'alexandria.' + shared_suffix)
+                    linkfile = impfile  # MSVC links against the *.lib instead of the *.dll
+                elif is_cygwin():
+                    shlibfile = os.path.join(d, 'cygalexandria.' + shared_suffix)
+                    linkfile = shlibfile
+                else:
+                    shlibfile = os.path.join(d, 'libalexandria.' + shared_suffix)
+                    linkfile = shlibfile
+                # Ensure MSVC extra files end up in the directory that gets deleted
+                # at the end
+                with chdir(d):
+                    self.build_shared_lib(cc, source, objectfile, shlibfile, impfile)
+
+                with open(os.path.join(d, 'alexandriaConfig.cmake'), 'w',
+                        encoding='utf-8') as f:
+                    f.write(textwrap.dedent('''
+                        set(alexandria_FOUND ON)
+                        set(alexandria_LIBRARIES "{}")
+                        set(alexandria_INCLUDE_DIRS "{}")
+                        ''').format(
+                            re.sub(r'([\\"])', r'\\\1', linkfile),
+                            re.sub(r'([\\"])', r'\\\1', tdir),
+                        ))
+
+                # Run the test
+                self.init(tdir, override_envvars={'CMAKE_PREFIX_PATH': d},
+                        extra_args=['-Dmethod=cmake'])
+                self.build()
+                self.run_tests()
+
+                self.wipe()
 
     def test_prebuilt_shared_lib_rpath_same_prefix(self) -> None:
         (cc, _, object_suffix, shared_suffix) = self.detect_prebuild_env()
@@ -2039,6 +2120,25 @@ class AllPlatformTests(BasePlatformTests):
         original = get_opt()
         self.assertDictEqual(original, expected)
 
+    def test_executable_names(self):
+        testdir = os.path.join(self.unit_test_dir, '121 executable suffix')
+        self.init(testdir)
+        self.build()
+        exe1 = os.path.join(self.builddir, 'foo' + exe_suffix)
+        exe2 = os.path.join(self.builddir, 'foo.bin')
+        self.assertPathExists(exe1)
+        self.assertPathExists(exe2)
+        self.assertNotEqual(exe1, exe2)
+
+        # Wipe and run the compile command against the target names
+        self.init(testdir, extra_args=['--wipe'])
+        self._run([*self.meson_command, 'compile', '-C', self.builddir, './foo'])
+        self._run([*self.meson_command, 'compile', '-C', self.builddir, './foo.bin'])
+        self.assertPathExists(exe1)
+        self.assertPathExists(exe2)
+        self.assertNotEqual(exe1, exe2)
+
+
     def opt_has(self, name, value):
         res = self.introspect('--buildoptions')
         found = False
@@ -2112,7 +2212,7 @@ class AllPlatformTests(BasePlatformTests):
 
     def test_options_listed_in_build_options(self) -> None:
         """Detect when changed options become listed in build options."""
-        testdir = os.path.join(self.unit_test_dir, '112 list build options')
+        testdir = os.path.join(self.unit_test_dir, '113 list build options')
 
         out = self.init(testdir)
         for line in out.splitlines():
@@ -2217,9 +2317,9 @@ class AllPlatformTests(BasePlatformTests):
         for (t, f) in [
             ('10 out of bounds', 'meson.build'),
             ('18 wrong plusassign', 'meson.build'),
-            ('59 bad option argument', 'meson_options.txt'),
-            ('97 subdir parse error', os.path.join('subdir', 'meson.build')),
-            ('98 invalid option file', 'meson_options.txt'),
+            ('57 bad option argument', 'meson_options.txt'),
+            ('95 subdir parse error', os.path.join('subdir', 'meson.build')),
+            ('96 invalid option file', 'meson_options.txt'),
         ]:
             tdir = os.path.join(self.src_root, 'test cases', 'failing', t)
 
@@ -3028,6 +3128,37 @@ class AllPlatformTests(BasePlatformTests):
         out = self.run_target('clang-tidy')
         self.assertIn('cttest.cpp:4:20', out)
         self.assertNotIn(dummydir, out)
+
+    @skipIfNoExecutable('clang-tidy')
+    def test_clang_tidy_fix(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'Clang-tidy is for now only supported on Ninja, not {self.backend.name}')
+        if shutil.which('c++') is None:
+            raise SkipTest('Clang-tidy breaks when ccache is used and "c++" not in path.')
+        if is_osx():
+            raise SkipTest('Apple ships a broken clang-tidy that chokes on -pipe.')
+        testdir = os.path.join(self.unit_test_dir, '68 clang-tidy')
+
+        # Ensure that test project is in git even when running meson from tarball.
+        srcdir = os.path.join(self.builddir, 'src')
+        shutil.copytree(testdir, srcdir)
+        git_init(srcdir)
+        testdir = srcdir
+        self.new_builddir()
+
+        dummydir = os.path.join(testdir, 'dummydir.h')
+        testfile = os.path.join(testdir, 'cttest.cpp')
+        fixedfile = os.path.join(testdir, 'cttest_fixed.cpp')
+        self.init(testdir, override_envvars={'CXX': 'c++'})
+        # Make sure test files are different
+        self.assertNotEqual(Path(testfile).read_text(encoding='utf-8'),
+                            Path(fixedfile).read_text(encoding='utf-8'))
+        out = self.run_target('clang-tidy-fix')
+        self.assertIn('cttest.cpp:4:20', out)
+        self.assertNotIn(dummydir, out)
+        # Make sure the test file is fixed
+        self.assertEqual(Path(testfile).read_text(encoding='utf-8'),
+                         Path(fixedfile).read_text(encoding='utf-8'))
 
     def test_identity_cross(self):
         testdir = os.path.join(self.unit_test_dir, '69 cross')
@@ -3982,17 +4113,23 @@ class AllPlatformTests(BasePlatformTests):
                     [properties]
                     c_args = common_flags + ['-DSOMETHING']
                     cpp_args = c_args + ['-DSOMETHING_ELSE']
+                    rel_to_src = '@GLOBAL_SOURCE_ROOT@' / 'tool'
+                    rel_to_file = '@DIRNAME@' / 'tool'
+                    no_escaping = '@@DIRNAME@@' / 'tool'
 
                     [binaries]
                     c = toolchain / compiler
                     '''))
 
-            values = mesonbuild.coredata.parse_machine_files([crossfile1, crossfile2])
+            values = mesonbuild.coredata.parse_machine_files([crossfile1, crossfile2], self.builddir)
             self.assertEqual(values['binaries']['c'], '/toolchain/gcc')
             self.assertEqual(values['properties']['c_args'],
                              ['--sysroot=/toolchain/sysroot', '-DSOMETHING'])
             self.assertEqual(values['properties']['cpp_args'],
                              ['--sysroot=/toolchain/sysroot', '-DSOMETHING', '-DSOMETHING_ELSE'])
+            self.assertEqual(values['properties']['rel_to_src'], os.path.join(self.builddir, 'tool'))
+            self.assertEqual(values['properties']['rel_to_file'], os.path.join(os.path.dirname(crossfile2), 'tool'))
+            self.assertEqual(values['properties']['no_escaping'], os.path.join(f'@{os.path.dirname(crossfile2)}@', 'tool'))
 
     @skipIf(is_windows(), 'Directory cleanup fails for some reason')
     def test_wrap_git(self):
@@ -4754,6 +4891,34 @@ class AllPlatformTests(BasePlatformTests):
         self.assertEqual(cm.exception.returncode, 1)
         self.assertIn('exit status 39', cm.exception.stdout)
 
+    @skip_if_not_language('rust')
+    def test_bindgen_drops_invalid(self) -> None:
+        if self.backend is not Backend.ninja:
+            raise unittest.SkipTest('Rust is only supported with ninja currently')
+        testdir = os.path.join(self.rust_test_dir, '12 bindgen')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cc = detect_c_compiler(env, MachineChoice.HOST)
+        # bindgen understands compiler args that clang understands, but not
+        # flags by other compilers
+        if cc.get_id() == 'gcc':
+            bad_arg = '-fdse'
+        elif cc.get_id() == 'msvc':
+            bad_arg = '/fastfail'
+        else:
+            raise unittest.SkipTest('Test only supports GCC and MSVC')
+        self.init(testdir, extra_args=[f"-Dc_args=['-DCMD_ARG', '{bad_arg}']"])
+        intro = self.introspect(['--targets'])
+        for i in intro:
+            if i['type'] == 'custom' and i['id'].startswith('rustmod-bindgen'):
+                args = i['target_sources'][0]['compiler']
+                self.assertIn('-DCMD_ARG', args)
+                self.assertIn('-DPROJECT_ARG', args)
+                self.assertIn('-DGLOBAL_ARG', args)
+                self.assertNotIn(bad_arg, args)
+                self.assertNotIn('-mtls-dialect=gnu2', args)
+                self.assertNotIn('/fp:fast', args)
+                return
+
     def test_custom_target_name(self):
         testdir = os.path.join(self.unit_test_dir, '100 custom target name')
         self.init(testdir)
@@ -4814,3 +4979,36 @@ class AllPlatformTests(BasePlatformTests):
             self.assertNotEqual(olddata, newdata)
             olddata = newdata
             oldmtime = newmtime
+
+    def test_c_cpp_stds(self):
+        testdir = os.path.join(self.unit_test_dir, '115 c cpp stds')
+        self.init(testdir)
+        # Invalid values should fail whatever compiler we have
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.setconf('-Dc_std=invalid')
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.setconf('-Dc_std=c89,invalid')
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.setconf('-Dc_std=c++11')
+        env = get_fake_env()
+        cc = detect_c_compiler(env, MachineChoice.HOST)
+        if cc.get_id() == 'msvc':
+            # default_option should have selected those
+            self.assertEqual(self.getconf('c_std'), 'c89')
+            self.assertEqual(self.getconf('cpp_std'), 'vc++11')
+            # This is deprecated but works for C
+            self.setconf('-Dc_std=gnu99')
+            self.assertEqual(self.getconf('c_std'), 'c99')
+            # C++ however never accepted that fallback
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.setconf('-Dcpp_std=gnu++11')
+            # The first supported std should be selected
+            self.setconf('-Dcpp_std=gnu++11,vc++11,c++11')
+            self.assertEqual(self.getconf('cpp_std'), 'vc++11')
+        elif cc.get_id() == 'gcc':
+            # default_option should have selected those
+            self.assertEqual(self.getconf('c_std'), 'gnu89')
+            self.assertEqual(self.getconf('cpp_std'), 'gnu++98')
+            # The first supported std should be selected
+            self.setconf('-Dcpp_std=c++11,gnu++11,vc++11')
+            self.assertEqual(self.getconf('cpp_std'), 'c++11')

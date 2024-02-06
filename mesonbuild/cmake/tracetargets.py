@@ -1,4 +1,4 @@
-# SPDX-License-Identifer: Apache-2.0
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2021 The Meson development team
 from __future__ import annotations
 
@@ -55,7 +55,11 @@ def resolve_cmake_trace_targets(target_name: str,
                 # CMake brute-forces a combination of prefix/suffix combinations to find the
                 # right library. Assume any bare argument passed which is not also a CMake
                 # target must be a system library we should try to link against.
-                res.libraries += clib_compiler.find_library(curr, env, [])
+                flib = clib_compiler.find_library(curr, env, [])
+                if flib is not None:
+                    res.libraries += flib
+                else:
+                    not_found_warning(curr)
             else:
                 not_found_warning(curr)
             continue

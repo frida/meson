@@ -1,16 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2022 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 import functools, json, os, textwrap
@@ -115,7 +105,9 @@ class BasicPythonExternalProgram(ExternalProgram):
 
         with importlib.resources.path('mesonbuild.scripts', 'python_info.py') as f:
             cmd = self.get_command() + [str(f)]
-            p, stdout, stderr = mesonlib.Popen_safe(cmd)
+            env = os.environ.copy()
+            env['SETUPTOOLS_USE_DISTUTILS'] = 'stdlib'
+            p, stdout, stderr = mesonlib.Popen_safe(cmd, env=env)
 
         try:
             info = json.loads(stdout)
@@ -243,14 +235,15 @@ class PythonSystemDependency(SystemDependency, _PythonDependencyBase):
             self.is_found = True
 
     def get_windows_python_arch(self) -> T.Optional[str]:
-        if self.platform == 'mingw':
-            pycc = self.variables.get('CC')
-            if pycc.startswith('x86_64'):
+        if self.platform.startswith('mingw'):
+            if 'x86_64' in self.platform:
                 return 'x86_64'
-            elif pycc.startswith(('i686', 'i386')):
+            elif 'i686' in self.platform:
                 return 'x86'
+            elif 'aarch64' in self.platform:
+                return 'aarch64'
             else:
-                mlog.log(f'MinGW Python built with unknown CC {pycc!r}, please file a bug')
+                mlog.log(f'MinGW Python built with unknown platform {self.platform!r}, please file a bug')
                 return None
         elif self.platform == 'win32':
             return 'x86'
@@ -307,7 +300,7 @@ class PythonSystemDependency(SystemDependency, _PythonDependencyBase):
                             '''))
             # base_prefix to allow for virtualenvs.
             lib = Path(self.variables.get('base_prefix')) / libpath
-        elif self.platform == 'mingw':
+        elif self.platform.startswith('mingw'):
             if self.static:
                 libname = self.variables.get('LIBRARY')
             else:

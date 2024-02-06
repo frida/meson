@@ -1,16 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2013-2014 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 from glob import glob
@@ -64,12 +54,16 @@ if T.TYPE_CHECKING:
         strip: bool
 
 
-symlink_warning = '''Warning: trying to copy a symlink that points to a file. This will copy the file,
-but this will be changed in a future version of Meson to copy the symlink as is. Please update your
-build definitions so that it will not break when the change happens.'''
+symlink_warning = '''\
+Warning: trying to copy a symlink that points to a file. This currently copies
+the file by default, but will be changed in a future version of Meson to copy
+the link instead.  Set follow_symlinks to true to preserve current behavior, or
+false to copy the link.'''
 
 selinux_updates: T.List[str] = []
 
+# Note: when adding arguments, please also add them to the completion
+# scripts in $MESONSRC/data/shell-completions/
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('-C', dest='wd', action=RealPathAction,
                         help='directory to cd into before running')
@@ -389,7 +383,8 @@ class Installer:
         return from_time <= to_time
 
     def do_copyfile(self, from_file: str, to_file: str,
-                    makedirs: T.Optional[T.Tuple[T.Any, str]] = None) -> bool:
+                    makedirs: T.Optional[T.Tuple[T.Any, str]] = None,
+                    follow_symlinks: T.Optional[bool] = None) -> bool:
         outdir = os.path.split(to_file)[0]
         if not os.path.isfile(from_file) and not os.path.islink(from_file):
             raise MesonException(f'Tried to install something that isn\'t a file: {from_file!r}')
@@ -403,22 +398,24 @@ class Installer:
                 append_to_log(self.lf, f'# Preserving old file {to_file}\n')
                 self.preserved_file_count += 1
                 return False
+            self.log(f'Installing {from_file} to {outdir}')
             self.remove(to_file)
-        elif makedirs:
-            # Unpack tuple
-            dirmaker, outdir = makedirs
-            # Create dirs if needed
-            dirmaker.makedirs(outdir, exist_ok=True)
-        self.log(f'Installing {from_file} to {outdir}')
+        else:
+            self.log(f'Installing {from_file} to {outdir}')
+            if makedirs:
+                # Unpack tuple
+                dirmaker, outdir = makedirs
+                # Create dirs if needed
+                dirmaker.makedirs(outdir, exist_ok=True)
         if os.path.islink(from_file):
             if not os.path.exists(from_file):
                 # Dangling symlink. Replicate as is.
                 self.copy(from_file, outdir, follow_symlinks=False)
             else:
-                # Remove this entire branch when changing the behaviour to duplicate
-                # symlinks rather than copying what they point to.
-                print(symlink_warning)
-                self.copy2(from_file, to_file)
+                if follow_symlinks is None:
+                    follow_symlinks = True  # TODO: change to False when removing the warning
+                    print(symlink_warning)
+                self.copy2(from_file, to_file, follow_symlinks=follow_symlinks)
         else:
             self.copy2(from_file, to_file)
         selinux_updates.append(to_file)
@@ -452,7 +449,7 @@ class Installer:
 
     def do_copydir(self, data: InstallData, src_dir: str, dst_dir: str,
                    exclude: T.Optional[T.Tuple[T.Set[str], T.Set[str]]],
-                   install_mode: 'FileMode', dm: DirMaker) -> None:
+                   install_mode: 'FileMode', dm: DirMaker, follow_symlinks: T.Optional[bool] = None) -> None:
         '''
         Copies the contents of directory @src_dir into @dst_dir.
 
@@ -517,7 +514,7 @@ class Installer:
                     dm.makedirs(parent_dir)
                     self.copystat(os.path.dirname(abs_src), parent_dir)
                 # FIXME: what about symlinks?
-                self.do_copyfile(abs_src, abs_dst)
+                self.do_copyfile(abs_src, abs_dst, follow_symlinks=follow_symlinks)
                 self.set_mode(abs_dst, install_mode, data.install_umask)
 
     def do_install(self, datafilename: str) -> None:
@@ -611,7 +608,8 @@ class Installer:
             full_dst_dir = get_destdir_path(destdir, fullprefix, i.install_path)
             self.log(f'Installing subdir {i.path} to {full_dst_dir}')
             dm.makedirs(full_dst_dir, exist_ok=True)
-            self.do_copydir(d, i.path, full_dst_dir, i.exclude, i.install_mode, dm)
+            self.do_copydir(d, i.path, full_dst_dir, i.exclude, i.install_mode, dm,
+                            follow_symlinks=i.follow_symlinks)
 
     def install_data(self, d: InstallData, dm: DirMaker, destdir: str, fullprefix: str) -> None:
         for i in d.data:
@@ -620,7 +618,7 @@ class Installer:
             fullfilename = i.path
             outfilename = get_destdir_path(destdir, fullprefix, i.install_path)
             outdir = os.path.dirname(outfilename)
-            if self.do_copyfile(fullfilename, outfilename, makedirs=(dm, outdir)):
+            if self.do_copyfile(fullfilename, outfilename, makedirs=(dm, outdir), follow_symlinks=i.follow_symlinks):
                 self.did_install_something = True
             self.set_mode(outfilename, i.install_mode, d.install_umask)
 
@@ -666,7 +664,8 @@ class Installer:
             fname = os.path.basename(fullfilename)
             outdir = get_destdir_path(destdir, fullprefix, t.install_path)
             outfilename = os.path.join(outdir, fname)
-            if self.do_copyfile(fullfilename, outfilename, makedirs=(dm, outdir)):
+            if self.do_copyfile(fullfilename, outfilename, makedirs=(dm, outdir),
+                                follow_symlinks=t.follow_symlinks):
                 self.did_install_something = True
             self.set_mode(outfilename, t.install_mode, d.install_umask)
 
@@ -713,8 +712,9 @@ class Installer:
             # In AIX, we archive our shared libraries.  When we install any package in AIX we need to
             # install the archive in which the shared library exists. The below code does the same.
             # We change the .so files having lt_version or so_version to archive file install.
+            # If .so does not exist then it means it is in the archive. Otherwise it is a .so that exists.
             if is_aix():
-                if '.so' in t.fname:
+                if not os.path.exists(t.fname) and '.so' in t.fname:
                     t.fname = re.sub('[.][a]([.]?([0-9]+))*([.]?([a-z]+))*', '.a', t.fname.replace('.so', '.a'))
             if not self.should_install(t):
                 continue

@@ -1,16 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2012-2020 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 import itertools
@@ -96,6 +86,20 @@ def detect_gcovr(min_version: str = '3.3', log: bool = False):
         return gcovr_exe, found
     return None, None
 
+def detect_lcov(log: bool = False):
+    lcov_exe = 'lcov'
+    try:
+        p, found = Popen_safe([lcov_exe, '--version'])[0:2]
+    except (FileNotFoundError, PermissionError):
+        # Doesn't exist in PATH or isn't executable
+        return None, None
+    found = search_version(found)
+    if p.returncode == 0 and found:
+        if log:
+            mlog.log('Found lcov-{} at {}'.format(found, quote_arg(shutil.which(lcov_exe))))
+        return lcov_exe, found
+    return None, None
+
 def detect_llvm_cov():
     tools = get_llvm_tool_names('llvm-cov')
     for tool in tools:
@@ -103,20 +107,18 @@ def detect_llvm_cov():
             return tool
     return None
 
-def find_coverage_tools() -> T.Tuple[T.Optional[str], T.Optional[str], T.Optional[str], T.Optional[str], T.Optional[str]]:
+def find_coverage_tools() -> T.Tuple[T.Optional[str], T.Optional[str], T.Optional[str], T.Optional[str], T.Optional[str], T.Optional[str]]:
     gcovr_exe, gcovr_version = detect_gcovr()
 
     llvm_cov_exe = detect_llvm_cov()
 
-    lcov_exe = 'lcov'
+    lcov_exe, lcov_version = detect_lcov()
     genhtml_exe = 'genhtml'
 
-    if not mesonlib.exe_exists([lcov_exe, '--version']):
-        lcov_exe = None
     if not mesonlib.exe_exists([genhtml_exe, '--version']):
         genhtml_exe = None
 
-    return gcovr_exe, gcovr_version, lcov_exe, genhtml_exe, llvm_cov_exe
+    return gcovr_exe, gcovr_version, lcov_exe, lcov_version, genhtml_exe, llvm_cov_exe
 
 def detect_ninja(version: str = '1.8.2', log: bool = False) -> T.List[str]:
     r = detect_ninja_command_and_version(version, log)
@@ -157,6 +159,7 @@ def get_llvm_tool_names(tool: str) -> T.List[str]:
     # unless it becomes a stable release.
     suffixes = [
         '', # base (no suffix)
+        '-17',  '17',
         '-16',  '16',
         '-15',  '15',
         '-14',  '14',
@@ -410,6 +413,11 @@ KERNEL_MAPPINGS: T.Mapping[str, str] = {'freebsd': 'freebsd',
 
 def detect_kernel(system: str) -> T.Optional[str]:
     if system == 'sunos':
+        # Solaris 5.10 uname doesn't support the -o switch, and illumos started
+        # with version 5.11 so shortcut the logic to report 'solaris' in such
+        # cases where the version is 5.10 or below.
+        if mesonlib.version_compare(platform.uname().release, '<=5.10'):
+            return 'solaris'
         # This needs to be /usr/bin/uname because gnu-uname could be installed and
         # won't provide the necessary information
         p, out, _ = Popen_safe(['/usr/bin/uname', '-o'])
@@ -477,7 +485,7 @@ class Environment:
     log_dir = 'meson-logs'
     info_dir = 'meson-info'
 
-    def __init__(self, source_dir: T.Optional[str], build_dir: T.Optional[str], options: 'argparse.Namespace') -> None:
+    def __init__(self, source_dir: str, build_dir: str, options: 'argparse.Namespace') -> None:
         self.source_dir = source_dir
         self.build_dir = build_dir
         # Do not try to create build directories when build_dir is none.
@@ -490,7 +498,7 @@ class Environment:
             os.makedirs(self.log_dir, exist_ok=True)
             os.makedirs(self.info_dir, exist_ok=True)
             try:
-                self.coredata: coredata.CoreData = coredata.load(self.get_build_dir())
+                self.coredata: coredata.CoreData = coredata.load(self.get_build_dir(), suggest_reconfigure=False)
                 self.first_invocation = False
             except FileNotFoundError:
                 self.create_new_coredata(options)
@@ -508,7 +516,7 @@ class Environment:
                     coredata.read_cmd_line_file(self.build_dir, options)
                     self.create_new_coredata(options)
                 else:
-                    raise e
+                    raise MesonException(f'{str(e)} Try regenerating using "meson setup --wipe".')
         else:
             # Just create a fresh coredata in this case
             self.scratch_dir = ''
@@ -550,7 +558,7 @@ class Environment:
         ## Read in native file(s) to override build machine configuration
 
         if self.coredata.config_files is not None:
-            config = coredata.parse_machine_files(self.coredata.config_files)
+            config = coredata.parse_machine_files(self.coredata.config_files, self.source_dir)
             binaries.build = BinaryTable(config.get('binaries', {}))
             properties.build = Properties(config.get('properties', {}))
             cmakevars.build = CMakeVariables(config.get('cmake', {}))
@@ -561,7 +569,7 @@ class Environment:
         ## Read in cross file(s) to override host machine configuration
 
         if self.coredata.cross_files:
-            config = coredata.parse_machine_files(self.coredata.cross_files)
+            config = coredata.parse_machine_files(self.coredata.cross_files, self.source_dir)
             properties.host = Properties(config.get('properties', {}))
             binaries.host = BinaryTable(config.get('binaries', {}))
             cmakevars.host = CMakeVariables(config.get('cmake', {}))
@@ -747,7 +755,10 @@ class Environment:
         for (name, evar), for_machine in itertools.product(opts, MachineChoice):
             p_env = _get_env_var(for_machine, self.is_cross_build(), evar)
             if p_env is not None:
-                self.binaries[for_machine].binaries.setdefault(name, mesonlib.split_args(p_env))
+                if os.path.exists(p_env):
+                    self.binaries[for_machine].binaries.setdefault(name, [p_env])
+                else:
+                    self.binaries[for_machine].binaries.setdefault(name, mesonlib.split_args(p_env))
 
     def _set_default_properties_from_env(self) -> None:
         """Properties which can also be set from the environment."""

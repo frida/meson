@@ -1,16 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2012-2017 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 import os.path, subprocess
@@ -20,7 +10,7 @@ import typing as T
 from ..mesonlib import EnvironmentException
 from ..linkers import RSPFileSyntax
 
-from .compilers import Compiler, mono_buildtype_args
+from .compilers import Compiler
 from .mixins.islinker import BasicLinkerIsCompilerMixin
 
 if T.TYPE_CHECKING:
@@ -113,9 +103,6 @@ class CsCompiler(BasicLinkerIsCompilerMixin, Compiler):
     def needs_static_linker(self) -> bool:
         return False
 
-    def get_buildtype_args(self, buildtype: str) -> T.List[str]:
-        return mono_buildtype_args[buildtype]
-
     def get_debug_args(self, is_debug: bool) -> T.List[str]:
         return ['-debug'] if is_debug else []
 
@@ -139,16 +126,11 @@ class VisualStudioCsCompiler(CsCompiler):
 
     id = 'csc'
 
-    def get_buildtype_args(self, buildtype: str) -> T.List[str]:
-        res = mono_buildtype_args[buildtype]
-        if not self.info.is_windows():
-            tmp = []
-            for flag in res:
-                if flag == '-debug':
-                    flag = '-debug:portable'
-                tmp.append(flag)
-            res = tmp
-        return res
+    def get_debug_args(self, is_debug: bool) -> T.List[str]:
+        if is_debug:
+            return ['-debug'] if self.info.is_windows() else ['-debug:portable']
+        else:
+            return []
 
     def rsp_file_syntax(self) -> 'RSPFileSyntax':
         return RSPFileSyntax.MSVC

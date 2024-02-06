@@ -1,16 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2018 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 import copy, json, os, shutil, re
@@ -197,7 +187,7 @@ class PythonInstallation(_ExternalProgramHolder['PythonExternalProgram']):
             # into the linker path when not running in debug mode via a series #pragma comment(lib, "")
             # directives. We manually override these here as this interferes with the intended
             # use of the 'limited_api' kwarg
-            for_machine = self.interpreter.machine_from_native_kwarg(kwargs)
+            for_machine = kwargs['native']
             compilers = self.interpreter.environment.coredata.compilers[for_machine]
             if any(compiler.get_id() == 'msvc' for compiler in compilers.values()):
                 pydep_copy = copy.copy(pydep)
@@ -232,7 +222,7 @@ class PythonInstallation(_ExternalProgramHolder['PythonExternalProgram']):
         kwargs['name_prefix'] = ''
         kwargs['name_suffix'] = target_suffix
 
-        if 'gnu_symbol_visibility' not in kwargs and \
+        if kwargs['gnu_symbol_visibility'] == '' and \
                 (self.is_pypy or mesonlib.version_compare(self.version, '>=3.9')):
             kwargs['gnu_symbol_visibility'] = 'inlineshidden'
 

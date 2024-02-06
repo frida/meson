@@ -1,27 +1,20 @@
-# Copyright © 2020-2023 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2020-2024 Intel Corporation
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
-
+import itertools
 import os
 import typing as T
 
+from mesonbuild.interpreterbase.decorators import FeatureNew
+
 from . import ExtensionModule, ModuleReturnValue, ModuleInfo
 from .. import mlog
-from ..build import BothLibraries, BuildTarget, CustomTargetIndex, Executable, ExtractedObjects, GeneratedList, CustomTarget, InvalidArguments, Jar, StructuredSources
+from ..build import (BothLibraries, BuildTarget, CustomTargetIndex, Executable, ExtractedObjects, GeneratedList,
+                     CustomTarget, InvalidArguments, Jar, StructuredSources, SharedLibrary)
 from ..compilers.compilers import are_asserts_disabled
-from ..interpreter.type_checking import DEPENDENCIES_KW, LINK_WITH_KW, TEST_KWS, OUTPUT_KW, INCLUDE_DIRECTORIES
-from ..interpreterbase import ContainerTypeInfo, InterpreterException, KwargInfo, typed_kwargs, typed_pos_args, noPosargs
+from ..interpreter.type_checking import DEPENDENCIES_KW, LINK_WITH_KW, SHARED_LIB_KWS, TEST_KWS, OUTPUT_KW, INCLUDE_DIRECTORIES, SOURCES_VARARGS
+from ..interpreterbase import ContainerTypeInfo, InterpreterException, KwargInfo, typed_kwargs, typed_pos_args, noPosargs, permittedKwargs
 from ..mesonlib import File
 
 if T.TYPE_CHECKING:
@@ -32,6 +25,7 @@ if T.TYPE_CHECKING:
     from ..interpreter import kwargs as _kwargs
     from ..interpreter.interpreter import SourceInputs, SourceOutputs
     from ..programs import ExternalProgram, OverrideProgram
+    from ..interpreter.type_checking import SourcesVarargsType
 
     from typing_extensions import TypedDict
 
@@ -64,6 +58,7 @@ class RustModule(ExtensionModule):
         self.methods.update({
             'test': self.test,
             'bindgen': self.bindgen,
+            'proc_macro': self.proc_macro,
         })
 
     @typed_pos_args('rust.test', str, BuildTarget)
@@ -156,11 +151,14 @@ class RustModule(ExtensionModule):
         new_target_kwargs = base_target.original_kwargs.copy()
         # Don't mutate the shallow copied list, instead replace it with a new
         # one
-        new_target_kwargs['rust_args'] = \
-            new_target_kwargs.get('rust_args', []) + kwargs['rust_args'] + ['--test']
         new_target_kwargs['install'] = False
         new_target_kwargs['dependencies'] = new_target_kwargs.get('dependencies', []) + kwargs['dependencies']
         new_target_kwargs['link_with'] = new_target_kwargs.get('link_with', []) + kwargs['link_with']
+        del new_target_kwargs['rust_crate_type']
+
+        lang_args = base_target.extra_args.copy()
+        lang_args['rust'] = base_target.extra_args['rust'] + kwargs['rust_args'] + ['--test']
+        new_target_kwargs['language_args'] = lang_args
 
         sources = T.cast('T.List[SourceOutputs]', base_target.sources.copy())
         sources.extend(base_target.generated)
@@ -232,6 +230,13 @@ class RustModule(ExtensionModule):
                 elif isinstance(s, CustomTarget):
                     depends.append(s)
 
+        # We only want include directories and defines, other things may not be valid
+        cargs = state.get_option('args', state.subproject, lang='c')
+        assert isinstance(cargs, list), 'for mypy'
+        for a in itertools.chain(state.global_args.get('c', []), state.project_args.get('c', []), cargs):
+            if a.startswith(('-I', '/I', '-D', '/D', '-U', '/U')):
+                clang_args.append(a)
+
         if self._bindgen_bin is None:
             self._bindgen_bin = state.find_program('bindgen')
 
@@ -267,6 +272,20 @@ class RustModule(ExtensionModule):
         )
 
         return ModuleReturnValue([target], [target])
+
+    # Allow a limited set of kwargs, but still use the full set of typed_kwargs()
+    # because it could be setting required default values.
+    @FeatureNew('rust.proc_macro', '1.3.0')
+    @permittedKwargs({'rust_args', 'rust_dependency_map', 'sources', 'dependencies', 'extra_files',
+                      'link_args', 'link_depends', 'link_with', 'override_options'})
+    @typed_pos_args('rust.proc_macro', str, varargs=SOURCES_VARARGS)
+    @typed_kwargs('rust.proc_macro', *SHARED_LIB_KWS, allow_unknown=True)
+    def proc_macro(self, state: ModuleState, args: T.Tuple[str, SourcesVarargsType], kwargs: _kwargs.SharedLibrary) -> SharedLibrary:
+        kwargs['native'] = True  # type: ignore
+        kwargs['rust_crate_type'] = 'proc-macro'  # type: ignore
+        kwargs['rust_args'] = kwargs['rust_args'] + ['--extern', 'proc_macro']
+        target = state._interpreter.build_target(state.current_node, args, kwargs, SharedLibrary)
+        return target
 
 
 def initialize(interp: Interpreter) -> RustModule:

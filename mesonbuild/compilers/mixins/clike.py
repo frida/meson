@@ -1,16 +1,6 @@
-# Copyright 2012-2022 The Meson development team
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2012-2023 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 
@@ -176,10 +166,6 @@ class CLikeCompiler(Compiler):
     def get_warn_args(self, level: str) -> T.List[str]:
         # TODO: this should be an enum
         return self.warn_args[level]
-
-    def get_no_warn_args(self) -> T.List[str]:
-        # Almost every compiler uses this for disabling warnings
-        return ['-w']
 
     def get_depfile_suffix(self) -> str:
         return 'd'
@@ -352,7 +338,7 @@ class CLikeCompiler(Compiler):
                      extra_args: T.Union[None, T.List[str], T.Callable[['CompileCheckMode'], T.List[str]]] = None,
                      dependencies: T.Optional[T.List['Dependency']] = None) -> T.Tuple[bool, bool]:
         code = f'''{prefix}
-        #include <{hname}>\n'''
+        #include <{hname}>'''
         return self.compiles(code, env, extra_args=extra_args,
                              dependencies=dependencies)
 
@@ -367,7 +353,7 @@ class CLikeCompiler(Compiler):
          #endif
         #else
          #include <{hname}>
-        #endif\n'''
+        #endif'''
         return self.compiles(code, env, extra_args=extra_args,
                              dependencies=dependencies, mode=CompileCheckMode.PREPROCESS, disable_cache=disable_cache)
 
@@ -383,7 +369,7 @@ class CLikeCompiler(Compiler):
                 {symbol};
             #endif
             return 0;
-        }}\n'''
+        }}'''
         return self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)
 
@@ -450,6 +436,10 @@ class CLikeCompiler(Compiler):
         for d in dependencies:
             # Add compile flags needed by dependencies
             cargs += d.get_compile_args()
+            system_incdir = d.get_include_type() == 'system'
+            for i in d.get_include_dirs():
+                for idir in i.to_string_list(env.get_source_dir(), env.get_build_dir()):
+                    cargs.extend(self.get_include_args(idir, system_incdir))
             if mode is CompileCheckMode.LINK:
                 # Add link flags needed to find dependencies
                 largs += d.get_link_args()
@@ -498,8 +488,8 @@ class CLikeCompiler(Compiler):
                      extra_args: T.Union[None, T.List[str], T.Callable[[CompileCheckMode], T.List[str]]],
                      dependencies: T.Optional[T.List['Dependency']]) -> bool:
         t = f'''{prefix}
-        #include <stdio.h>
-        int main(void) {{ static int a[1-2*!({expression})]; a[0]=0; return 0; }}\n'''
+        #include <stddef.h>
+        int main(void) {{ static int a[1-2*!({expression})]; a[0]=0; return 0; }}'''
         return self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)[0]
 
@@ -559,6 +549,7 @@ class CLikeCompiler(Compiler):
         if self.is_cross:
             return self.cross_compute_int(expression, low, high, guess, prefix, env, extra_args, dependencies)
         t = f'''{prefix}
+        #include<stddef.h>
         #include<stdio.h>
         int main(void) {{
             printf("%ld\\n", (long)({expression}));
@@ -578,11 +569,11 @@ class CLikeCompiler(Compiler):
         if extra_args is None:
             extra_args = []
         t = f'''{prefix}
-        #include <stdio.h>
+        #include <stddef.h>
         int main(void) {{
             {typename} something;
             return 0;
-        }}\n'''
+        }}'''
         if not self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)[0]:
             return -1
@@ -598,6 +589,7 @@ class CLikeCompiler(Compiler):
                                   dependencies=dependencies)
             return r, False
         t = f'''{prefix}
+        #include<stddef.h>
         #include<stdio.h>
         int main(void) {{
             printf("%ld\\n", (long)(sizeof({typename})));
@@ -617,11 +609,11 @@ class CLikeCompiler(Compiler):
         if extra_args is None:
             extra_args = []
         t = f'''{prefix}
-        #include <stdio.h>
+        #include <stddef.h>
         int main(void) {{
             {typename} something;
             return 0;
-        }}\n'''
+        }}'''
         if not self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)[0]:
             return -1
@@ -668,13 +660,15 @@ class CLikeCompiler(Compiler):
                    extra_args: T.Union[T.List[str], T.Callable[[CompileCheckMode], T.List[str]]],
                    dependencies: T.Optional[T.List['Dependency']],
                    disable_cache: bool = False) -> T.Tuple[str, bool]:
-        delim = '"MESON_GET_DEFINE_DELIMITER"'
+        delim_start = '"MESON_GET_DEFINE_DELIMITER_START"\n'
+        delim_end = '\n"MESON_GET_DEFINE_DELIMITER_END"'
+        sentinel_undef = '"MESON_GET_DEFINE_UNDEFINED_SENTINEL"'
         code = f'''
         {prefix}
         #ifndef {dname}
-        # define {dname}
+        # define {dname} {sentinel_undef}
         #endif
-        {delim}\n{dname}'''
+        {delim_start}{dname}{delim_end}'''
         args = self.build_wrapper_args(env, extra_args, dependencies,
                                        mode=CompileCheckMode.PREPROCESS).to_native()
         func = functools.partial(self.cached_compile, code, env.coredata, extra_args=args, mode=CompileCheckMode.PREPROCESS)
@@ -684,10 +678,21 @@ class CLikeCompiler(Compiler):
             cached = p.cached
             if p.returncode != 0:
                 raise mesonlib.EnvironmentException(f'Could not get define {dname!r}')
-        # Get the preprocessed value after the delimiter,
-        # minus the extra newline at the end and
-        # merge string literals.
-        return self._concatenate_string_literals(p.stdout.split(delim + '\n')[-1][:-1]).strip(), cached
+
+        # Get the preprocessed value between the delimiters
+        star_idx = p.stdout.find(delim_start)
+        end_idx = p.stdout.rfind(delim_end)
+        if (star_idx == -1) or (end_idx == -1) or (star_idx == end_idx):
+            raise mesonlib.MesonBugException('Delimiters not found in preprocessor output.')
+        define_value = p.stdout[star_idx + len(delim_start):end_idx]
+
+        if define_value == sentinel_undef:
+            define_value = None
+        else:
+            # Merge string literals
+            define_value = self._concatenate_string_literals(define_value).strip()
+
+        return define_value, cached
 
     def get_return_value(self, fname: str, rtype: str, prefix: str,
                          env: 'Environment', extra_args: T.Optional[T.List[str]],
@@ -829,7 +834,7 @@ class CLikeCompiler(Compiler):
             head, main = self._have_prototype_templ()
         else:
             head, main = self._no_prototype_templ()
-        templ = head + stubs_fail + main + '\n'
+        templ = head + stubs_fail + main
 
         res, cached = self.links(templ.format(**fargs), env, extra_args=extra_args,
                                  dependencies=dependencies)
@@ -872,7 +877,7 @@ class CLikeCompiler(Compiler):
             {__builtin_}{func};
         #endif
         return 0;
-        }}\n'''
+        }}'''
         return self.links(t.format(**fargs), env, extra_args=extra_args,
                           dependencies=dependencies)
 
@@ -888,7 +893,7 @@ class CLikeCompiler(Compiler):
         void bar(void) {{
             {typename} foo;
             {members}
-        }}\n'''
+        }}'''
         return self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)
 
@@ -898,7 +903,7 @@ class CLikeCompiler(Compiler):
         t = f'''{prefix}
         void bar(void) {{
             sizeof({typename});
-        }}\n'''
+        }}'''
         return self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)
 
@@ -1065,6 +1070,10 @@ class CLikeCompiler(Compiler):
 
     @staticmethod
     def _sort_shlibs_openbsd(libs: T.List[str]) -> T.List[str]:
+        def tuple_key(x: str) -> T.Tuple[int, ...]:
+            ver = x.rsplit('.so.', maxsplit=1)[1]
+            return tuple(int(i) for i in ver.split('.'))
+
         filtered: T.List[str] = []
         for lib in libs:
             # Validate file as a shared library of type libfoo.so.X.Y
@@ -1072,12 +1081,11 @@ class CLikeCompiler(Compiler):
             if len(ret) != 2:
                 continue
             try:
-                float(ret[1])
+                tuple(int(i) for i in ret[1].split('.'))
             except ValueError:
                 continue
             filtered.append(lib)
-        float_cmp = lambda x: float(x.rsplit('.so.', maxsplit=1)[1])
-        return sorted(filtered, key=float_cmp, reverse=True)
+        return sorted(filtered, key=tuple_key, reverse=True)
 
     @classmethod
     def _get_trials_from_pattern(cls, pattern: str, directory: str, libname: str) -> T.List[Path]:
@@ -1337,7 +1345,7 @@ class CLikeCompiler(Compiler):
     @functools.lru_cache(maxsize=None)
     def can_compile(self, src: 'mesonlib.FileOrString') -> bool:
         # Files we preprocess can be anything, e.g. .in
-        if self.mode == CompileCheckMode.PREPROCESS:
+        if self.mode == 'PREPROCESSOR':
             return True
         return super().can_compile(src)
 
@@ -1345,6 +1353,6 @@ class CLikeCompiler(Compiler):
         if not self.preprocessor:
             self.preprocessor = copy.copy(self)
             self.preprocessor.exelist = self.exelist + self.get_preprocess_to_file_args()
-            self.preprocessor.mode = CompileCheckMode.PREPROCESS
+            self.preprocessor.mode = 'PREPROCESSOR'
             self.modes.append(self.preprocessor)
         return self.preprocessor

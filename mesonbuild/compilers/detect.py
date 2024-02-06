@@ -1,16 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2012-2022 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 from ..mesonlib import (
@@ -204,12 +194,10 @@ def detect_static_linker(env: 'Environment', compiler: Compiler) -> StaticLinker
 
         if any(os.path.basename(x) in {'lib', 'lib.exe', 'llvm-lib', 'llvm-lib.exe', 'xilib', 'xilib.exe'} for x in linker):
             arg = '/?'
-        elif linker_name in {'ar2000', 'ar2000.exe', 'ar430', 'ar430.exe', 'armar', 'armar.exe'}:
-            arg = '?'
         else:
             arg = '--version'
         try:
-            p, out, err = Popen_safe_logged(linker + [arg], msg='Detecting linker via')
+            p, out, err = Popen_safe_logged(linker + [arg], msg='Detecting archiver via')
         except OSError as e:
             popen_exceptions[join_args(linker + [arg])] = e
             continue
@@ -234,7 +222,7 @@ def detect_static_linker(env: 'Environment', compiler: Compiler) -> StaticLinker
             return linkers.CcrxLinker(linker)
         if out.startswith('GNU ar') and 'xc16-ar' in linker_name:
             return linkers.Xc16Linker(linker)
-        if 'Texas Instruments Incorporated' in out:
+        if "-->  error: bad option 'e'" in err: # TI
             if 'ar2000' in linker_name:
                 return linkers.C2000Linker(linker)
             else:
@@ -781,8 +769,21 @@ def detect_fortran_compiler(env: 'Environment', for_machine: MachineChoice) -> C
 
             if 'flang' in out or 'clang' in out:
                 cls = fortran.FlangFortranCompiler
-                linker = guess_nix_linker(env,
-                                          compiler, cls, version, for_machine)
+                linker = None
+                if 'windows' in out or env.machines[for_machine].is_windows():
+                    # If we're in a MINGW context this actually will use a gnu
+                    # style ld, but for flang on "real" windows we'll use
+                    # either link.exe or lld-link.exe
+                    try:
+                        linker = guess_win_linker(
+                            env, compiler, cls, version,
+                            for_machine, invoked_directly=False
+                        )
+                    except MesonException:
+                        pass
+                if linker is None:
+                    linker = guess_nix_linker(env, compiler, cls,
+                                              version, for_machine)
                 return cls(
                     compiler, version, for_machine, is_cross, info,
                     exe_wrap, full_version=full_version, linker=linker)
@@ -948,7 +949,7 @@ def detect_cython_compiler(env: 'Environment', for_machine: MachineChoice) -> Co
 
 def detect_vala_compiler(env: 'Environment', for_machine: MachineChoice) -> Compiler:
     from .vala import ValaCompiler
-    exelist = env.lookup_binary_entry(for_machine, 'vala')
+    exelist = env.lookup_binary_entry(MachineChoice.BUILD, 'vala')
     is_cross = env.is_cross_build(for_machine)
     info = env.machines[for_machine]
     if exelist is None:
@@ -1034,7 +1035,7 @@ def detect_rust_compiler(env: 'Environment', for_machine: MachineChoice) -> Rust
                     extra_args['machine'] = cc.linker.machine
                 else:
                     exelist = cc.linker.exelist + cc.linker.get_always_args()
-                    if 'ccache' in exelist[0]:
+                    if os.path.basename(exelist[0]) in {'ccache', 'sccache'}:
                         del exelist[0]
                     c = exelist.pop(0)
                     compiler.extend(cls.use_linker_args(c, ''))

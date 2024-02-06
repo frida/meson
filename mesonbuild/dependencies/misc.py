@@ -1,16 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2013-2019 The Meson development team
-
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 # This file contains the detection logic for miscellaneous external dependencies.
 from __future__ import annotations
@@ -23,7 +12,7 @@ from .. import mesonlib
 from .. import mlog
 from .base import DependencyException, DependencyMethods
 from .base import BuiltinDependency, SystemDependency
-from .cmake import CMakeDependency
+from .cmake import CMakeDependency, CMakeDependencyFactory
 from .configtool import ConfigToolDependency
 from .detect import packages
 from .factory import DependencyFactory, factory_methods
@@ -85,6 +74,8 @@ class DlSystemDependency(SystemDependency):
 class OpenMPDependency(SystemDependency):
     # Map date of specification release (which is the macro value) to a version.
     VERSIONS = {
+        '202111': '5.2',
+        '202011': '5.1',
         '201811': '5.0',
         '201611': '5.0-revision1',  # This is supported by ICC 19.x
         '201511': '4.5',
@@ -112,6 +103,7 @@ class OpenMPDependency(SystemDependency):
             self.is_found = True
             self.compile_args = self.link_args = self.clib_compiler.openmp_flags()
             return
+
         try:
             openmp_date = self.clib_compiler.get_define(
                 '_OPENMP', '', self.env, self.clib_compiler.openmp_flags(), [self], disable_cache=True)[0]
@@ -128,13 +120,22 @@ class OpenMPDependency(SystemDependency):
                 if openmp_date == '_OPENMP':
                     mlog.debug('This can be caused by flags such as gcc\'s `-fdirectives-only`, which affect preprocessor behavior.')
                 return
+
+            if self.clib_compiler.get_id() == 'clang-cl':
+                # this is necessary for clang-cl, see https://github.com/mesonbuild/meson/issues/5298
+                clangcl_openmp_link_args = self.clib_compiler.find_library("libomp", self.env, [])
+                if not clangcl_openmp_link_args:
+                    mlog.log(mlog.yellow('WARNING:'), 'OpenMP found but libomp for clang-cl missing.')
+                    return
+                self.link_args.extend(clangcl_openmp_link_args)
+
             # Flang has omp_lib.h
             header_names = ('omp.h', 'omp_lib.h')
             for name in header_names:
                 if self.clib_compiler.has_header(name, '', self.env, dependencies=[self], disable_cache=True)[0]:
                     self.is_found = True
-                    self.compile_args = self.clib_compiler.openmp_flags()
-                    self.link_args = self.clib_compiler.openmp_link_flags()
+                    self.compile_args.extend(self.clib_compiler.openmp_flags())
+                    self.link_args.extend(self.clib_compiler.openmp_link_flags())
                     break
             if not self.is_found:
                 mlog.log(mlog.yellow('WARNING:'), 'OpenMP found but omp.h missing.')
@@ -599,19 +600,19 @@ packages['openssl'] = openssl_factory = DependencyFactory(
     'openssl',
     [DependencyMethods.PKGCONFIG, DependencyMethods.SYSTEM, DependencyMethods.CMAKE],
     system_class=OpensslSystemDependency,
-    cmake_class=lambda name, env, kwargs: CMakeDependency('OpenSSL', env, dict(kwargs, modules=['OpenSSL::Crypto', 'OpenSSL::SSL'])),
+    cmake_class=CMakeDependencyFactory('OpenSSL', modules=['OpenSSL::Crypto', 'OpenSSL::SSL']),
 )
 
 packages['libcrypto'] = libcrypto_factory = DependencyFactory(
     'libcrypto',
     [DependencyMethods.PKGCONFIG, DependencyMethods.SYSTEM, DependencyMethods.CMAKE],
     system_class=OpensslSystemDependency,
-    cmake_class=lambda name, env, kwargs: CMakeDependency('OpenSSL', env, dict(kwargs, modules=['OpenSSL::Crypto'])),
+    cmake_class=CMakeDependencyFactory('OpenSSL', modules=['OpenSSL::Crypto']),
 )
 
 packages['libssl'] = libssl_factory = DependencyFactory(
     'libssl',
     [DependencyMethods.PKGCONFIG, DependencyMethods.SYSTEM, DependencyMethods.CMAKE],
     system_class=OpensslSystemDependency,
-    cmake_class=lambda name, env, kwargs: CMakeDependency('OpenSSL', env, dict(kwargs, modules=['OpenSSL::SSL'])),
+    cmake_class=CMakeDependencyFactory('OpenSSL', modules=['OpenSSL::SSL']),
 )

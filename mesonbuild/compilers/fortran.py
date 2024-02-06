@@ -1,16 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2012-2017 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 import typing as T
@@ -23,9 +13,7 @@ from .compilers import (
     CompileCheckMode,
 )
 from .mixins.clike import CLikeCompiler
-from .mixins.gnu import (
-    GnuCompiler, gnulike_buildtype_args, gnu_optimization_args
-)
+from .mixins.gnu import GnuCompiler,  gnu_optimization_args
 from .mixins.intel import IntelGnuLikeCompiler, IntelVisualStudioLikeCompiler
 from .mixins.clang import ClangCompiler
 from .mixins.elbrus import ElbrusCompiler
@@ -75,9 +63,6 @@ class FortranCompiler(CLikeCompiler, Compiler):
         source_name = 'sanitycheckf.f90'
         code = 'program main; print *, "Fortran compilation is working."; end program\n'
         return self._sanity_check_impl(work_dir, environment, source_name, code)
-
-    def get_buildtype_args(self, buildtype: str) -> T.List[str]:
-        return gnulike_buildtype_args[buildtype]
 
     def get_optimization_args(self, optimization_level: str) -> T.List[str]:
         return gnu_optimization_args[optimization_level]
@@ -252,10 +237,6 @@ class G95FortranCompiler(FortranCompiler):
 
     def get_module_outdir_args(self, path: str) -> T.List[str]:
         return ['-fmod=' + path]
-
-    def get_no_warn_args(self) -> T.List[str]:
-        # FIXME: Confirm that there's no compiler option to disable all warnings
-        return []
 
 
 class SunFortranCompiler(FortranCompiler):

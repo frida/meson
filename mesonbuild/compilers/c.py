@@ -1,16 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2012-2020 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 import os.path
@@ -55,6 +45,10 @@ if T.TYPE_CHECKING:
     CompilerMixinBase = Compiler
 else:
     CompilerMixinBase = object
+
+_ALL_STDS = ['c89', 'c9x', 'c90', 'c99', 'c1x', 'c11', 'c17', 'c18', 'c2x', 'c23']
+_ALL_STDS += [f'gnu{std[1:]}' for std in _ALL_STDS]
+_ALL_STDS += ['iso9899:1990', 'iso9899:199409', 'iso9899:1999', 'iso9899:2011', 'iso9899:2017', 'iso9899:2018']
 
 
 class CCompiler(CLikeCompiler, Compiler):
@@ -101,12 +95,9 @@ class CCompiler(CLikeCompiler, Compiler):
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = super().get_options()
+        key = OptionKey('std', machine=self.for_machine, lang=self.language)
         opts.update({
-            OptionKey('std', machine=self.for_machine, lang=self.language): coredata.UserComboOption(
-                'C language standard to use',
-                ['none'],
-                'none',
-            )
+            key: coredata.UserStdOption('C', _ALL_STDS),
         })
         return opts
 
@@ -122,23 +113,24 @@ class _ClangCStds(CompilerMixinBase):
     _C17_VERSION = '>=6.0.0'
     _C18_VERSION = '>=8.0.0'
     _C2X_VERSION = '>=9.0.0'
+    _C23_VERSION = '>=18.0.0'
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = super().get_options()
-        c_stds = ['c89', 'c99', 'c11']
-        g_stds = ['gnu89', 'gnu99', 'gnu11']
+        stds = ['c89', 'c99', 'c11']
         # https://releases.llvm.org/6.0.0/tools/clang/docs/ReleaseNotes.html
         # https://en.wikipedia.org/wiki/Xcode#Latest_versions
         if version_compare(self.version, self._C17_VERSION):
-            c_stds += ['c17']
-            g_stds += ['gnu17']
+            stds += ['c17']
         if version_compare(self.version, self._C18_VERSION):
-            c_stds += ['c18']
-            g_stds += ['gnu18']
+            stds += ['c18']
         if version_compare(self.version, self._C2X_VERSION):
-            c_stds += ['c2x']
-            g_stds += ['gnu2x']
-        opts[OptionKey('std', machine=self.for_machine, lang=self.language)].choices = ['none'] + c_stds + g_stds
+            stds += ['c2x']
+        if version_compare(self.version, self._C23_VERSION):
+            stds += ['c23']
+        std_opt = opts[OptionKey('std', machine=self.for_machine, lang=self.language)]
+        assert isinstance(std_opt, coredata.UserStdOption), 'for mypy'
+        std_opt.set_versions(stds, gnu=True)
         return opts
 
 
@@ -244,8 +236,9 @@ class ArmclangCCompiler(ArmclangCompiler, CCompiler):
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = CCompiler.get_options(self)
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        opts[key].choices = ['none', 'c90', 'c99', 'c11', 'gnu90', 'gnu99', 'gnu11']
+        std_opt = opts[OptionKey('std', machine=self.for_machine, lang=self.language)]
+        assert isinstance(std_opt, coredata.UserStdOption), 'for mypy'
+        std_opt.set_versions(['c90', 'c99', 'c11'], gnu=True)
         return opts
 
     def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
@@ -263,6 +256,7 @@ class GnuCCompiler(GnuCompiler, CCompiler):
 
     _C18_VERSION = '>=8.0.0'
     _C2X_VERSION = '>=9.0.0'
+    _C23_VERSION = '>=14.0.0'
     _INVALID_PCH_VERSION = ">=3.4.0"
 
     def __init__(self, ccache: T.List[str], exelist: T.List[str], version: str, for_machine: MachineChoice, is_cross: bool,
@@ -285,16 +279,17 @@ class GnuCCompiler(GnuCompiler, CCompiler):
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = CCompiler.get_options(self)
-        c_stds = ['c89', 'c99', 'c11']
-        g_stds = ['gnu89', 'gnu99', 'gnu11']
+        stds = ['c89', 'c99', 'c11']
         if version_compare(self.version, self._C18_VERSION):
-            c_stds += ['c17', 'c18']
-            g_stds += ['gnu17', 'gnu18']
+            stds += ['c17', 'c18']
         if version_compare(self.version, self._C2X_VERSION):
-            c_stds += ['c2x']
-            g_stds += ['gnu2x']
+            stds += ['c2x']
+        if version_compare(self.version, self._C23_VERSION):
+            stds += ['c23']
         key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        opts[key].choices = ['none'] + c_stds + g_stds
+        std_opt = opts[key]
+        assert isinstance(std_opt, coredata.UserStdOption), 'for mypy'
+        std_opt.set_versions(stds, gnu=True)
         if self.info.is_windows() or self.info.is_cygwin():
             opts.update({
                 key.evolve('winlibs'): coredata.UserArrayOption(
@@ -370,7 +365,9 @@ class ElbrusCCompiler(ElbrusCompiler, CCompiler):
             stds += ['c90', 'c1x', 'gnu90', 'gnu1x', 'iso9899:2011']
         if version_compare(self.version, '>=1.26.00'):
             stds += ['c17', 'c18', 'iso9899:2017', 'iso9899:2018', 'gnu17', 'gnu18']
-        opts[OptionKey('std', machine=self.for_machine, lang=self.language)].choices = ['none'] + stds
+        std_opt = opts[OptionKey('std', machine=self.for_machine, lang=self.language)]
+        assert isinstance(std_opt, coredata.UserStdOption), 'for mypy'
+        std_opt.set_versions(stds)
         return opts
 
     # Elbrus C compiler does not have lchmod, but there is only linker warning, not compiler error.
@@ -404,11 +401,12 @@ class IntelCCompiler(IntelGnuLikeCompiler, CCompiler):
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = CCompiler.get_options(self)
-        c_stds = ['c89', 'c99']
-        g_stds = ['gnu89', 'gnu99']
+        stds = ['c89', 'c99']
         if version_compare(self.version, '>=16.0.0'):
-            c_stds += ['c11']
-        opts[OptionKey('std', machine=self.for_machine, lang=self.language)].choices = ['none'] + c_stds + g_stds
+            stds += ['c11']
+        std_opt = opts[OptionKey('std', machine=self.for_machine, lang=self.language)]
+        assert isinstance(std_opt, coredata.UserStdOption), 'for mypy'
+        std_opt.set_versions(stds, gnu=True)
         return opts
 
     def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
@@ -465,33 +463,23 @@ class VisualStudioCCompiler(MSVCCompiler, VisualStudioLikeCCompilerMixin, CCompi
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = super().get_options()
-        c_stds = ['c89', 'c99']
-        # Need to have these to be compatible with projects
-        # that set c_std to e.g. gnu99.
-        # https://github.com/mesonbuild/meson/issues/7611
-        g_stds = ['gnu89', 'gnu90', 'gnu9x', 'gnu99']
+        stds = ['c89', 'c99']
         if version_compare(self.version, self._C11_VERSION):
-            c_stds += ['c11']
-            g_stds += ['gnu1x', 'gnu11']
+            stds += ['c11']
         if version_compare(self.version, self._C17_VERSION):
-            c_stds += ['c17', 'c18']
-            g_stds += ['gnu17', 'gnu18']
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        opts[key].choices = ['none'] + c_stds + g_stds
+            stds += ['c17', 'c18']
+        std_opt = opts[OptionKey('std', machine=self.for_machine, lang=self.language)]
+        assert isinstance(std_opt, coredata.UserStdOption), 'for mypy'
+        std_opt.set_versions(stds, gnu=True, gnu_deprecated=True)
         return opts
 
     def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
         args = []
         std = options[OptionKey('std', machine=self.for_machine, lang=self.language)]
-        if std.value.startswith('gnu'):
-            mlog.log(
-                'cl.exe does not actually support gnu standards, and meson '
-                'will instead demote to the nearest ISO C standard. This '
-                'may cause compilation to fail.', once=True)
         # As of MVSC 16.8, /std:c11 and /std:c17 are the only valid C standard options.
-        if std.value in {'c11', 'gnu1x', 'gnu11'}:
+        if std.value in {'c11'}:
             args.append('/std:c11')
-        elif std.value in {'c17', 'c18', 'gnu17', 'gnu18'}:
+        elif std.value in {'c17', 'c18'}:
             args.append('/std:c17')
         return args
 
@@ -531,8 +519,9 @@ class IntelClCCompiler(IntelVisualStudioLikeCompiler, VisualStudioLikeCCompilerM
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = super().get_options()
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        opts[key].choices = ['none', 'c89', 'c99', 'c11']
+        std_opt = opts[OptionKey('std', machine=self.for_machine, lang=self.language)]
+        assert isinstance(std_opt, coredata.UserStdOption), 'for mypy'
+        std_opt.set_versions(['c89', 'c99', 'c11'])
         return opts
 
     def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
@@ -564,8 +553,9 @@ class ArmCCompiler(ArmCompiler, CCompiler):
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = CCompiler.get_options(self)
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        opts[key].choices = ['none', 'c89', 'c99', 'c11']
+        std_opt = opts[OptionKey('std', machine=self.for_machine, lang=self.language)]
+        assert isinstance(std_opt, coredata.UserStdOption), 'for mypy'
+        std_opt.set_versions(['c89', 'c99', 'c11'])
         return opts
 
     def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
@@ -593,8 +583,9 @@ class CcrxCCompiler(CcrxCompiler, CCompiler):
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = CCompiler.get_options(self)
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        opts[key].choices = ['none', 'c89', 'c99']
+        std_opt = opts[OptionKey('std', machine=self.for_machine, lang=self.language)]
+        assert isinstance(std_opt, coredata.UserStdOption), 'for mypy'
+        std_opt.set_versions(['c89', 'c99'])
         return opts
 
     def get_no_stdinc_args(self) -> T.List[str]:
@@ -640,8 +631,9 @@ class Xc16CCompiler(Xc16Compiler, CCompiler):
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = CCompiler.get_options(self)
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        opts[key].choices = ['none', 'c89', 'c99', 'gnu89', 'gnu99']
+        std_opt = opts[OptionKey('std', machine=self.for_machine, lang=self.language)]
+        assert isinstance(std_opt, coredata.UserStdOption), 'for mypy'
+        std_opt.set_versions(['c89', 'c99'], gnu=True)
         return opts
 
     def get_no_stdinc_args(self) -> T.List[str]:
@@ -685,8 +677,9 @@ class CompCertCCompiler(CompCertCompiler, CCompiler):
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = CCompiler.get_options(self)
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        opts[key].choices = ['none', 'c89', 'c99']
+        std_opt = opts[OptionKey('std', machine=self.for_machine, lang=self.language)]
+        assert isinstance(std_opt, coredata.UserStdOption), 'for mypy'
+        std_opt.set_versions(['c89', 'c99'])
         return opts
 
     def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
@@ -722,8 +715,9 @@ class TICCompiler(TICompiler, CCompiler):
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = CCompiler.get_options(self)
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        opts[key].choices = ['none', 'c89', 'c99', 'c11']
+        std_opt = opts[OptionKey('std', machine=self.for_machine, lang=self.language)]
+        assert isinstance(std_opt, coredata.UserStdOption), 'for mypy'
+        std_opt.set_versions(['c89', 'c99', 'c11'])
         return opts
 
     def get_no_stdinc_args(self) -> T.List[str]:

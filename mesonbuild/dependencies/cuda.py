@@ -1,16 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2013-2019 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 import glob
@@ -45,8 +35,18 @@ class CudaDependency(SystemDependency):
         super().__init__('cuda', environment, kwargs, language=language)
         self.lib_modules: T.Dict[str, T.List[str]] = {}
         self.requested_modules = self.get_requested(kwargs)
-        if 'cudart' not in self.requested_modules:
-            self.requested_modules = ['cudart'] + self.requested_modules
+        if not any(runtime in self.requested_modules for runtime in ['cudart', 'cudart_static']):
+            # By default, we prefer to link the static CUDA runtime, since this is what nvcc also does by default:
+            # https://docs.nvidia.com/cuda/cuda-compiler-driver-nvcc/index.html#cudart-none-shared-static-cudart
+            req_modules = ['cudart']
+            if kwargs.get('static', True):
+                req_modules = ['cudart_static']
+                machine = self.env.machines[self.for_machine]
+                if machine.is_linux():
+                    # extracted by running
+                    #   nvcc -v foo.o
+                    req_modules += ['rt', 'pthread', 'dl']
+            self.requested_modules = req_modules + self.requested_modules
 
         (self.cuda_path, self.version, self.is_found) = self._detect_cuda_path_and_version()
         if not self.is_found:

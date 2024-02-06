@@ -12,7 +12,7 @@ It takes no positional arguments, and the following keyword arguments:
     A list of sources to be transpiled. Required, must have at least one source
     *New in 0.60.0*: support for custom_target, custom_target_index, and generator_output.
   - `extra_args` string[]: Extra arguments to pass directly to `qt-rcc`
-  - `method` string: The method to use to detect qt, see `dependency()` for more
+  - `method` string: The method to use to detect Qt, see `dependency()` for more
     information.
 
 ## compile_ui
@@ -26,7 +26,7 @@ It takes no positional arguments, and the following keyword arguments:
     A list of sources to be transpiled. Required, must have at least one source
     *New in 0.60.0*: support for custom_target, custom_target_index, and generator_output.
   - `extra_args` string[]: Extra arguments to pass directly to `qt-uic`
-  - `method` string: The method to use to detect qt, see `dependency()` for more
+  - `method` string: The method to use to detect Qt, see `dependency()` for more
     information.
 
 ## compile_moc
@@ -44,7 +44,7 @@ It takes no positional arguments, and the following keyword arguments:
      A list of headers to be transpiled into .cpp files
     *New in 0.60.0*: support for custom_target, custom_target_index, and generator_output.
   - `extra_args` string[]: Extra arguments to pass directly to `qt-moc`
-  - `method` string: The method to use to detect qt, see `dependency()` for more
+  - `method` string: The method to use to detect Qt, see `dependency()` for more
     information.
   - `dependencies`: dependency objects whose include directories are used by moc.
   - `include_directories` (string | IncludeDirectory)[]: A list of `include_directory()`
@@ -81,7 +81,9 @@ This method takes the following keyword arguments:
 
 It returns an array of targets and sources to pass to a compilation target.
 
-## compile_translations (since v0.44.0)
+## compile_translations
+
+*since 0.44.0*
 
 This method generates the necessary targets to build translation files with
 lrelease, it takes no positional arguments, and the following keyword arguments:
@@ -128,7 +130,7 @@ This method takes the following keyword arguments:
 
 ## Dependencies
 
-See [Qt dependencies](Dependencies.md#qt4-qt5)
+See [Qt dependencies](Dependencies.md#qt)
 
 The 'modules' argument is used to include Qt modules in the project.
 See the Qt documentation for the [list of

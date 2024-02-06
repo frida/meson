@@ -1,16 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2013-2018 The Meson development team
-
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 # This file contains the detection logic for external dependencies.
 # Custom logic for several other packages are in separate files.
@@ -30,7 +19,6 @@ from ..mesonlib import version_compare_many
 #from ..interpreterbase import FeatureDeprecated, FeatureNew
 
 if T.TYPE_CHECKING:
-    from .._typing import ImmutableListProtocol
     from ..compilers.compilers import Compiler
     from ..environment import Environment
     from ..interpreterbase import FeatureCheckBase
@@ -38,15 +26,35 @@ if T.TYPE_CHECKING:
         CustomTarget, IncludeDirs, CustomTargetIndex, LibTypes,
         StaticLibrary, StructuredSources, ExtractedObjects, GeneratedTypes
     )
+    from ..interpreter.type_checking import PkgConfigDefineType
+
+    _MissingCompilerBase = Compiler
+else:
+    _MissingCompilerBase = object
 
 
 class DependencyException(MesonException):
     '''Exceptions raised while trying to find dependencies'''
 
 
-class MissingCompiler:
+class MissingCompiler(_MissingCompilerBase):
     """Represent a None Compiler - when no tool chain is found.
     replacing AttributeError with DependencyException"""
+
+    # These are needed in type checking mode to avoid errors, but we don't want
+    # the extra overhead at runtime
+    if T.TYPE_CHECKING:
+        def __init__(self) -> None:
+            pass
+
+        def get_optimization_args(self, optimization_level: str) -> T.List[str]:
+            return []
+
+        def get_output_args(self, outputname: str) -> T.List[str]:
+            return []
+
+        def sanity_check(self, work_dir: str, environment: 'Environment') -> None:
+            return None
 
     def __getattr__(self, item: str) -> T.Any:
         if item.startswith('__'):
@@ -193,14 +201,6 @@ class Dependency(HoldableObject):
     def get_exe_args(self, compiler: 'Compiler') -> T.List[str]:
         return []
 
-    def get_pkgconfig_variable(self, variable_name: str,
-                               define_variable: 'ImmutableListProtocol[str]',
-                               default: T.Optional[str]) -> str:
-        raise DependencyException(f'{self.name!r} is not a pkgconfig dependency')
-
-    def get_configtool_variable(self, variable_name: str) -> str:
-        raise DependencyException(f'{self.name!r} is not a config-tool dependency')
-
     def get_partial_dependency(self, *, compile_args: bool = False,
                                link_args: bool = False, links: bool = False,
                                includes: bool = False, sources: bool = False) -> 'Dependency':
@@ -238,7 +238,7 @@ class Dependency(HoldableObject):
     def get_variable(self, *, cmake: T.Optional[str] = None, pkgconfig: T.Optional[str] = None,
                      configtool: T.Optional[str] = None, internal: T.Optional[str] = None,
                      default_value: T.Optional[str] = None,
-                     pkgconfig_define: T.Optional[T.List[str]] = None) -> str:
+                     pkgconfig_define: PkgConfigDefineType = None) -> str:
         if default_value is not None:
             return default_value
         raise DependencyException(f'No default provided for dependency {self!r}, which is not pkg-config, cmake, or config-tool based.')
@@ -297,16 +297,6 @@ class InternalDependency(Dependency):
             return True
         return any(d.is_built() for d in self.ext_deps)
 
-    def get_pkgconfig_variable(self, variable_name: str,
-                               define_variable: 'ImmutableListProtocol[str]',
-                               default: T.Optional[str]) -> str:
-        raise DependencyException('Method "get_pkgconfig_variable()" is '
-                                  'invalid for an internal dependency')
-
-    def get_configtool_variable(self, variable_name: str) -> str:
-        raise DependencyException('Method "get_configtool_variable()" is '
-                                  'invalid for an internal dependency')
-
     def get_partial_dependency(self, *, compile_args: bool = False,
                                link_args: bool = False, links: bool = False,
                                includes: bool = False, sources: bool = False,
@@ -332,7 +322,7 @@ class InternalDependency(Dependency):
     def get_variable(self, *, cmake: T.Optional[str] = None, pkgconfig: T.Optional[str] = None,
                      configtool: T.Optional[str] = None, internal: T.Optional[str] = None,
                      default_value: T.Optional[str] = None,
-                     pkgconfig_define: T.Optional[T.List[str]] = None) -> str:
+                     pkgconfig_define: PkgConfigDefineType = None) -> str:
         val = self.variables.get(internal, default_value)
         if val is not None:
             return val

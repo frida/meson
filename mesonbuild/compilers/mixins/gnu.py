@@ -1,16 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2019-2022 The meson development team
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+
 from __future__ import annotations
 
 """Provides mixins for GNU compilers and GNU-like compilers."""
@@ -45,15 +35,6 @@ else:
 clike_debug_args: T.Dict[bool, T.List[str]] = {
     False: [],
     True: ['-g'],
-}
-
-gnulike_buildtype_args: T.Dict[str, T.List[str]] = {
-    'plain': [],
-    'debug': [],
-    'debugoptimized': [],
-    'release': [],
-    'minsize': [],
-    'custom': [],
 }
 
 gnu_optimization_args: T.Dict[str, T.List[str]] = {
@@ -399,9 +380,6 @@ class GnuLikeCompiler(Compiler, metaclass=abc.ABCMeta):
 
     def get_pie_args(self) -> T.List[str]:
         return ['-fPIE']
-
-    def get_buildtype_args(self, buildtype: str) -> T.List[str]:
-        return gnulike_buildtype_args[buildtype]
 
     @abc.abstractmethod
     def get_optimization_args(self, optimization_level: str) -> T.List[str]:

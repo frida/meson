@@ -1,16 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2019 The meson development team
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+
 from __future__ import annotations
 
 """Abstractions to simplify compilers that implement an MSVC compatible
@@ -75,7 +65,7 @@ msvc_optimization_args: T.Dict[str, T.List[str]] = {
 
 msvc_debug_args: T.Dict[bool, T.List[str]] = {
     False: [],
-    True: ['/Z7']
+    True: ['/Zi']
 }
 
 
@@ -182,14 +172,11 @@ class VisualStudioLikeCompiler(Compiler, metaclass=abc.ABCMeta):
         return ['/fsanitize=address']
 
     def get_output_args(self, outputname: str) -> T.List[str]:
-        if self.mode == CompileCheckMode.PREPROCESS:
+        if self.mode == 'PREPROCESSOR':
             return ['/Fi' + outputname]
         if outputname.endswith('.exe'):
             return ['/Fe' + outputname]
         return ['/Fo' + outputname]
-
-    def get_buildtype_args(self, buildtype: str) -> T.List[str]:
-        return []
 
     def get_debug_args(self, is_debug: bool) -> T.List[str]:
         return msvc_debug_args[is_debug]
@@ -316,7 +303,10 @@ class VisualStudioLikeCompiler(Compiler, metaclass=abc.ABCMeta):
             return not (warning_text in p.stderr or warning_text in p.stdout), p.cached
 
     def get_compile_debugfile_args(self, rel_obj: str, pch: bool = False) -> T.List[str]:
-        return []
+        pdbarr = rel_obj.split('.')[:-1]
+        pdbarr += ['pdb']
+        args = ['/Fd' + '.'.join(pdbarr)]
+        return args
 
     def get_instruction_set_args(self, instruction_set: str) -> T.Optional[T.List[str]]:
         if self.is_64:
@@ -363,28 +353,8 @@ class VisualStudioLikeCompiler(Compiler, metaclass=abc.ABCMeta):
         return os.environ['INCLUDE'].split(os.pathsep)
 
     def get_crt_compile_args(self, crt_val: str, buildtype: str) -> T.List[str]:
-        if crt_val in self.crt_args:
-            return self.crt_args[crt_val]
-        assert crt_val in {'from_buildtype', 'static_from_buildtype'}
-        dbg = 'mdd'
-        rel = 'md'
-        if crt_val == 'static_from_buildtype':
-            dbg = 'mtd'
-            rel = 'mt'
-        # Match what build type flags used to do.
-        if buildtype == 'plain':
-            return []
-        elif buildtype == 'debug':
-            return self.crt_args[dbg]
-        elif buildtype == 'debugoptimized':
-            return self.crt_args[rel]
-        elif buildtype == 'release':
-            return self.crt_args[rel]
-        elif buildtype == 'minsize':
-            return self.crt_args[rel]
-        else:
-            assert buildtype == 'custom'
-            raise mesonlib.EnvironmentException('Requested C runtime based on buildtype, but buildtype is "custom".')
+        crt_val = self.get_crt_val(crt_val, buildtype)
+        return self.crt_args[crt_val]
 
     def has_func_attribute(self, name: str, env: 'Environment') -> T.Tuple[bool, bool]:
         # MSVC doesn't have __attribute__ like Clang and GCC do, so just return
@@ -426,6 +396,18 @@ class MSVCCompiler(VisualStudioLikeCompiler):
         # don't mutate class constant state
         if mesonlib.version_compare(self.version, '<19.00') and '/utf-8' in self.always_args:
             self.always_args = [r for r in self.always_args if r != '/utf-8']
+
+    def get_compile_debugfile_args(self, rel_obj: str, pch: bool = False) -> T.List[str]:
+        args = super().get_compile_debugfile_args(rel_obj, pch)
+        # When generating a PDB file with PCH, all compile commands write
+        # to the same PDB file. Hence, we need to serialize the PDB
+        # writes using /FS since we do parallel builds. This slows down the
+        # build obviously, which is why we only do this when PCH is on.
+        # This was added in Visual Studio 2013 (MSVC 18.0). Before that it was
+        # always on: https://msdn.microsoft.com/en-us/library/dn502518.aspx
+        if pch and mesonlib.version_compare(self.version, '>=18.0'):
+            args = ['/FS'] + args
+        return args
 
     # Override CCompiler.get_always_args
     # We want to drop '/utf-8' for Visual Studio 2013 and earlier

@@ -257,7 +257,7 @@ or compiler being used:
 | ------           | ------------- | ---------------                          | ----------- |
 | c_args           |               | free-form comma-separated list           | C compile arguments to use |
 | c_link_args      |               | free-form comma-separated list           | C link arguments to use |
-| c_std            | none          | none, c89, c99, c11, c17, c18, c2x, gnu89, gnu99, gnu11, gnu17, gnu18, gnu2x | C language standard to use |
+| c_std            | none          | none, c89, c99, c11, c17, c18, c2x, c23, gnu89, gnu99, gnu11, gnu17, gnu18, gnu2x, gnu23 | C language standard to use |
 | c_winlibs        | see below     | free-form comma-separated list           | Standard Windows libs to link against |
 | c_thread_count   | 4             | integer value ≥ 0                        | Number of threads to use with emcc when using threads |
 | cpp_args         |               | free-form comma-separated list           | C++ compile arguments to use |
@@ -295,6 +295,21 @@ Since *0.63.0* all compiler options can be set per subproject, see
 is inherited from the main project. This is useful, for example, when the main
 project requires C++11, but a subproject requires C++14. The `cpp_std` value
 from the subproject's `default_options` is now respected.
+
+Since *1.3.0* `c_std` and `cpp_std` options now accept a list of values.
+Projects that prefer GNU C, but can fallback to ISO C, can now set, for
+example, `default_options: 'c_std=gnu11,c11'`, and it will use `gnu11` when
+available, but fallback to c11 otherwise. It is an error only if none of the
+values are supported by the current compiler.
+Likewise, a project that can take benefit of `c++17` but can still build with
+`c++11` can set `default_options: 'cpp_std=c++17,c++11'`.
+This allows us to deprecate `gnuXX` values from the MSVC compiler. That means
+that `default_options: 'c_std=gnu11'` will now print a warning with MSVC
+but fallback to `c11`. No warning is printed if at least one
+of the values is valid, i.e. `default_options: 'c_std=gnu11,c11'`.
+In the future that deprecation warning will become an hard error because
+`c_std=gnu11` should mean GNU is required, for projects that cannot be
+built with MSVC for example.
 
 ## Specifying options per machine
 

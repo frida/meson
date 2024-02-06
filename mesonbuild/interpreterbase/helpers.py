@@ -1,16 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2013-2021 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 from .. import mesonlib, mparser
@@ -25,7 +15,7 @@ if T.TYPE_CHECKING:
     from .baseobjects import TYPE_var, TYPE_kwargs, SubProject
 
 def flatten(args: T.Union['TYPE_var', T.List['TYPE_var']]) -> T.List['TYPE_var']:
-    if isinstance(args, mparser.StringNode):
+    if isinstance(args, mparser.BaseStringNode):
         assert isinstance(args.value, str)
         return [args.value]
     if not isinstance(args, collections.abc.Sequence):
@@ -35,7 +25,7 @@ def flatten(args: T.Union['TYPE_var', T.List['TYPE_var']]) -> T.List['TYPE_var']
         if isinstance(a, list):
             rest = flatten(a)
             result = result + rest
-        elif isinstance(a, mparser.StringNode):
+        elif isinstance(a, mparser.BaseStringNode):
             result.append(a.value)
         else:
             result.append(a)

@@ -1,16 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2014-2016 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 """This is a helper script for IDE developers. It allows you to
@@ -36,7 +26,7 @@ from .dependencies import Dependency
 from . import environment
 from .interpreterbase import ObjectHolder
 from .mesonlib import OptionKey
-from .mparser import FunctionNode, ArrayNode, ArgumentNode, StringNode
+from .mparser import FunctionNode, ArrayNode, ArgumentNode, BaseStringNode
 
 if T.TYPE_CHECKING:
     import argparse
@@ -64,8 +54,7 @@ class IntroCommand:
 
 def get_meson_introspection_types(coredata: T.Optional[cdata.CoreData] = None,
                                   builddata: T.Optional[build.Build] = None,
-                                  backend: T.Optional[backends.Backend] = None,
-                                  sourcedir: T.Optional[str] = None) -> 'T.Mapping[str, IntroCommand]':
+                                  backend: T.Optional[backends.Backend] = None) -> 'T.Mapping[str, IntroCommand]':
     if backend and builddata:
         benchmarkdata = backend.create_test_serialisation(builddata.get_benchmarks())
         testdata = backend.create_test_serialisation(builddata.get_tests())
@@ -91,6 +80,8 @@ def get_meson_introspection_types(coredata: T.Optional[cdata.CoreData] = None,
         ('tests', IntroCommand('List all unit tests', func=lambda: list_tests(testdata))),
     ])
 
+# Note: when adding arguments, please also add them to the completion
+# scripts in $MESONSRC/data/shell-completions/
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     intro_types = get_meson_introspection_types()
     for key, val in intro_types.items():
@@ -187,14 +178,14 @@ def list_targets_from_source(intr: IntrospectionInterpreter) -> T.List[T.Dict[st
             args: T.List[BaseNode] = []
             if isinstance(n, FunctionNode):
                 args = list(n.args.arguments)
-                if n.func_name in BUILD_TARGET_FUNCTIONS:
+                if n.func_name.value in BUILD_TARGET_FUNCTIONS:
                     args.pop(0)
             elif isinstance(n, ArrayNode):
                 args = n.args.arguments
             elif isinstance(n, ArgumentNode):
                 args = n.arguments
             for j in args:
-                if isinstance(j, StringNode):
+                if isinstance(j, BaseStringNode):
                     assert isinstance(j.value, str)
                     res += [Path(j.value)]
                 elif isinstance(j, str):
@@ -412,7 +403,7 @@ def list_deps(coredata: cdata.CoreData, backend: backends.Backend) -> T.List[T.D
             'version': d.get_version(),
             'compile_args': d.get_compile_args(),
             'link_args': d.get_link_args(),
-            'include_directories': [i for idirs in d.get_include_dirs() for i in idirs.to_string_list(backend.source_dir)],
+            'include_directories': [i for idirs in d.get_include_dirs() for i in idirs.to_string_list(backend.source_dir, backend.build_dir)],
             'sources': [f for s in d.get_sources() for f in _src_to_str(s)],
             'extra_files': [f for s in d.get_extra_files() for f in _src_to_str(s)],
             'dependencies': [e.name for e in d.ext_deps],
@@ -543,7 +534,7 @@ def run(options: argparse.Namespace) -> int:
     indent = 4 if options.indent else None
     results: T.List[T.Tuple[str, T.Union[dict, T.List[T.Any]]]] = []
     sourcedir = '.' if options.builddir == 'meson.build' else options.builddir[:-11]
-    intro_types = get_meson_introspection_types(sourcedir=sourcedir)
+    intro_types = get_meson_introspection_types()
 
     if 'meson.build' in [os.path.basename(options.builddir), options.builddir]:
         # Make sure that log entries in other parts of meson don't interfere with the JSON output

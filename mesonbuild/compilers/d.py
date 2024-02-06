@@ -1,16 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2012-2022 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 import os.path
@@ -28,9 +18,6 @@ from ..mesonlib import (
 
 from . import compilers
 from .compilers import (
-    d_dmd_buildtype_args,
-    d_gdc_buildtype_args,
-    d_ldc_buildtype_args,
     clike_debug_args,
     Compiler,
     CompileCheckMode,
@@ -39,6 +26,7 @@ from .mixins.gnu import GnuCompiler
 from .mixins.gnu import gnu_common_warning_args
 
 if T.TYPE_CHECKING:
+    from ..build import DFeatures
     from ..dependencies import Dependency
     from ..programs import ExternalProgram
     from ..envconfig import MachineInfo
@@ -76,8 +64,8 @@ ldc_optimization_args: T.Dict[str, T.List[str]] = {
     '0': [],
     'g': [],
     '1': ['-O1'],
-    '2': ['-O2'],
-    '3': ['-O3'],
+    '2': ['-O2', '-enable-inlining', '-Hkeep-all-bodies'],
+    '3': ['-O3', '-enable-inlining', '-Hkeep-all-bodies'],
     's': ['-Oz'],
 }
 
@@ -86,9 +74,19 @@ dmd_optimization_args: T.Dict[str, T.List[str]] = {
     '0': [],
     'g': [],
     '1': ['-O'],
-    '2': ['-O'],
-    '3': ['-O'],
+    '2': ['-O', '-inline'],
+    '3': ['-O', '-inline'],
     's': ['-O'],
+}
+
+gdc_optimization_args: T.Dict[str, T.List[str]] = {
+    'plain': [],
+    '0': ['-O0'],
+    'g': ['-Og'],
+    '1': ['-O1'],
+    '2': ['-O2', '-finline-functions'],
+    '3': ['-O3', '-finline-functions'],
+    's': ['-Os'],
 }
 
 
@@ -170,96 +168,8 @@ class DmdLikeCompilerMixin(CompilerMixinBase):
             return []
         return ['-fPIC']
 
-    def get_feature_args(self, kwargs: T.Dict[str, T.Any], build_to_src: str) -> T.List[str]:
-        # TODO: using a TypeDict here would improve this
-        res: T.List[str] = []
-        # get_feature_args can be called multiple times for the same target when there is generated source
-        # so we have to copy the kwargs (target.d_features) dict before popping from it
-        kwargs = kwargs.copy()
-        if 'unittest' in kwargs:
-            unittest = kwargs.pop('unittest')
-            unittest_arg = d_feature_args[self.id]['unittest']
-            if not unittest_arg:
-                raise EnvironmentException('D compiler %s does not support the "unittest" feature.' % self.name_string())
-            if unittest:
-                res.append(unittest_arg)
-
-        if 'debug' in kwargs:
-            debug_level = -1
-            debugs = kwargs.pop('debug')
-            if not isinstance(debugs, list):
-                debugs = [debugs]
-
-            debug_arg = d_feature_args[self.id]['debug']
-            if not debug_arg:
-                raise EnvironmentException('D compiler %s does not support conditional debug identifiers.' % self.name_string())
-
-            # Parse all debug identifiers and the largest debug level identifier
-            for d in debugs:
-                if isinstance(d, int):
-                    if d > debug_level:
-                        debug_level = d
-                elif isinstance(d, str) and d.isdigit():
-                    if int(d) > debug_level:
-                        debug_level = int(d)
-                else:
-                    res.append(f'{debug_arg}={d}')
-
-            if debug_level >= 0:
-                res.append(f'{debug_arg}={debug_level}')
-
-        if 'versions' in kwargs:
-            version_level = -1
-            versions = kwargs.pop('versions')
-            if not isinstance(versions, list):
-                versions = [versions]
-
-            version_arg = d_feature_args[self.id]['version']
-            if not version_arg:
-                raise EnvironmentException('D compiler %s does not support conditional version identifiers.' % self.name_string())
-
-            # Parse all version identifiers and the largest version level identifier
-            for v in versions:
-                if isinstance(v, int):
-                    if v > version_level:
-                        version_level = v
-                elif isinstance(v, str) and v.isdigit():
-                    if int(v) > version_level:
-                        version_level = int(v)
-                else:
-                    res.append(f'{version_arg}={v}')
-
-            if version_level >= 0:
-                res.append(f'{version_arg}={version_level}')
-
-        if 'import_dirs' in kwargs:
-            import_dirs = kwargs.pop('import_dirs')
-            if not isinstance(import_dirs, list):
-                import_dirs = [import_dirs]
-
-            import_dir_arg = d_feature_args[self.id]['import_dir']
-            if not import_dir_arg:
-                raise EnvironmentException('D compiler %s does not support the "string import directories" feature.' % self.name_string())
-            for idir_obj in import_dirs:
-                basedir = idir_obj.get_curdir()
-                for idir in idir_obj.get_incdirs():
-                    bldtreedir = os.path.join(basedir, idir)
-                    # Avoid superfluous '/.' at the end of paths when d is '.'
-                    if idir not in ('', '.'):
-                        expdir = bldtreedir
-                    else:
-                        expdir = basedir
-                    srctreedir = os.path.join(build_to_src, expdir)
-                    res.append(f'{import_dir_arg}{srctreedir}')
-                    res.append(f'{import_dir_arg}{bldtreedir}')
-
-        if kwargs:
-            raise EnvironmentException('Unknown D compiler feature(s) selected: %s' % ', '.join(kwargs.keys()))
-
-        return res
-
-    def get_buildtype_linker_args(self, buildtype: str) -> T.List[str]:
-        if buildtype != 'plain':
+    def get_optimization_link_args(self, optimization_level: str) -> T.List[str]:
+        if optimization_level != 'plain':
             return self._get_target_arch_args()
         return []
 
@@ -466,31 +376,7 @@ class DmdLikeCompilerMixin(CompilerMixinBase):
     def _get_crt_args(self, crt_val: str, buildtype: str) -> T.List[str]:
         if not self.info.is_windows():
             return []
-
-        if crt_val in self.mscrt_args:
-            return self.mscrt_args[crt_val]
-        assert crt_val in {'from_buildtype', 'static_from_buildtype'}
-
-        dbg = 'mdd'
-        rel = 'md'
-        if crt_val == 'static_from_buildtype':
-            dbg = 'mtd'
-            rel = 'mt'
-
-        # Match what build type flags used to do.
-        if buildtype == 'plain':
-            return []
-        elif buildtype == 'debug':
-            return self.mscrt_args[dbg]
-        elif buildtype == 'debugoptimized':
-            return self.mscrt_args[rel]
-        elif buildtype == 'release':
-            return self.mscrt_args[rel]
-        elif buildtype == 'minsize':
-            return self.mscrt_args[rel]
-        else:
-            assert buildtype == 'custom'
-            raise EnvironmentException('Requested C runtime based on buildtype, but buildtype is "custom".')
+        return self.mscrt_args[self.get_crt_val(crt_val, buildtype)]
 
     def get_soname_args(self, env: 'Environment', prefix: str, shlib_name: str,
                         suffix: str, soversion: str,
@@ -586,96 +472,74 @@ class DCompiler(Compiler):
             return []
         return ['-fPIC']
 
-    def get_feature_args(self, kwargs: T.Dict[str, T.Any], build_to_src: str) -> T.List[str]:
-        # TODO: using a TypeDict here would improve this
+    def get_feature_args(self, kwargs: DFeatures, build_to_src: str) -> T.List[str]:
         res: T.List[str] = []
-        # get_feature_args can be called multiple times for the same target when there is generated source
-        # so we have to copy the kwargs (target.d_features) dict before popping from it
-        kwargs = kwargs.copy()
-        if 'unittest' in kwargs:
-            unittest = kwargs.pop('unittest')
-            unittest_arg = d_feature_args[self.id]['unittest']
-            if not unittest_arg:
-                raise EnvironmentException('D compiler %s does not support the "unittest" feature.' % self.name_string())
-            if unittest:
-                res.append(unittest_arg)
+        unittest_arg = d_feature_args[self.id]['unittest']
+        if not unittest_arg:
+            raise EnvironmentException('D compiler %s does not support the "unittest" feature.' % self.name_string())
+        if kwargs['unittest']:
+            res.append(unittest_arg)
 
-        if 'debug' in kwargs:
-            debug_level = -1
-            debugs = kwargs.pop('debug')
-            if not isinstance(debugs, list):
-                debugs = [debugs]
+        debug_level = -1
+        debug_arg = d_feature_args[self.id]['debug']
+        if not debug_arg:
+            raise EnvironmentException('D compiler %s does not support conditional debug identifiers.' % self.name_string())
 
-            debug_arg = d_feature_args[self.id]['debug']
-            if not debug_arg:
-                raise EnvironmentException('D compiler %s does not support conditional debug identifiers.' % self.name_string())
+        # Parse all debug identifiers and the largest debug level identifier
+        for d in kwargs['debug']:
+            if isinstance(d, int):
+                if d > debug_level:
+                    debug_level = d
+            elif isinstance(d, str) and d.isdigit():
+                if int(d) > debug_level:
+                    debug_level = int(d)
+            else:
+                res.append(f'{debug_arg}={d}')
 
-            # Parse all debug identifiers and the largest debug level identifier
-            for d in debugs:
-                if isinstance(d, int):
-                    if d > debug_level:
-                        debug_level = d
-                elif isinstance(d, str) and d.isdigit():
-                    if int(d) > debug_level:
-                        debug_level = int(d)
+        if debug_level >= 0:
+            res.append(f'{debug_arg}={debug_level}')
+
+        version_level = -1
+        version_arg = d_feature_args[self.id]['version']
+        if not version_arg:
+            raise EnvironmentException('D compiler %s does not support conditional version identifiers.' % self.name_string())
+
+        # Parse all version identifiers and the largest version level identifier
+        for v in kwargs['versions']:
+            if isinstance(v, int):
+                if v > version_level:
+                    version_level = v
+            elif isinstance(v, str) and v.isdigit():
+                if int(v) > version_level:
+                    version_level = int(v)
+            else:
+                res.append(f'{version_arg}={v}')
+
+        if version_level >= 0:
+            res.append(f'{version_arg}={version_level}')
+
+        import_dir_arg = d_feature_args[self.id]['import_dir']
+        if not import_dir_arg:
+            raise EnvironmentException('D compiler %s does not support the "string import directories" feature.' % self.name_string())
+        # TODO: ImportDirs.to_string_list(), but we need both the project source
+        # root and project build root for that.
+        for idir_obj in kwargs['import_dirs']:
+            basedir = idir_obj.get_curdir()
+            for idir in idir_obj.get_incdirs():
+                bldtreedir = os.path.join(basedir, idir)
+                # Avoid superfluous '/.' at the end of paths when d is '.'
+                if idir not in ('', '.'):
+                    expdir = bldtreedir
                 else:
-                    res.append(f'{debug_arg}={d}')
-
-            if debug_level >= 0:
-                res.append(f'{debug_arg}={debug_level}')
-
-        if 'versions' in kwargs:
-            version_level = -1
-            versions = kwargs.pop('versions')
-            if not isinstance(versions, list):
-                versions = [versions]
-
-            version_arg = d_feature_args[self.id]['version']
-            if not version_arg:
-                raise EnvironmentException('D compiler %s does not support conditional version identifiers.' % self.name_string())
-
-            # Parse all version identifiers and the largest version level identifier
-            for v in versions:
-                if isinstance(v, int):
-                    if v > version_level:
-                        version_level = v
-                elif isinstance(v, str) and v.isdigit():
-                    if int(v) > version_level:
-                        version_level = int(v)
-                else:
-                    res.append(f'{version_arg}={v}')
-
-            if version_level >= 0:
-                res.append(f'{version_arg}={version_level}')
-
-        if 'import_dirs' in kwargs:
-            import_dirs = kwargs.pop('import_dirs')
-            if not isinstance(import_dirs, list):
-                import_dirs = [import_dirs]
-
-            import_dir_arg = d_feature_args[self.id]['import_dir']
-            if not import_dir_arg:
-                raise EnvironmentException('D compiler %s does not support the "string import directories" feature.' % self.name_string())
-            for idir_obj in import_dirs:
-                basedir = idir_obj.get_curdir()
-                for idir in idir_obj.get_incdirs():
-                    bldtreedir = os.path.join(basedir, idir)
-                    # Avoid superfluous '/.' at the end of paths when d is '.'
-                    if idir not in ('', '.'):
-                        expdir = bldtreedir
-                    else:
-                        expdir = basedir
-                    srctreedir = os.path.join(build_to_src, expdir)
-                    res.append(f'{import_dir_arg}{srctreedir}')
-                    res.append(f'{import_dir_arg}{bldtreedir}')
-
-        if kwargs:
-            raise EnvironmentException('Unknown D compiler feature(s) selected: %s' % ', '.join(kwargs.keys()))
+                    expdir = basedir
+                srctreedir = os.path.join(build_to_src, expdir)
+                res.append(f'{import_dir_arg}{srctreedir}')
+                res.append(f'{import_dir_arg}{bldtreedir}')
 
         return res
 
-    def get_buildtype_linker_args(self, buildtype: str) -> T.List[str]:
-        if buildtype != 'plain':
+    def get_optimization_link_args(self, optimization_level: str) -> T.List[str]:
+        if optimization_level != 'plain':
             return self._get_target_arch_args()
         return []
 
@@ -840,8 +704,8 @@ class GnuDCompiler(GnuCompiler, DCompiler):
     def get_warn_args(self, level: str) -> T.List[str]:
         return self.warn_args[level]
 
-    def get_buildtype_args(self, buildtype: str) -> T.List[str]:
-        return d_gdc_buildtype_args[buildtype]
+    def get_optimization_args(self, optimization_level: str) -> T.List[str]:
+        return gdc_optimization_args[optimization_level]
 
     def compute_parameters_with_absolute_paths(self, parameter_list: T.List[str],
                                                build_dir: str) -> T.List[str]:
@@ -907,11 +771,6 @@ class LLVMDCompiler(DmdLikeCompilerMixin, DCompiler):
             return ['-wi']
         return []
 
-    def get_buildtype_args(self, buildtype: str) -> T.List[str]:
-        if buildtype != 'plain':
-            return self._get_target_arch_args() + d_ldc_buildtype_args[buildtype]
-        return d_ldc_buildtype_args[buildtype]
-
     def get_pic_args(self) -> T.List[str]:
         return ['-relocation-model=pic']
 
@@ -922,6 +781,8 @@ class LLVMDCompiler(DmdLikeCompilerMixin, DCompiler):
         return self._unix_args_to_native(args, self.info, self.linker.id)
 
     def get_optimization_args(self, optimization_level: str) -> T.List[str]:
+        if optimization_level != 'plain':
+            return self._get_target_arch_args() + ldc_optimization_args[optimization_level]
         return ldc_optimization_args[optimization_level]
 
     @classmethod
@@ -967,11 +828,6 @@ class DmdDCompiler(DmdLikeCompilerMixin, DCompiler):
             return ['-color=on']
         return []
 
-    def get_buildtype_args(self, buildtype: str) -> T.List[str]:
-        if buildtype != 'plain':
-            return self._get_target_arch_args() + d_dmd_buildtype_args[buildtype]
-        return d_dmd_buildtype_args[buildtype]
-
     def get_std_exe_link_args(self) -> T.List[str]:
         if self.info.is_windows():
             # DMD links against D runtime only when main symbol is found,
@@ -1013,6 +869,8 @@ class DmdDCompiler(DmdLikeCompilerMixin, DCompiler):
         return self._unix_args_to_native(args, self.info, self.linker.id)
 
     def get_optimization_args(self, optimization_level: str) -> T.List[str]:
+        if optimization_level != 'plain':
+            return self._get_target_arch_args() + dmd_optimization_args[optimization_level]
         return dmd_optimization_args[optimization_level]
 
     def can_linker_accept_rsp(self) -> bool:

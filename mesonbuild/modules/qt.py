@@ -1,17 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2015 The Meson development team
-# Copyright © 2021 Intel Corporation
+# Copyright © 2021-2023 Intel Corporation
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 import os
@@ -23,7 +13,7 @@ from . import ModuleReturnValue, ExtensionModule
 from .. import build
 from .. import coredata
 from .. import mlog
-from ..dependencies import find_external_dependency, Dependency, ExternalLibrary
+from ..dependencies import find_external_dependency, Dependency, ExternalLibrary, InternalDependency
 from ..mesonlib import MesonException, File, version_compare, Popen_safe
 from ..interpreter import extract_required_kwarg
 from ..interpreter.type_checking import INSTALL_DIR_KW, INSTALL_KW, NoneType
@@ -457,7 +447,10 @@ class QtBaseModule(ExtensionModule):
         inc = state.get_include_args(include_dirs=kwargs['include_directories'])
         compile_args: T.List[str] = []
         for dep in kwargs['dependencies']:
-            compile_args.extend([a for a in dep.get_all_compile_args() if a.startswith(('-I', '-D'))])
+            compile_args.extend(a for a in dep.get_all_compile_args() if a.startswith(('-I', '-D')))
+            if isinstance(dep, InternalDependency):
+                for incl in dep.include_directories:
+                    compile_args.extend(f'-I{i}' for i in incl.to_string_list(self.interpreter.source_root, self.interpreter.environment.build_dir))
 
         output: T.List[build.GeneratedList] = []
 
@@ -474,7 +467,7 @@ class QtBaseModule(ExtensionModule):
         if kwargs['sources']:
             moc_gen = build.Generator(
                 self.tools['moc'], arguments, ['@BASENAME@.moc'],
-                depfile='@BASENAME.moc.d@',
+                depfile='@BASENAME@.moc.d',
                 name=f'Qt{self.qt_version} moc source')
             output.append(moc_gen.process_files(kwargs['sources'], state))
 

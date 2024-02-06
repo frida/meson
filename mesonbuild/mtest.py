@@ -1,16 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2016-2017 The Meson development team
-
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 # A tool to run tests in many different ways.
 from __future__ import annotations
@@ -124,6 +113,8 @@ def determine_worker_count() -> int:
             num_workers = 1
     return num_workers
 
+# Note: when adding arguments, please also add them to the completion
+# scripts in $MESONSRC/data/shell-completions/
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--maxfail', default=0, type=int,
                         help='Number of failing tests before aborting the '
@@ -141,9 +132,6 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--wrapper', default=None, dest='wrapper', type=split_args,
                         help='wrapper to run tests with (e.g. Valgrind)')
     parser.add_argument('-C', dest='wd', action=RealPathAction,
-                        # https://github.com/python/typeshed/issues/3107
-                        # https://github.com/python/mypy/issues/7177
-                        type=os.path.abspath,  # type: ignore
                         help='directory to cd into before running')
     parser.add_argument('--suite', default=[], dest='include_suites', action='append', metavar='SUITE',
                         help='Only run tests belonging to the given suite.')
@@ -157,7 +145,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
                         help="Run benchmarks instead of tests.")
     parser.add_argument('--logbase', default='testlog',
                         help="Base name for log file.")
-    parser.add_argument('--num-processes', default=determine_worker_count(), type=int,
+    parser.add_argument('-j', '--num-processes', default=determine_worker_count(), type=int,
                         help='How many parallel processes to use.')
     parser.add_argument('-v', '--verbose', default=False, action='store_true',
                         help='Do not redirect stdout and stderr')
@@ -1417,6 +1405,15 @@ class SingleTestRunner:
         # Setting MALLOC_PERTURB_="0" will completely disable this feature.
         if ('MALLOC_PERTURB_' not in env or not env['MALLOC_PERTURB_']) and not options.benchmark:
             env['MALLOC_PERTURB_'] = str(random.randint(1, 255))
+
+        # Sanitizers do not default to aborting on error. This is counter to
+        # expectations when using -Db_sanitize and has led to confusion in the wild
+        # in CI. Set our own values of {ASAN,UBSAN}_OPTOINS to rectify this, but
+        # only if the user has not defined them.
+        if ('ASAN_OPTIONS' not in env or not env['ASAN_OPTIONS']):
+            env['ASAN_OPTIONS'] = 'halt_on_error=1:abort_on_error=1:print_summary=1'
+        if ('UBSAN_OPTIONS' not in env or not env['UBSAN_OPTIONS']):
+            env['UBSAN_OPTIONS'] = 'halt_on_error=1:abort_on_error=1:print_summary=1:print_stacktrace=1'
 
         if self.options.gdb or self.test.timeout is None or self.test.timeout <= 0:
             timeout = None

@@ -5,6 +5,7 @@ import argparse
 import tempfile
 import shutil
 import itertools
+import typing as T
 
 from pathlib import Path
 from . import build, minstall
@@ -12,12 +13,14 @@ from .mesonlib import (EnvironmentVariables, MesonException, is_windows, setup_v
                        get_wine_shortpath, MachineChoice)
 from . import mlog
 
-import typing as T
+
 if T.TYPE_CHECKING:
-    from .backends import InstallData
+    from .backend.backends import InstallData
 
 POWERSHELL_EXES = {'pwsh.exe', 'powershell.exe'}
 
+# Note: when adding arguments, please also add them to the completion
+# scripts in $MESONSRC/data/shell-completions/
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('-C', dest='builddir', type=Path, default='.',
                         help='Path to build directory')
@@ -85,7 +88,7 @@ def bash_completion_files(b: build.Build, install_data: 'InstallData') -> T.List
         datadir = b.environment.coredata.get_option(OptionKey('datadir'))
         assert isinstance(datadir, str), 'for mypy'
         datadir_abs = os.path.join(prefix, datadir)
-        completionsdir = dep.get_variable(pkgconfig='completionsdir', pkgconfig_define=['datadir', datadir_abs])
+        completionsdir = dep.get_variable(pkgconfig='completionsdir', pkgconfig_define=(('datadir', datadir_abs),))
         assert isinstance(completionsdir, str), 'for mypy'
         completionsdir_path = Path(completionsdir)
         for f in install_data.data:

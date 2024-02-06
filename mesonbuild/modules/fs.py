@@ -1,16 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2019 The Meson development team
-
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 from __future__ import annotations
 from pathlib import Path, PurePath, PureWindowsPath
@@ -80,7 +69,7 @@ class FSModule(ExtensionModule):
         make an absolute path from a relative path, WITHOUT resolving symlinks
         """
         if isinstance(arg, File):
-            return Path(arg.absolute_path(state.source_root, self.interpreter.environment.get_build_dir()))
+            return Path(arg.absolute_path(state.source_root, state.environment.get_build_dir()))
         return Path(state.source_root) / Path(state.subdir) / Path(arg).expanduser()
 
     def _resolve_dir(self, state: 'ModuleState', arg: 'FileOrString') -> Path:
@@ -239,9 +228,9 @@ class FSModule(ExtensionModule):
         """
         path = args[0]
         encoding = kwargs['encoding']
-        src_dir = self.interpreter.environment.source_dir
-        sub_dir = self.interpreter.subdir
-        build_dir = self.interpreter.environment.get_build_dir()
+        src_dir = state.environment.source_dir
+        sub_dir = state.subdir
+        build_dir = state.environment.get_build_dir()
 
         if isinstance(path, File):
             if path.is_built:

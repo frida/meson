@@ -1,16 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2013-2021 The Meson development team
-
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 __all__ = [
     'InterpreterObject',
@@ -46,7 +35,6 @@ __all__ = [
     'disablerIfNotFound',
     'permittedKwargs',
     'typed_operator',
-    'unary_operator',
     'typed_pos_args',
     'ContainerTypeInfo',
     'KwargInfo',
@@ -62,9 +50,6 @@ __all__ = [
 
     'SubProject',
 
-    'TV_fw_var',
-    'TV_fw_args',
-    'TV_fw_kwargs',
     'TV_func',
     'TYPE_elementary',
     'TYPE_var',
@@ -85,9 +70,6 @@ from .baseobjects import (
     MutableInterpreterObject,
     ContextManagerObject,
 
-    TV_fw_var,
-    TV_fw_args,
-    TV_fw_kwargs,
     TV_func,
     TYPE_elementary,
     TYPE_var,
@@ -115,7 +97,6 @@ from .decorators import (
     ContainerTypeInfo,
     KwargInfo,
     typed_operator,
-    unary_operator,
     typed_kwargs,
     FeatureCheckBase,
     FeatureNew,

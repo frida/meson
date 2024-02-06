@@ -1,16 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2012-2017 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 import os.path
@@ -66,9 +56,6 @@ class ValaCompiler(Compiler):
     def get_warn_args(self, level: str) -> T.List[str]:
         return []
 
-    def get_no_warn_args(self) -> T.List[str]:
-        return ['--disable-warnings']
-
     def get_werror_args(self) -> T.List[str]:
         return ['--fatal-warnings']
 
@@ -103,11 +90,6 @@ class ValaCompiler(Compiler):
             if p.returncode != 0:
                 msg = f'Vala compiler {self.name_string()!r} cannot compile programs'
                 raise EnvironmentException(msg)
-
-    def get_buildtype_args(self, buildtype: str) -> T.List[str]:
-        if buildtype in {'debug', 'debugoptimized', 'minsize'}:
-            return ['--debug']
-        return []
 
     def find_library(self, libname: str, env: 'Environment', extra_dirs: T.List[str],
                      libtype: LibType = LibType.PREFER_SHARED, lib_prefix_warning: bool = True) -> T.Optional[T.List[str]]:
