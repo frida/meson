@@ -2191,7 +2191,7 @@ def _classify_argument(key: 'OptionKey') -> OptionType:
         assert key.machine is MachineChoice.HOST, str(key)
         return OptionType.BACKEND
     else:
-        assert key.subproject or key.machine is MachineChoice.HOST, str(key)
+        assert key.machine is MachineChoice.HOST, str(key)
         return OptionType.PROJECT
 
 
