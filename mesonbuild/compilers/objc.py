@@ -110,6 +110,15 @@ class _ClangObjCStds(_ClangCStds, _ClangObjCStdsBase):
     def __init__(self, version: str, for_machine: MachineChoice):
         _ClangObjCStdsBase.__init__(self, version, for_machine)
 
+    def get_output_args(self, outputname: str) -> T.List[str]:
+        pass
+
+    def get_optimization_args(self, optimization_level: str) -> T.List[str]:
+        return []
+
+    def sanity_check(self, work_dir: str, environment: 'Environment') -> None:
+        pass
+
 class AppleClangObjCCompiler(ClangObjCCompiler):
 
     """Handle the differences between Apple's clang and vanilla clang."""
