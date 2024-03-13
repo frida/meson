@@ -869,9 +869,11 @@ class Environment:
         return self.build_dir
 
     def build_output_rpath(self, subdir: str, *parts: T.Sequence[str]) -> str:
-        result = subdir
-        if self.coredata.is_native_clone:
-            result += '-native'
+        if self.coredata.is_native_cross():
+            assert subdir.startswith('subprojects')
+            result = 'subprojects-native' + subdir[11:]
+        else:
+            result = subdir
         return os.path.join(result, *parts)
 
     def get_import_lib_dir(self) -> str:

@@ -297,6 +297,18 @@ class Build:
     def copy_to_native(self) -> Build:
         other = Build(self.environment.copy_to_native())
         self._copy_to(other)
+
+        other.tests = []
+        other.benchmarks = []
+        other.test_setups = {}
+        other.test_setup_default_name = None
+        other.find_overrides = {}
+        other.searched_programs = set()
+
+        other.dependency_overrides = PerMachineDefaultable.default(False, self.dependency_overrides.build, {})
+        other.devenv = []
+        other.modules = []
+
         return other
 
     def _copy_to(self, other: Build) -> None:
@@ -309,8 +321,12 @@ class Build:
                 other.__dict__[k] = v
 
     def merge(self, other: Build) -> None:
+        is_native_cross = other.environment.coredata.is_native_cross()
+
         for k, v in other.__dict__.items():
             if k == 'environment':
+                continue
+            if is_native_cross and k == 'dependency_overrides':
                 continue
             self.__dict__[k] = v
 
@@ -391,6 +407,7 @@ class IncludeDirs(HoldableObject):
     curdir: str
     incdirs: T.List[str]
     is_system: bool
+    is_native_cross: bool
     # Interpreter has validated that all given directories
     # actually exist.
     extra_build_dirs: T.List[str] = field(default_factory=list)
@@ -616,7 +633,7 @@ class Target(HoldableObject, metaclass=abc.ABCMeta):
         return self.name
 
     def get_subdir(self) -> str:
-        return self.environment.build_output_rpath(self.subdir)
+        return self.subdir
 
     def get_typename(self) -> str:
         return self.typename
@@ -655,7 +672,10 @@ class Target(HoldableObject, metaclass=abc.ABCMeta):
         if getattr(self, 'name_suffix_set', False):
             name += '.' + self.suffix
         return self.construct_id_from_path(
-            self.subdir, name, self.type_suffix(), '@native' if self.environment.coredata.is_native_clone else '')
+            self.subdir, name, self.type_suffix(), '@native' if self.is_native_cross() else '')
+
+    def is_native_cross(self) -> bool:
+        return self.environment.coredata.is_native_cross()
 
     def process_kwargs_base(self, kwargs: T.Dict[str, T.Any]) -> None:
         if 'build_by_default' in kwargs:
@@ -1501,8 +1521,6 @@ class BuildTarget(Target):
         links_with_rust_abi = isinstance(t, BuildTarget) and t.uses_rust_abi()
         if not self.uses_rust() and links_with_rust_abi:
             raise InvalidArguments(f'Try to link Rust ABI library {t.name!r} with a non-Rust target {self.name!r}')
-        if isinstance(t, Target) and t.subproject and not self.environment.is_cross_build():
-            return
         if self.for_machine is not t.for_machine and (not links_with_rust_abi or t.rust_crate_type != 'proc-macro'):
             msg = f'Tried to mix libraries for machines {self.for_machine} and {t.for_machine} in target {self.name!r}'
             if self.environment.is_cross_build():
@@ -1551,7 +1569,8 @@ class BuildTarget(Target):
             set_is_system = 'preserve'
         if set_is_system != 'preserve':
             is_system = set_is_system == 'system'
-            ids = [IncludeDirs(x.get_curdir(), x.get_incdirs(), is_system, x.get_extra_build_dirs()) for x in ids]
+            ids = [IncludeDirs(x.get_curdir(), x.get_incdirs(), is_system,
+                               self.is_native_cross(), x.get_extra_build_dirs()) for x in ids]
         self.include_dirs += ids
 
     def get_aliases(self) -> T.List[T.Tuple[str, str, str]]:
@@ -2981,6 +3000,9 @@ class CustomTargetIndex(CustomTargetBase, HoldableObject):
 
     def get_id(self) -> str:
         return self.target.get_id()
+
+    def is_native_cross(self) -> bool:
+        return self.target.is_native_cross()
 
     def get_all_link_deps(self):
         return self.target.get_all_link_deps()

@@ -330,10 +330,11 @@ class Backend:
         return compiler.get_include_args(tmppath, False)
 
     def get_build_dir_include_args(self, target: build.BuildTarget, compiler: 'Compiler', *, absolute_path: bool = False) -> T.List[str]:
+        subdir = self.compute_build_subdir(target.get_subdir(), target.is_native_cross())
         if absolute_path:
-            curdir = os.path.join(self.build_dir, target.get_subdir())
+            curdir = os.path.join(self.build_dir, subdir)
         else:
-            curdir = target.get_subdir()
+            curdir = subdir
             if curdir == '':
                 curdir = '.'
         return compiler.get_include_args(curdir, False)
@@ -368,9 +369,11 @@ class Backend:
             # this produces no output, only a dummy top-level name
             dirname = ''
         elif self.environment.coredata.get_option(OptionKey('layout')) == 'mirror':
-            dirname = target.get_subdir()
+            dirname = self.compute_build_subdir(target.get_subdir(), target.is_native_cross())
         else:
             dirname = 'meson-out'
+            if target.is_native_cross():
+                dirname += '-native'
         return dirname
 
     def get_target_dir_relative_to(self, t: build.Target, o: build.Target) -> str:
@@ -408,6 +411,10 @@ class Backend:
         # GeneratedList generators output to the private build directory of the
         # target that the GeneratedList is used in
         return os.path.join(self.get_target_private_dir(target), src)
+
+    @classmethod
+    def compute_build_subdir(cls, subdir: str, is_native_cross: bool) -> str:
+        return compute_build_subdir(subdir, is_native_cross)
 
     def get_unity_source_file(self, target: T.Union[build.BuildTarget, build.CustomTarget, build.CustomTargetIndex],
                               suffix: str, number: int) -> mesonlib.File:
@@ -2043,3 +2050,10 @@ class Backend:
         all_sources = T.cast('_ALL_SOURCES_TYPE', target.sources) + T.cast('_ALL_SOURCES_TYPE', target.generated)
         return self.compiler_to_generator(target, target.compiler, all_sources,
                                           target.output_templ, target.depends)
+
+
+def compute_build_subdir(subdir: str, is_native_cross: bool) -> str:
+    if is_native_cross:
+        assert subdir.startswith('subprojects')
+        return 'subprojects-native' + subdir[11:]
+    return subdir

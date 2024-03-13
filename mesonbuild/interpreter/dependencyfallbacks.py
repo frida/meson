@@ -95,7 +95,8 @@ class DependencyFallbacksHolder(MesonInterpreterObject):
     def _do_existing_subproject(self, kwargs: TYPE_nkwargs, func_args: TYPE_nvar, func_kwargs: TYPE_nkwargs) -> T.Optional[Dependency]:
         subp_name = func_args[0]
         varname = self.subproject_varname
-        if subp_name and self._get_subproject(subp_name, kwargs.get('native', False)):
+        native = kwargs.get('native', False)
+        if subp_name and self._get_subproject(subp_name, native):
             return self._get_subproject_dep(subp_name, varname, kwargs)
         return None
 

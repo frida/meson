@@ -384,7 +384,7 @@ class MesonMain(MesonInterpreterObject):
         else:
             nkwargs['static'] = static
         identifier = dependencies.get_dep_identifier(name, nkwargs)
-        for_machine = self.interpreter.kwarg_options_to_machine(kwargs)
+        for_machine = kwargs['native']
         override = self.build.dependency_overrides[for_machine].get(identifier)
         if override:
             if permissive:

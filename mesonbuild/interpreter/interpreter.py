@@ -19,6 +19,7 @@ from ..mesonlib import (EnvironmentVariables, ExecutableSerialisation, MesonBugE
                         FileMode, MachineChoice, OptionKey, listify,
                         extract_as_list, has_path_sep, path_is_in_root, PerMachine)
 from ..programs import ExternalProgram, NonExistingExternalProgram
+from ..backend.backends import compute_build_subdir
 from ..dependencies import Dependency
 from ..depfile import DepFile
 from ..interpreterbase import ContainerTypeInfo, InterpreterBase, KwargInfo, typed_kwargs, typed_pos_args
@@ -853,7 +854,9 @@ class Interpreter(InterpreterBase, HoldableObject):
 
         return RunProcess(cmd, expanded_args, env, srcdir, builddir, self.subdir,
                           self.environment.get_build_command() + ['introspect'],
-                          in_builddir=in_builddir, check=check, capture=capture)
+                          in_builddir=in_builddir,
+                          is_native_cross=self.coredata.is_native_cross(),
+                          check=check, capture=capture)
 
     def func_option(self, nodes, args, kwargs):
         raise InterpreterException('Tried to call option() in build description file. All options must be in the option file.')
@@ -879,7 +882,10 @@ class Interpreter(InterpreterBase, HoldableObject):
         return self.subprojects.get(self._make_subproject_id(subp_name, native))
 
     def _make_subproject_id(self, subp_name: str, native: bool) -> T.Tuple[str, MachineChoice]:
-        for_machine = MachineChoice.BUILD if native else MachineChoice.HOST
+        if self.coredata.is_native_cross():
+            for_machine = MachineChoice.BUILD
+        else:
+            for_machine = MachineChoice.BUILD if native else MachineChoice.HOST
         return (subp_name, for_machine)
 
     def disabled_subproject(self, subp_name: str, subp_id: str, disabled_feature: T.Optional[str] = None,
@@ -941,7 +947,7 @@ class Interpreter(InterpreterBase, HoldableObject):
 
         stack = ':'.join(self.subproject_stack + [subp_name])
         m = ['\nExecuting subproject', mlog.bold(stack)]
-        if native and self.coredata.is_cross_build():
+        if (native and self.coredata.is_cross_build()) or self.coredata.is_native_cross():
             m += [mlog.normal_green('(native)')]
         if method != 'meson':
             m += ['method', mlog.bold(method)]
@@ -991,11 +997,22 @@ class Interpreter(InterpreterBase, HoldableObject):
                 mlog.log('Generated Meson AST:', meson_filename)
                 mlog.cmd_ci_include(meson_filename)
 
-            if native and self.coredata.is_cross_build():
+            is_native_cross = native and self.coredata.is_cross_build()
+            is_native_cross_boundary = is_native_cross and not self.coredata.is_native_cross()
+
+            if is_native_cross_boundary:
                 new_build = self.build.copy_to_native()
-                default_options = {k.as_build(): v for k, v in default_options.items()}
+                new_subprojects = {k: v for k, v in self.subprojects.items() if k[1] is MachineChoice.BUILD}
+                for (name, for_machine), v in list(new_subprojects.items()):
+                    new_subprojects[(name, MachineChoice.HOST)] = v
+                prev_subproject_ids = set(new_subprojects.keys())
             else:
                 new_build = self.build.copy()
+                new_subprojects = self.subprojects
+
+            if new_build.environment.coredata.is_native_cross():
+                default_options = {k.as_native_cross(): v for k, v in default_options.items()}
+
             subi = Interpreter(new_build, self.backend, subp_name, subp_id, subdir, self.subproject_dir,
                                default_options, ast=ast, is_translated=(ast is not None),
                                relaxations=relaxations,
@@ -1003,7 +1020,7 @@ class Interpreter(InterpreterBase, HoldableObject):
             # Those lists are shared by all interpreters. That means that
             # even if the subproject fails, any modification that the subproject
             # made to those lists will affect the parent project.
-            subi.subprojects = self.subprojects
+            subi.subprojects = new_subprojects
             subi.modules = self.modules
             subi.holder_map = self.holder_map
             subi.bound_holder_map = self.bound_holder_map
@@ -1012,7 +1029,11 @@ class Interpreter(InterpreterBase, HoldableObject):
             subi.subproject_stack = self.subproject_stack + [subp_name]
             current_active = self.active_projectname
             with mlog.nested_warnings():
-                subi.run()
+                try:
+                    subi.run()
+                finally:
+                    if is_native_cross_boundary:
+                        self._merge_native_cross_subprojects(new_subprojects, prev_subproject_ids)
                 subi_warnings = mlog.get_warning_count()
             mlog.log('Subproject', mlog.bold(subp_name), 'finished.')
 
@@ -1024,7 +1045,6 @@ class Interpreter(InterpreterBase, HoldableObject):
             if pv == 'undefined' or not mesonlib.version_compare_many(pv, wanted)[0]:
                 raise InterpreterException(f'Subproject {subp_name} version is {pv} but {wanted} required.')
         self.active_projectname = current_active
-        self.subprojects.update(subi.subprojects)
         self.subprojects[subp_id] = SubprojectHolder(subi, subdir, warnings=subi_warnings,
                                                      callstack=self.subproject_stack)
         # Duplicates are possible when subproject uses files from project root
@@ -1035,6 +1055,13 @@ class Interpreter(InterpreterBase, HoldableObject):
         self.build.merge(subi.build)
         self.build.subprojects[subp_name] = subi.project_version
         return self.subprojects[subp_id]
+
+    def _merge_native_cross_subprojects(self, new_subprojects, prev_subproject_ids):
+        for subp_id, v in new_subprojects.items():
+            if subp_id in prev_subproject_ids:
+                continue
+            (subp_name, _) = subp_id
+            self.subprojects[(subp_name, MachineChoice.BUILD)] = v
 
     def _do_subproject_cmake(self, subp_name: str, subp_id: str, subdir: str,
                              default_options: T.Dict[OptionKey, str],
@@ -1078,22 +1105,42 @@ class Interpreter(InterpreterBase, HoldableObject):
     def get_option_internal(self, optname: str) -> coredata.UserOption:
         key = OptionKey.from_string(optname).evolve(subproject=self.subproject)
 
-        if self.coredata.is_native_clone:
-            key = key.as_build()
+        is_native_cross = self.coredata.is_native_cross()
+        if is_native_cross:
+            key = key.as_native_cross()
+
+            key_for_host = key.as_host()
+            is_machine_neutral_builtin = key.is_builtin() and key_for_host not in coredata.BUILTIN_OPTIONS_PER_MACHINE
 
         if not key.is_project():
-            for opts in [self.coredata.options, compilers.base_options]:
-                v = opts.get(key)
+            if is_native_cross:
+                candidates = [(self.coredata.options, key)]
+                if is_machine_neutral_builtin:
+                    candidates += [(self.coredata.options, key_for_host)]
+                candidates += [(compilers.base_options, key_for_host)]
+            else:
+                candidates = [
+                    (self.coredata.options, key),
+                    (compilers.base_options, key),
+                ]
+            for opts, k in candidates:
+                v = opts.get(k)
                 if v is None or v.yielding:
-                    v = opts.get(key.as_root())
+                    v = opts.get(k.as_root())
                 if v is not None:
                     assert isinstance(v, coredata.UserOption), 'for mypy'
                     return v
 
         try:
-            opt = self.coredata.options[key]
-            if opt.yielding and key.subproject and key.as_root() in self.coredata.options:
-                popt = self.coredata.options[key.as_root()]
+            if is_native_cross:
+                k = key_for_host if is_machine_neutral_builtin else key
+            else:
+                k = key
+            opt = self.coredata.options[k]
+            if opt.yielding and k.subproject \
+                    and (k.machine is MachineChoice.HOST or not k.is_project()) \
+                    and k.as_root() in self.coredata.options:
+                popt = self.coredata.options[k.as_root()]
                 if type(opt) is type(popt):
                     opt = popt
                 else:
@@ -1227,8 +1274,8 @@ class Interpreter(InterpreterBase, HoldableObject):
             oi = optinterpreter.OptionInterpreter(self.subproject)
             oi.process(option_file)
             opts = oi.options
-            if self.coredata.is_native_clone:
-                opts = {k.as_build(): v for k, v in opts.items()}
+            if self.coredata.is_native_cross():
+                opts = {k.as_native_cross(): v for k, v in opts.items()}
             self.coredata.update_project_options(opts)
             self.add_build_def_file(option_file)
 
@@ -1353,8 +1400,11 @@ class Interpreter(InterpreterBase, HoldableObject):
             for lang in sorted(langs, key=compilers.sort_clink):
                 mlog.log('Compiler for language', mlog.bold(lang), 'skipped: feature', mlog.bold(feature), 'disabled')
             return False
+        if self.coredata.is_native_cross():
+            return self.add_languages(langs, required, MachineChoice.BUILD)
         if native is not None:
-            return self.add_languages(langs, required, self.machine_from_native_kwarg(kwargs))
+            for_machine = self.machine_from_native_kwarg(kwargs)
+            return self.add_languages(langs, required, for_machine)
         else:
             # absent 'native' means 'both' for backwards compatibility
             tv = FeatureNew.get_target_version(self.subproject)
@@ -1506,7 +1556,7 @@ class Interpreter(InterpreterBase, HoldableObject):
 
     def add_languages(self, args: T.List[str], required: bool, for_machine: MachineChoice) -> bool:
         success = self.add_languages_for(args, required, for_machine)
-        if not self.coredata.is_cross_build() and not self.coredata.is_native_clone:
+        if not self.coredata.is_cross_build() and not self.coredata.is_native_cross():
             self.coredata.copy_build_options_from_regular_ones()
         self._redetect_machines()
         return success
@@ -1789,7 +1839,7 @@ class Interpreter(InterpreterBase, HoldableObject):
 
         search_dirs = extract_search_dirs(kwargs)
         default_options = kwargs['default_options']
-        return self.find_program_impl(args[0], self.kwarg_options_to_machine(kwargs), default_options=default_options,
+        return self.find_program_impl(args[0], kwargs['native'], default_options=default_options,
                                       required=required, silent=False, wanted=kwargs['version'],
                                       search_dirs=search_dirs)
 
@@ -2434,7 +2484,9 @@ class Interpreter(InterpreterBase, HoldableObject):
             raise InvalidArguments(f'Tried to enter directory "{subdir}", which has already been visited.')
         self.processed_buildfiles.add(build_file)
         self.subdir = subdir
-        os.makedirs(os.path.join(self.environment.build_dir, subdir), exist_ok=True)
+        os.makedirs(os.path.join(self.environment.build_dir,
+                                 compute_build_subdir(subdir, self.coredata.is_native_cross())),
+                    exist_ok=True)
         buildfilename = os.path.join(self.subdir, environment.build_filename)
         self.build_def_files.add(buildfilename)
         absname = os.path.join(self.environment.get_source_dir(), buildfilename)
@@ -2861,7 +2913,7 @@ class Interpreter(InterpreterBase, HoldableObject):
             absdir_build = os.path.join(absbase_build, a)
             if not os.path.isdir(absdir_src) and not os.path.isdir(absdir_build):
                 raise InvalidArguments(f'Include dir {a} does not exist.')
-        i = build.IncludeDirs(self.subdir, incdir_strings, is_system)
+        i = build.IncludeDirs(self.subdir, incdir_strings, is_system, self.coredata.is_native_cross())
         return i
 
     @typed_pos_args('add_test_setup', str)
@@ -2926,7 +2978,7 @@ class Interpreter(InterpreterBase, HoldableObject):
     @typed_pos_args('add_project_dependencies', varargs=dependencies.Dependency)
     @typed_kwargs('add_project_dependencies', NATIVE_KW, LANGUAGE_KW)
     def func_add_project_dependencies(self, node: mparser.FunctionNode, args: T.Tuple[T.List[dependencies.Dependency]], kwargs: 'kwtypes.FuncAddProjectArgs') -> None:
-        for_machine = self.kwarg_options_to_machine(kwargs)
+        for_machine = kwargs['native']
         for lang in kwargs['language']:
             if lang not in self.compilers[for_machine]:
                 raise InvalidCode(f'add_project_dependencies() called before add_language() for language "{lang}"')
@@ -3196,7 +3248,7 @@ class Interpreter(InterpreterBase, HoldableObject):
         # To permit an executable and a shared library to have the
         # same name, such as "foo.exe" and "libfoo.a".
         idname = tobj.get_id()
-        subdir = tobj.get_subdir()
+        subdir = compute_build_subdir(tobj.get_subdir(), self.coredata.is_native_cross())
         namedir = (name, subdir)
 
         if idname in self.build.targets:
@@ -3332,9 +3384,11 @@ class Interpreter(InterpreterBase, HoldableObject):
                      targetclass: T.Type[T.Union[build.Executable, build.StaticLibrary, build.SharedModule, build.SharedLibrary, build.Jar]]
                      ) -> T.Union[build.Executable, build.StaticLibrary, build.SharedModule, build.SharedLibrary, build.Jar]:
         name, sources = args
-        for_machine = self.kwarg_options_to_machine(kwargs)
-        if self.coredata.is_native_clone:
+        if self.coredata.is_native_cross():
+            for_machine = MachineChoice.BUILD
             kwargs['install'] = False
+        else:
+            for_machine = kwargs['native']
         if kwargs.get('rust_crate_type') == 'proc-macro':
             # Silently force to native because that's the only sensible value
             # and rust_crate_type is deprecated any way.
@@ -3454,7 +3508,7 @@ class Interpreter(InterpreterBase, HoldableObject):
         return target
 
     def kwarg_options_to_machine(self, kwargs: kwtypes.FuncWithNativeArg) -> MachineChoice:
-        if self.coredata.is_native_clone:
+        if self.coredata.is_native_cross():
             return MachineChoice.BUILD
         return kwargs['native']
 
