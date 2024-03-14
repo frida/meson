@@ -14,6 +14,7 @@ import json
 import os
 import pickle
 import re
+import shlex
 import shutil
 import typing as T
 import hashlib
@@ -26,8 +27,7 @@ from .. import mlog
 from ..compilers import LANGUAGES_USING_LDFLAGS, detect
 from ..mesonlib import (
     File, MachineChoice, MesonException, OrderedSet,
-    classify_unity_sources, OptionKey, join_args,
-    ExecutableSerialisation
+    ExecutableSerialisation, classify_unity_sources, OptionKey
 )
 
 if T.TYPE_CHECKING:
@@ -330,11 +330,10 @@ class Backend:
         return compiler.get_include_args(tmppath, False)
 
     def get_build_dir_include_args(self, target: build.BuildTarget, compiler: 'Compiler', *, absolute_path: bool = False) -> T.List[str]:
-        subdir = self.compute_build_subdir(target.get_subdir(), target.is_native_cross())
         if absolute_path:
-            curdir = os.path.join(self.build_dir, subdir)
+            curdir = os.path.join(self.build_dir, target.get_subdir())
         else:
-            curdir = subdir
+            curdir = target.get_subdir()
             if curdir == '':
                 curdir = '.'
         return compiler.get_include_args(curdir, False)
@@ -369,11 +368,9 @@ class Backend:
             # this produces no output, only a dummy top-level name
             dirname = ''
         elif self.environment.coredata.get_option(OptionKey('layout')) == 'mirror':
-            dirname = self.compute_build_subdir(target.get_subdir(), target.is_native_cross())
+            dirname = target.get_subdir()
         else:
             dirname = 'meson-out'
-            if target.is_native_cross():
-                dirname += '-native'
         return dirname
 
     def get_target_dir_relative_to(self, t: build.Target, o: build.Target) -> str:
@@ -411,10 +408,6 @@ class Backend:
         # GeneratedList generators output to the private build directory of the
         # target that the GeneratedList is used in
         return os.path.join(self.get_target_private_dir(target), src)
-
-    @classmethod
-    def compute_build_subdir(cls, subdir: str, is_native_cross: bool) -> str:
-        return compute_build_subdir(subdir, is_native_cross)
 
     def get_unity_source_file(self, target: T.Union[build.BuildTarget, build.CustomTarget, build.CustomTargetIndex],
                               suffix: str, number: int) -> mesonlib.File:
@@ -1167,7 +1160,7 @@ class Backend:
         return results
 
     def determine_windows_extra_paths(
-            self, target: T.Union[build.BuildTarget, build.CustomTarget, programs.ExternalProgram, mesonlib.File, str],
+            self, target: T.Union[build.BuildTarget, build.CustomTarget, build.CustomTargetIndex, programs.ExternalProgram, mesonlib.File, str],
             extra_bdeps: T.Sequence[T.Union[build.BuildTarget, build.CustomTarget]]) -> T.List[str]:
         """On Windows there is no such thing as an rpath.
 
@@ -1276,7 +1269,7 @@ class Backend:
                                    t.is_parallel, cmd_args, t_env,
                                    t.should_fail, t.timeout, t.workdir,
                                    extra_paths, t.protocol, t.priority,
-                                   isinstance(exe, build.Target),
+                                   isinstance(exe, (build.Target, build.CustomTargetIndex)),
                                    isinstance(exe, build.Executable),
                                    [x.get_id() for x in depends],
                                    self.environment.coredata.version,
@@ -1605,28 +1598,31 @@ class Backend:
         cmd = [i.replace('\\', '/') for i in cmd]
         return inputs, outputs, cmd
 
+    def get_introspect_command(self) -> str:
+        return ' '.join(shlex.quote(x) for x in self.environment.get_build_command() + ['introspect'])
+
     def get_run_target_env(self, target: build.RunTarget) -> mesonlib.EnvironmentVariables:
         env = target.env if target.env else mesonlib.EnvironmentVariables()
         if target.default_env:
-            introspect_cmd = join_args(self.environment.get_build_command() + ['introspect'])
             env.set('MESON_SOURCE_ROOT', [self.environment.get_source_dir()])
             env.set('MESON_BUILD_ROOT', [self.environment.get_build_dir()])
             env.set('MESON_SUBDIR', [target.subdir])
-            env.set('MESONINTROSPECT', [introspect_cmd])
+            env.set('MESONINTROSPECT', [self.get_introspect_command()])
         return env
 
     def run_postconf_scripts(self) -> None:
         from ..scripts.meson_exe import run_exe
-        introspect_cmd = join_args(self.environment.get_build_command() + ['introspect'])
         env = {'MESON_SOURCE_ROOT': self.environment.get_source_dir(),
                'MESON_BUILD_ROOT': self.environment.get_build_dir(),
-               'MESONINTROSPECT': introspect_cmd,
+               'MESONINTROSPECT': self.get_introspect_command(),
                }
 
         for s in self.build.postconf_scripts:
             name = ' '.join(s.cmd_args)
             mlog.log(f'Running postconf script {name!r}')
-            run_exe(s, env)
+            rc = run_exe(s, env)
+            if rc != 0:
+                raise MesonException(f'Postconf script \'{name}\' failed with exit code {rc}.')
 
     def create_install_data(self) -> InstallData:
         strip_bin = self.environment.lookup_binary_entry(MachineChoice.HOST, 'strip')
@@ -2050,10 +2046,3 @@ class Backend:
         all_sources = T.cast('_ALL_SOURCES_TYPE', target.sources) + T.cast('_ALL_SOURCES_TYPE', target.generated)
         return self.compiler_to_generator(target, target.compiler, all_sources,
                                           target.output_templ, target.depends)
-
-
-def compute_build_subdir(subdir: str, is_native_cross: bool) -> str:
-    if is_native_cross:
-        assert subdir.startswith('subprojects')
-        return 'subprojects-native' + subdir[11:]
-    return subdir

@@ -630,10 +630,11 @@ class NinjaBackend(backends.Backend):
             key = OptionKey('b_coverage')
             if (key in self.environment.coredata.options and
                     self.environment.coredata.options[key].value):
-                gcovr_exe, gcovr_version, lcov_exe, lcov_version, genhtml_exe, _ = environment.find_coverage_tools()
+                gcovr_exe, gcovr_version, lcov_exe, lcov_version, genhtml_exe, llvm_cov_exe = environment.find_coverage_tools(self.environment.coredata)
+                mlog.debug(f'Using {gcovr_exe} ({gcovr_version}), {lcov_exe} and {llvm_cov_exe} for code coverage')
                 if gcovr_exe or (lcov_exe and genhtml_exe):
                     self.add_build_comment(NinjaComment('Coverage rules'))
-                    self.generate_coverage_rules(gcovr_exe, gcovr_version)
+                    self.generate_coverage_rules(gcovr_exe, gcovr_version, llvm_cov_exe)
                     mlog.log_timestamp("Coverage rules generated")
                 else:
                     # FIXME: since we explicitly opted in, should this be an error?
@@ -1208,9 +1209,15 @@ class NinjaBackend(backends.Backend):
         self.add_build(elem)
         self.processed_targets.add(target.get_id())
 
-    def generate_coverage_command(self, elem, outputs):
+    def generate_coverage_command(self, elem, outputs: T.List[str], gcovr_exe: T.Optional[str], llvm_cov_exe: T.Optional[str]):
         targets = self.build.get_targets().values()
         use_llvm_cov = False
+        exe_args = []
+        if gcovr_exe is not None:
+            exe_args += ['--gcov', gcovr_exe]
+        if llvm_cov_exe is not None:
+            exe_args += ['--llvm-cov', llvm_cov_exe]
+
         for target in targets:
             if not hasattr(target, 'compilers'):
                 continue
@@ -1226,35 +1233,36 @@ class NinjaBackend(backends.Backend):
                                     self.build.get_subproject_dir()),
                        self.environment.get_build_dir(),
                        self.environment.get_log_dir()] +
-                      (['--use_llvm_cov'] if use_llvm_cov else []))
+                      exe_args +
+                      (['--use-llvm-cov'] if use_llvm_cov else []))
 
-    def generate_coverage_rules(self, gcovr_exe: T.Optional[str], gcovr_version: T.Optional[str]):
+    def generate_coverage_rules(self, gcovr_exe: T.Optional[str], gcovr_version: T.Optional[str], llvm_cov_exe: T.Optional[str]):
         e = self.create_phony_target('coverage', 'CUSTOM_COMMAND', 'PHONY')
-        self.generate_coverage_command(e, [])
+        self.generate_coverage_command(e, [], gcovr_exe, llvm_cov_exe)
         e.add_item('description', 'Generates coverage reports')
         self.add_build(e)
-        self.generate_coverage_legacy_rules(gcovr_exe, gcovr_version)
+        self.generate_coverage_legacy_rules(gcovr_exe, gcovr_version, llvm_cov_exe)
 
-    def generate_coverage_legacy_rules(self, gcovr_exe: T.Optional[str], gcovr_version: T.Optional[str]):
+    def generate_coverage_legacy_rules(self, gcovr_exe: T.Optional[str], gcovr_version: T.Optional[str], llvm_cov_exe: T.Optional[str]):
         e = self.create_phony_target('coverage-html', 'CUSTOM_COMMAND', 'PHONY')
-        self.generate_coverage_command(e, ['--html'])
+        self.generate_coverage_command(e, ['--html'], gcovr_exe, llvm_cov_exe)
         e.add_item('description', 'Generates HTML coverage report')
         self.add_build(e)
 
         if gcovr_exe:
             e = self.create_phony_target('coverage-xml', 'CUSTOM_COMMAND', 'PHONY')
-            self.generate_coverage_command(e, ['--xml'])
+            self.generate_coverage_command(e, ['--xml'], gcovr_exe, llvm_cov_exe)
             e.add_item('description', 'Generates XML coverage report')
             self.add_build(e)
 
             e = self.create_phony_target('coverage-text', 'CUSTOM_COMMAND', 'PHONY')
-            self.generate_coverage_command(e, ['--text'])
+            self.generate_coverage_command(e, ['--text'], gcovr_exe, llvm_cov_exe)
             e.add_item('description', 'Generates text coverage report')
             self.add_build(e)
 
             if mesonlib.version_compare(gcovr_version, '>=4.2'):
                 e = self.create_phony_target('coverage-sonarqube', 'CUSTOM_COMMAND', 'PHONY')
-                self.generate_coverage_command(e, ['--sonarqube'])
+                self.generate_coverage_command(e, ['--sonarqube'], gcovr_exe, llvm_cov_exe)
                 e.add_item('description', 'Generates Sonarqube XML coverage report')
                 self.add_build(e)
 
@@ -1971,6 +1979,8 @@ class NinjaBackend(backends.Backend):
         for d in target_deps:
             linkdirs.add(d.subdir)
             deps.append(self.get_dependency_filename(d))
+            if isinstance(d, build.StaticLibrary):
+                external_deps.extend(d.external_deps)
             if d.uses_rust_abi():
                 if d not in itertools.chain(target.link_targets, target.link_whole_targets):
                     # Indirect Rust ABI dependency, we only need its path in linkdirs.
@@ -1984,9 +1994,6 @@ class NinjaBackend(backends.Backend):
                 continue
 
             # Link a C ABI library
-
-            if isinstance(d, build.StaticLibrary):
-                external_deps.extend(d.external_deps)
 
             # Pass native libraries directly to the linker with "-C link-arg"
             # because rustc's "-l:+verbatim=" is not portable and we cannot rely
@@ -2778,7 +2785,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         return (rel_obj, rel_src)
 
     @lru_cache(maxsize=None)
-    def generate_inc_dir(self, compiler: 'Compiler', d: str, basedir: str, is_system: bool, is_native_cross: bool) -> \
+    def generate_inc_dir(self, compiler: 'Compiler', d: str, basedir: str, is_system: bool) -> \
             T.Tuple['ImmutableListProtocol[str]', 'ImmutableListProtocol[str]']:
         # Avoid superfluous '/.' at the end of paths when d is '.'
         if d not in ('', '.'):
@@ -2793,9 +2800,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # inc = include_directories('foo/bar/baz')
         #
         # But never subdir()s into the actual dir.
-        subdir = self.compute_build_subdir(expdir, is_native_cross)
-        if os.path.isdir(os.path.join(self.environment.get_build_dir(), subdir)):
-            bargs = compiler.get_include_args(subdir, is_system)
+        if os.path.isdir(os.path.join(self.environment.get_build_dir(), expdir)):
+            bargs = compiler.get_include_args(expdir, is_system)
         else:
             bargs = []
         return (sargs, bargs)
@@ -2844,7 +2850,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             # flags will be added in reversed order.
             for d in reversed(i.get_incdirs()):
                 # Add source subdir first so that the build subdir overrides it
-                (compile_obj, includeargs) = self.generate_inc_dir(compiler, d, basedir, i.is_system, i.is_native_cross)
+                (compile_obj, includeargs) = self.generate_inc_dir(compiler, d, basedir, i.is_system)
                 commands += compile_obj
                 commands += includeargs
             for d in i.get_extra_build_dirs():
@@ -3115,7 +3121,10 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         commands += self._generate_single_compile(target, compiler)
         commands += self.get_compile_debugfile_args(compiler, target, objname)
         dep = dst + '.' + compiler.get_depfile_suffix()
-        return commands, dep, dst, [objname], source
+
+        link_objects = [objname] if compiler.should_link_pch_object() else []
+
+        return commands, dep, dst, link_objects, source
 
     def generate_gcc_pch_command(self, target, compiler, pch):
         commands = self._generate_single_compile(target, compiler)
@@ -3575,7 +3584,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             return
         cmd = self.environment.get_build_command() + \
             ['--internal', 'scanbuild', self.environment.source_dir, self.environment.build_dir, self.build.get_subproject_dir()] + \
-            self.environment.get_build_command() + self.get_user_option_args()
+            self.environment.get_build_command() + ['setup'] + self.get_user_option_args()
         elem = self.create_phony_target('scan-build', 'CUSTOM_COMMAND', 'PHONY')
         elem.add_item('COMMAND', cmd)
         elem.add_item('pool', 'console')

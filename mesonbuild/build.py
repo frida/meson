@@ -291,43 +291,15 @@ class Build:
 
     def copy(self) -> Build:
         other = Build(self.environment)
-        self._copy_to(other)
-        return other
-
-    def copy_to_native(self) -> Build:
-        other = Build(self.environment.copy_to_native())
-        self._copy_to(other)
-
-        other.tests = []
-        other.benchmarks = []
-        other.test_setups = {}
-        other.test_setup_default_name = None
-        other.find_overrides = {}
-        other.searched_programs = set()
-
-        other.dependency_overrides = PerMachineDefaultable.default(False, self.dependency_overrides.build, {})
-        other.devenv = []
-        other.modules = []
-
-        return other
-
-    def _copy_to(self, other: Build) -> None:
         for k, v in self.__dict__.items():
-            if k == 'environment':
-                continue
             if isinstance(v, (list, dict, set, OrderedDict)):
                 other.__dict__[k] = v.copy()
             else:
                 other.__dict__[k] = v
+        return other
 
     def merge(self, other: Build) -> None:
-        is_native_cross = other.environment.coredata.is_native_cross()
-
         for k, v in other.__dict__.items():
-            if k == 'environment':
-                continue
-            if is_native_cross and k == 'dependency_overrides':
-                continue
             self.__dict__[k] = v
 
     def ensure_static_linker(self, compiler: Compiler) -> None:
@@ -335,15 +307,7 @@ class Build:
             self.static_linker[compiler.for_machine] = detect_static_linker(self.environment, compiler)
 
     def get_project(self):
-        return self.projects[('', MachineChoice.HOST)]
-
-    def find_subproject_descriptive_name(self, name: str) -> T.Optional[str]:
-        for for_machine in iter(MachineChoice):
-            subp_id = (name, for_machine)
-            p = self.projects.get(subp_id, None)
-            if p is not None:
-                return p
-        return None
+        return self.projects['']
 
     def get_subproject_dir(self):
         return self.subproject_dir
@@ -407,7 +371,6 @@ class IncludeDirs(HoldableObject):
     curdir: str
     incdirs: T.List[str]
     is_system: bool
-    is_native_cross: bool
     # Interpreter has validated that all given directories
     # actually exist.
     extra_build_dirs: T.List[str] = field(default_factory=list)
@@ -601,16 +564,17 @@ class Target(HoldableObject, metaclass=abc.ABCMeta):
             return NotImplemented
         return self.get_id() >= other.get_id()
 
-    def get_default_install_dir(self) -> T.Tuple[str, str]:
+    def get_default_install_dir(self) -> T.Union[T.Tuple[str, str], T.Tuple[None, None]]:
         raise NotImplementedError
 
     def get_custom_install_dir(self) -> T.List[T.Union[str, Literal[False]]]:
         raise NotImplementedError
 
-    def get_install_dir(self) -> T.Tuple[T.List[T.Union[str, Literal[False]]], str, Literal[False]]:
+    def get_install_dir(self) -> T.Tuple[T.List[T.Union[str, Literal[False]]], T.List[T.Optional[str]], bool]:
         # Find the installation directory.
         default_install_dir, default_install_dir_name = self.get_default_install_dir()
-        outdirs = self.get_custom_install_dir()
+        outdirs: T.List[T.Union[str, Literal[False]]] = self.get_custom_install_dir()
+        install_dir_names: T.List[T.Optional[str]]
         if outdirs and outdirs[0] != default_install_dir and outdirs[0] is not True:
             # Either the value is set to a non-default value, or is set to
             # False (which means we want this specific output out of many
@@ -649,7 +613,7 @@ class Target(HoldableObject, metaclass=abc.ABCMeta):
         return h.hexdigest()[:7]
 
     @staticmethod
-    def construct_id_from_path(subdir: str, name: str, type_suffix: str, extra_suffix: str = '') -> str:
+    def construct_id_from_path(subdir: str, name: str, type_suffix: str) -> str:
         """Construct target ID from subdir, name and type suffix.
 
         This helper function is made public mostly for tests."""
@@ -660,7 +624,7 @@ class Target(HoldableObject, metaclass=abc.ABCMeta):
         # FIXME replace with assert when slash in names is prohibited
         name_part = name.replace('/', '@').replace('\\', '@')
         assert not has_path_sep(type_suffix)
-        my_id = name_part + type_suffix + extra_suffix
+        my_id = name_part + type_suffix
         if subdir:
             subdir_part = Target._get_id_hash(subdir)
             # preserve myid for better debuggability
@@ -672,10 +636,7 @@ class Target(HoldableObject, metaclass=abc.ABCMeta):
         if getattr(self, 'name_suffix_set', False):
             name += '.' + self.suffix
         return self.construct_id_from_path(
-            self.subdir, name, self.type_suffix(), '@native' if self.is_native_cross() else '')
-
-    def is_native_cross(self) -> bool:
-        return self.environment.coredata.is_native_cross()
+            self.subdir, name, self.type_suffix())
 
     def process_kwargs_base(self, kwargs: T.Dict[str, T.Any]) -> None:
         if 'build_by_default' in kwargs:
@@ -1142,7 +1103,7 @@ class BuildTarget(Target):
             result.update(i.get_link_dep_subdirs())
         return result
 
-    def get_default_install_dir(self) -> T.Tuple[str, str]:
+    def get_default_install_dir(self) -> T.Union[T.Tuple[str, str], T.Tuple[None, None]]:
         return self.environment.get_libdir(), '{libdir}'
 
     def get_custom_install_dir(self) -> T.List[T.Union[str, Literal[False]]]:
@@ -1334,8 +1295,6 @@ class BuildTarget(Target):
         for t in self.link_targets:
             if t in result:
                 continue
-            if t.rust_crate_type == 'proc-macro':
-                continue
             if include_internals or not t.is_internal():
                 result.add(t)
             if isinstance(t, StaticLibrary):
@@ -1522,7 +1481,7 @@ class BuildTarget(Target):
         if not self.uses_rust() and links_with_rust_abi:
             raise InvalidArguments(f'Try to link Rust ABI library {t.name!r} with a non-Rust target {self.name!r}')
         if self.for_machine is not t.for_machine and (not links_with_rust_abi or t.rust_crate_type != 'proc-macro'):
-            msg = f'Tried to mix libraries for machines {self.for_machine} and {t.for_machine} in target {self.name!r}'
+            msg = f'Tried to tied to mix a {t.for_machine} library ("{t.name}") with a {self.for_machine} target "{self.name}"'
             if self.environment.is_cross_build():
                 raise InvalidArguments(msg + ' This is not possible in a cross build.')
             else:
@@ -1569,8 +1528,7 @@ class BuildTarget(Target):
             set_is_system = 'preserve'
         if set_is_system != 'preserve':
             is_system = set_is_system == 'system'
-            ids = [IncludeDirs(x.get_curdir(), x.get_incdirs(), is_system,
-                               self.is_native_cross(), x.get_extra_build_dirs()) for x in ids]
+            ids = [IncludeDirs(x.get_curdir(), x.get_incdirs(), is_system, x.get_extra_build_dirs()) for x in ids]
         self.include_dirs += ids
 
     def get_aliases(self) -> T.List[T.Tuple[str, str, str]]:
@@ -1841,8 +1799,11 @@ class Generator(HoldableObject):
 
     @staticmethod
     def is_parent_path(parent: str, trial: str) -> bool:
-        relpath = pathlib.PurePath(trial).relative_to(parent)
-        return relpath.parts[0] != '..' # For subdirs we can only go "down".
+        try:
+            common = os.path.commonpath((parent, trial))
+        except ValueError: # Windows on different drives
+            return False
+        return pathlib.PurePath(common) == pathlib.PurePath(parent)
 
     def process_files(self, files: T.Iterable[T.Union[str, File, 'CustomTarget', 'CustomTargetIndex', 'GeneratedList']],
                       state: T.Union['Interpreter', 'ModuleState'],
@@ -2015,8 +1976,8 @@ class Executable(BuildTarget):
                 self.suffix = 'abs'
             elif ('c' in self.compilers and self.compilers['c'].get_id().startswith('xc16')):
                 self.suffix = 'elf'
-            elif ('c' in self.compilers and self.compilers['c'].get_id() in {'ti', 'c2000'} or
-                  'cpp' in self.compilers and self.compilers['cpp'].get_id() in {'ti', 'c2000'}):
+            elif ('c' in self.compilers and self.compilers['c'].get_id() in {'ti', 'c2000', 'c6000'} or
+                  'cpp' in self.compilers and self.compilers['cpp'].get_id() in {'ti', 'c2000', 'c6000'}):
                 self.suffix = 'out'
             elif ('c' in self.compilers and self.compilers['c'].get_id() in {'mwccarm', 'mwcceppc'} or
                   'cpp' in self.compilers and self.compilers['cpp'].get_id() in {'mwccarm', 'mwcceppc'}):
@@ -2067,7 +2028,7 @@ class Executable(BuildTarget):
         if self.rust_crate_type != 'bin':
             raise InvalidArguments('Invalid rust_crate_type: must be "bin" for executables.')
 
-    def get_default_install_dir(self) -> T.Tuple[str, str]:
+    def get_default_install_dir(self) -> T.Union[T.Tuple[str, str], T.Tuple[None, None]]:
         return self.environment.get_bindir(), '{bindir}'
 
     def description(self):
@@ -2178,7 +2139,7 @@ class StaticLibrary(BuildTarget):
     def get_link_deps_mapping(self, prefix: str) -> T.Mapping[str, str]:
         return {}
 
-    def get_default_install_dir(self) -> T.Tuple[str, str]:
+    def get_default_install_dir(self) -> T.Union[T.Tuple[str, str], T.Tuple[None, None]]:
         return self.environment.get_static_lib_dir(), '{libdir_static}'
 
     def type_suffix(self):
@@ -2269,7 +2230,7 @@ class SharedLibrary(BuildTarget):
         mappings.update(result)
         return mappings
 
-    def get_default_install_dir(self) -> T.Tuple[str, str]:
+    def get_default_install_dir(self) -> T.Union[T.Tuple[str, str], T.Tuple[None, None]]:
         return self.environment.get_shared_lib_dir(), '{libdir_shared}'
 
     def determine_filenames(self):
@@ -2505,7 +2466,7 @@ class SharedModule(SharedLibrary):
         # to build targets, see: https://github.com/mesonbuild/meson/issues/9492
         self.force_soname = False
 
-    def get_default_install_dir(self) -> T.Tuple[str, str]:
+    def get_default_install_dir(self) -> T.Union[T.Tuple[str, str], T.Tuple[None, None]]:
         return self.environment.get_shared_module_dir(), '{moduledir_shared}'
 
 class BothLibraries(SecondLevelHolder):
@@ -2644,7 +2605,7 @@ class CustomTarget(Target, CustomTargetBase, CommandBase):
         # Whether to use absolute paths for all files on the commandline
         self.absolute_paths = absolute_paths
 
-    def get_default_install_dir(self) -> T.Tuple[str, str]:
+    def get_default_install_dir(self) -> T.Union[T.Tuple[str, str], T.Tuple[None, None]]:
         return None, None
 
     def __repr__(self):
@@ -2962,7 +2923,7 @@ class Jar(BuildTarget):
             return ['-cp', os.pathsep.join(cp_paths)]
         return []
 
-    def get_default_install_dir(self) -> T.Tuple[str, str]:
+    def get_default_install_dir(self) -> T.Union[T.Tuple[str, str], T.Tuple[None, None]]:
         return self.environment.get_jar_dir(), '{jardir}'
 
 @dataclass(eq=False)
@@ -3000,9 +2961,6 @@ class CustomTargetIndex(CustomTargetBase, HoldableObject):
 
     def get_id(self) -> str:
         return self.target.get_id()
-
-    def is_native_cross(self) -> bool:
-        return self.target.is_native_cross()
 
     def get_all_link_deps(self):
         return self.target.get_all_link_deps()

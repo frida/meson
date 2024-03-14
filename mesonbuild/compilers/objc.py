@@ -9,7 +9,6 @@ from .. import coredata
 from ..mesonlib import OptionKey
 
 from .compilers import Compiler
-from .c import _ALL_STDS, _ClangCStds
 from .mixins.clike import CLikeCompiler
 from .mixins.gnu import GnuCompiler, gnu_common_warning_args, gnu_objc_warning_args
 from .mixins.clang import ClangCompiler
@@ -75,7 +74,6 @@ class ClangObjCCompiler(ClangCompiler, ObjCCompiler):
         ObjCCompiler.__init__(self, ccache, exelist, version, for_machine, is_cross,
                               info, exe_wrapper, linker=linker, full_version=full_version)
         ClangCompiler.__init__(self, defines)
-        self._clang_objcstds = _ClangObjCStds(version, for_machine)
         default_warn_args = ['-Wall', '-Winvalid-pch']
         self.warn_args = {'0': [],
                           '1': default_warn_args,
@@ -85,7 +83,13 @@ class ClangObjCCompiler(ClangCompiler, ObjCCompiler):
 
     def get_options(self) -> 'coredata.MutableKeyedOptionDictType':
         opts = super().get_options()
-        opts.update(self._clang_objcstds.get_options())
+        opts.update({
+            OptionKey('std', machine=self.for_machine, lang='c'): coredata.UserComboOption(
+                'C language standard to use',
+                ['none', 'c89', 'c99', 'c11', 'c17', 'gnu89', 'gnu99', 'gnu11', 'gnu17'],
+                'none',
+            )
+        })
         return opts
 
     def get_option_compile_args(self, options: 'coredata.KeyedOptionDictType') -> T.List[str]:
@@ -94,30 +98,6 @@ class ClangObjCCompiler(ClangCompiler, ObjCCompiler):
         if std.value != 'none':
             args.append('-std=' + std.value)
         return args
-
-class _ClangObjCStdsBase:
-    language = 'c'
-
-    def __init__(self, version: str, for_machine: MachineChoice):
-        self.version = version
-        self.for_machine = for_machine
-
-    def get_options(self) -> 'coredata.MutableKeyedOptionDictType':
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        return {key: coredata.UserStdOption('C', _ALL_STDS)}
-
-class _ClangObjCStds(_ClangCStds, _ClangObjCStdsBase):
-    def __init__(self, version: str, for_machine: MachineChoice):
-        _ClangObjCStdsBase.__init__(self, version, for_machine)
-
-    def get_output_args(self, outputname: str) -> T.List[str]:
-        pass
-
-    def get_optimization_args(self, optimization_level: str) -> T.List[str]:
-        return []
-
-    def sanity_check(self, work_dir: str, environment: 'Environment') -> None:
-        pass
 
 class AppleClangObjCCompiler(ClangObjCCompiler):
 

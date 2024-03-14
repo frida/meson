@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2012-2020 The Meson development team
+# Copyright © 2023 Intel Corporation
 
 from __future__ import annotations
 
@@ -35,7 +36,6 @@ from functools import lru_cache
 from mesonbuild import envconfig
 
 if T.TYPE_CHECKING:
-    import argparse
     from configparser import ConfigParser
 
     from .compilers import Compiler
@@ -72,8 +72,7 @@ def _get_env_var(for_machine: MachineChoice, is_cross: bool, var_name: str) -> T
     return value
 
 
-def detect_gcovr(min_version: str = '3.3', log: bool = False):
-    gcovr_exe = 'gcovr'
+def detect_gcovr(gcovr_exe: str = 'gcovr', min_version: str = '3.3', log: bool = False):
     try:
         p, found = Popen_safe([gcovr_exe, '--version'])[0:2]
     except (FileNotFoundError, PermissionError):
@@ -86,8 +85,7 @@ def detect_gcovr(min_version: str = '3.3', log: bool = False):
         return gcovr_exe, found
     return None, None
 
-def detect_lcov(log: bool = False):
-    lcov_exe = 'lcov'
+def detect_lcov(lcov_exe: str = 'lcov', log: bool = False):
     try:
         p, found = Popen_safe([lcov_exe, '--version'])[0:2]
     except (FileNotFoundError, PermissionError):
@@ -100,23 +98,54 @@ def detect_lcov(log: bool = False):
         return lcov_exe, found
     return None, None
 
-def detect_llvm_cov():
-    tools = get_llvm_tool_names('llvm-cov')
-    for tool in tools:
+def detect_llvm_cov(suffix: T.Optional[str] = None):
+    # If there's a known suffix or forced lack of suffix, use that
+    if suffix is not None:
+        if suffix == '':
+            tool = 'llvm-cov'
+        else:
+            tool = f'llvm-cov-{suffix}'
         if mesonlib.exe_exists([tool, '--version']):
             return tool
+    else:
+        # Otherwise guess in the dark
+        tools = get_llvm_tool_names('llvm-cov')
+        for tool in tools:
+            if mesonlib.exe_exists([tool, '--version']):
+                return tool
     return None
 
-def find_coverage_tools() -> T.Tuple[T.Optional[str], T.Optional[str], T.Optional[str], T.Optional[str], T.Optional[str], T.Optional[str]]:
-    gcovr_exe, gcovr_version = detect_gcovr()
+def compute_llvm_suffix(coredata: coredata.CoreData):
+    # Check to see if the user is trying to do coverage for either a C or C++ project
+    compilers = coredata.compilers[MachineChoice.BUILD]
+    cpp_compiler_is_clang = 'cpp' in compilers and compilers['cpp'].id == 'clang'
+    c_compiler_is_clang = 'c' in compilers and compilers['c'].id == 'clang'
+    # Extract first the C++ compiler if available. If it's a Clang of some kind, compute the suffix if possible
+    if cpp_compiler_is_clang:
+        suffix = compilers['cpp'].version.split('.')[0]
+        return suffix
 
-    llvm_cov_exe = detect_llvm_cov()
+    # Then the C compiler, again checking if it's some kind of Clang and computing the suffix
+    if c_compiler_is_clang:
+        suffix = compilers['c'].version.split('.')[0]
+        return suffix
 
-    lcov_exe, lcov_version = detect_lcov()
-    genhtml_exe = 'genhtml'
+    # Neither compiler is a Clang, or no compilers are for C or C++
+    return None
 
+def detect_lcov_genhtml(lcov_exe: str = 'lcov', genhtml_exe: str = 'genhtml'):
+    lcov_exe, lcov_version = detect_lcov(lcov_exe)
     if not mesonlib.exe_exists([genhtml_exe, '--version']):
         genhtml_exe = None
+
+    return lcov_exe, lcov_version, genhtml_exe
+
+def find_coverage_tools(coredata: coredata.CoreData) -> T.Tuple[T.Optional[str], T.Optional[str], T.Optional[str], T.Optional[str], T.Optional[str], T.Optional[str]]:
+    gcovr_exe, gcovr_version = detect_gcovr()
+
+    llvm_cov_exe = detect_llvm_cov(compute_llvm_suffix(coredata))
+
+    lcov_exe, lcov_version, genhtml_exe = detect_lcov_genhtml()
 
     return gcovr_exe, gcovr_version, lcov_exe, lcov_version, genhtml_exe, llvm_cov_exe
 
@@ -159,6 +188,7 @@ def get_llvm_tool_names(tool: str) -> T.List[str]:
     # unless it becomes a stable release.
     suffixes = [
         '', # base (no suffix)
+        '-18',  '18',
         '-17',  '17',
         '-16',  '16',
         '-15',  '15',
@@ -485,7 +515,7 @@ class Environment:
     log_dir = 'meson-logs'
     info_dir = 'meson-info'
 
-    def __init__(self, source_dir: str, build_dir: str, options: 'argparse.Namespace') -> None:
+    def __init__(self, source_dir: str, build_dir: str, options: coredata.SharedCMDOptions) -> None:
         self.source_dir = source_dir
         self.build_dir = build_dir
         # Do not try to create build directories when build_dir is none.
@@ -619,33 +649,6 @@ class Environment:
         self.default_cmake = ['cmake']
         self.default_pkgconfig = ['pkg-config']
         self.wrap_resolver: T.Optional['Resolver'] = None
-
-    def copy_to_native(self) -> Environment:
-        other = Environment.__new__(Environment)
-        for k, v in self.__dict__.items():
-            other.__dict__[k] = v
-
-        other.coredata = self.coredata.copy_to_native()
-
-        machines: PerThreeMachineDefaultable[MachineInfo] = PerThreeMachineDefaultable()
-        machines.build = self.machines.build
-        other.machines = machines.default_missing()
-
-        binaries: PerMachineDefaultable[BinaryTable] = PerMachineDefaultable()
-        binaries.build = self.binaries.build
-        other.binaries = binaries.default_missing()
-
-        properties: PerMachineDefaultable[Properties] = PerMachineDefaultable()
-        properties.build = self.properties.build
-        other.properties = properties.default_missing()
-
-        cmakevars: PerMachineDefaultable[CMakeVariables] = PerMachineDefaultable()
-        cmakevars.build = self.cmakevars.build
-        other.cmakevars = cmakevars.default_missing()
-
-        other.exe_wrapper = None
-
-        return other
 
     def _load_machine_file_options(self, config: 'ConfigParser', properties: Properties, machine: MachineChoice) -> None:
         """Read the contents of a Machine file and put it in the options store."""
@@ -807,7 +810,7 @@ class Environment:
                         self.properties[for_machine].properties.setdefault(name, p_env)
                     break
 
-    def create_new_coredata(self, options: 'argparse.Namespace') -> None:
+    def create_new_coredata(self, options: coredata.SharedCMDOptions) -> None:
         # WARNING: Don't use any values from coredata in __init__. It gets
         # re-initialized with project options by the interpreter during
         # build file parsing.
@@ -867,14 +870,6 @@ class Environment:
 
     def get_build_dir(self) -> str:
         return self.build_dir
-
-    def build_output_rpath(self, subdir: str, *parts: T.Sequence[str]) -> str:
-        if self.coredata.is_native_cross():
-            assert subdir.startswith('subprojects')
-            result = 'subprojects-native' + subdir[11:]
-        else:
-            result = subdir
-        return os.path.join(result, *parts)
 
     def get_import_lib_dir(self) -> str:
         "Install dir for the import library (library used for linking)"

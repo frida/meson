@@ -471,7 +471,7 @@ class AllPlatformTests(BasePlatformTests):
         # Ensure command output and JSON / text logs are not mangled.
         raw_output_sample = '\x00\x01\x02\x03\x04\x05\x06\x07\x08\x0b'
         assert raw_output_sample in tests_command_output
-        text_log = Path(self.logdir, 'testlog.txt').read_text()
+        text_log = Path(self.logdir, 'testlog.txt').read_text(encoding='utf-8')
         assert raw_output_sample in text_log
         json_log = json.loads(Path(self.logdir, 'testlog.json').read_bytes())
         assert raw_output_sample in json_log['stdout']
@@ -944,7 +944,7 @@ class AllPlatformTests(BasePlatformTests):
         testdir = os.path.join("test cases/cython", '2 generated sources')
         env = get_fake_env(testdir, self.builddir, self.prefix)
         try:
-            detect_compiler_for(env, "cython", MachineChoice.HOST, True)
+            detect_compiler_for(env, "cython", MachineChoice.HOST, True, '')
         except EnvironmentException:
             raise SkipTest("Cython is not installed")
         self.init(testdir)
@@ -969,7 +969,7 @@ class AllPlatformTests(BasePlatformTests):
         testdir = os.path.join("test cases/cython", '2 generated sources')
         env = get_fake_env(testdir, self.builddir, self.prefix)
         try:
-            cython = detect_compiler_for(env, "cython", MachineChoice.HOST, True)
+            cython = detect_compiler_for(env, "cython", MachineChoice.HOST, True, '')
             if not version_compare(cython.version, '>=0.29.33'):
                 raise SkipTest('Cython is too old')
         except EnvironmentException:
@@ -2317,9 +2317,9 @@ class AllPlatformTests(BasePlatformTests):
         for (t, f) in [
             ('10 out of bounds', 'meson.build'),
             ('18 wrong plusassign', 'meson.build'),
-            ('57 bad option argument', 'meson_options.txt'),
-            ('95 subdir parse error', os.path.join('subdir', 'meson.build')),
-            ('96 invalid option file', 'meson_options.txt'),
+            ('56 bad option argument', 'meson_options.txt'),
+            ('94 subdir parse error', os.path.join('subdir', 'meson.build')),
+            ('95 invalid option file', 'meson_options.txt'),
         ]:
             tdir = os.path.join(self.src_root, 'test cases', 'failing', t)
 
@@ -2355,7 +2355,7 @@ class AllPlatformTests(BasePlatformTests):
         env = get_fake_env()
         for l in ['cpp', 'cs', 'd', 'java', 'cuda', 'fortran', 'objc', 'objcpp', 'rust', 'vala']:
             try:
-                comp = detect_compiler_for(env, l, MachineChoice.HOST, True)
+                comp = detect_compiler_for(env, l, MachineChoice.HOST, True, '')
                 with tempfile.TemporaryDirectory() as d:
                     comp.sanity_check(d, env)
                 langs.append(l)
@@ -2373,7 +2373,7 @@ class AllPlatformTests(BasePlatformTests):
                     if is_windows() and lang == 'fortran' and target_type == 'library':
                         # non-Gfortran Windows Fortran compilers do not do shared libraries in a Fortran standard way
                         # see "test cases/fortran/6 dynamic"
-                        fc = detect_compiler_for(env, 'fortran', MachineChoice.HOST, True)
+                        fc = detect_compiler_for(env, 'fortran', MachineChoice.HOST, True, '')
                         if fc.get_id() in {'intel-cl', 'pgi'}:
                             continue
                     # test empty directory
@@ -2694,7 +2694,7 @@ class AllPlatformTests(BasePlatformTests):
 
         # It is not an error to set wrong option for unknown subprojects or
         # language because we don't have control on which one will be selected.
-        self.init(testdir, extra_args=['-Dc_wrong=1', '-Dwrong:bad=1', '-Db_wrong=1'])
+        self.init(testdir, extra_args=['-Dc_wrong=1', '-Dwrong:bad=1'])
         self.wipe()
 
         # Test we can set subproject option
@@ -4433,18 +4433,18 @@ class AllPlatformTests(BasePlatformTests):
             env = get_fake_env()
 
             # Get the compiler so we know which compiler class to mock.
-            cc =  detect_compiler_for(env, 'c', MachineChoice.HOST, True)
+            cc =  detect_compiler_for(env, 'c', MachineChoice.HOST, True, '')
             cc_type = type(cc)
 
             # Test a compiler that acts as a linker
             with mock.patch.object(cc_type, 'INVOKES_LINKER', True):
-                cc =  detect_compiler_for(env, 'c', MachineChoice.HOST, True)
+                cc =  detect_compiler_for(env, 'c', MachineChoice.HOST, True, '')
                 link_args = env.coredata.get_external_link_args(cc.for_machine, cc.language)
                 self.assertEqual(sorted(link_args), sorted(['-DCFLAG', '-flto']))
 
             # And one that doesn't
             with mock.patch.object(cc_type, 'INVOKES_LINKER', False):
-                cc =  detect_compiler_for(env, 'c', MachineChoice.HOST, True)
+                cc =  detect_compiler_for(env, 'c', MachineChoice.HOST, True, '')
                 link_args = env.coredata.get_external_link_args(cc.for_machine, cc.language)
                 self.assertEqual(sorted(link_args), sorted(['-flto']))
 

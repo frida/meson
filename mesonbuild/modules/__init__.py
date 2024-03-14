@@ -53,9 +53,6 @@ class ModuleState:
         self.project_args = interpreter.build.projects_args.host.get(interpreter.subproject, {})
         self.current_node = interpreter.current_node
 
-    def is_native_cross(self) -> bool:
-        return self._interpreter.coredata.is_native_cross()
-
     def get_include_args(self, include_dirs: T.Iterable[T.Union[str, build.IncludeDirs]], prefix: str = '-I') -> T.List[str]:
         if not include_dirs:
             return []
@@ -76,7 +73,7 @@ class ModuleState:
     def find_program(self, prog: T.Union[mesonlib.FileOrString, T.List[mesonlib.FileOrString]],
                      required: bool = True,
                      version_func: T.Optional[ProgramVersionFunc] = None,
-                     wanted: T.Optional[str] = None, silent: bool = False,
+                     wanted: T.Union[str, T.List[str]] = '', silent: bool = False,
                      for_machine: MachineChoice = MachineChoice.HOST) -> T.Union[ExternalProgram, build.Executable, OverrideProgram]:
         if not isinstance(prog, list):
             prog = [prog]

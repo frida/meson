@@ -275,3 +275,22 @@ class PlatformAgnosticTests(BasePlatformTests):
         self.assertIn('first statement must be a call to project()', out)
         # provide guidance diagnostics by finding a file whose first AST statement is project()
         self.assertIn(f'Did you mean to run meson from the directory: "{testdir}"?', out)
+
+    def test_reconfigure_base_options(self):
+        testdir = os.path.join(self.unit_test_dir, '122 reconfigure base options')
+        out = self.init(testdir, extra_args=['-Db_ndebug=true'])
+        self.assertIn('\nMessage: b_ndebug: true\n', out)
+        self.assertIn('\nMessage: c_std: c89\n', out)
+
+        out = self.init(testdir, extra_args=['--reconfigure', '-Db_ndebug=if-release', '-Dsub:b_ndebug=false', '-Dc_std=c99', '-Dsub:c_std=c11'])
+        self.assertIn('\nMessage: b_ndebug: if-release\n', out)
+        self.assertIn('\nMessage: c_std: c99\n', out)
+        self.assertIn('\nsub| Message: b_ndebug: false\n', out)
+        self.assertIn('\nsub| Message: c_std: c11\n', out)
+
+    def test_setup_with_unknown_option(self):
+        testdir = os.path.join(self.common_test_dir, '1 trivial')
+
+        for option in ('not_an_option', 'b_not_an_option'):
+            out = self.init(testdir, extra_args=['--wipe', f'-D{option}=1'], allow_fail=True)
+            self.assertIn(f'ERROR: Unknown options: "{option}"', out)

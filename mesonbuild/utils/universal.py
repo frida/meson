@@ -1499,9 +1499,9 @@ def partition(pred: T.Callable[[_T], object], iterable: T.Iterable[_T]) -> T.Tup
 
 
 def Popen_safe(args: T.List[str], write: T.Optional[str] = None,
-               stdin: T.Union[T.TextIO, T.BinaryIO, int] = subprocess.DEVNULL,
-               stdout: T.Union[T.TextIO, T.BinaryIO, int] = subprocess.PIPE,
-               stderr: T.Union[T.TextIO, T.BinaryIO, int] = subprocess.PIPE,
+               stdin: T.Union[None, T.TextIO, T.BinaryIO, int] = subprocess.DEVNULL,
+               stdout: T.Union[None, T.TextIO, T.BinaryIO, int] = subprocess.PIPE,
+               stderr: T.Union[None, T.TextIO, T.BinaryIO, int] = subprocess.PIPE,
                **kwargs: T.Any) -> T.Tuple['subprocess.Popen[str]', str, str]:
     import locale
     encoding = locale.getpreferredencoding()
@@ -1531,9 +1531,9 @@ def Popen_safe(args: T.List[str], write: T.Optional[str] = None,
 
 
 def Popen_safe_legacy(args: T.List[str], write: T.Optional[str] = None,
-                      stdin: T.Union[T.TextIO, T.BinaryIO, int] = subprocess.DEVNULL,
-                      stdout: T.Union[T.TextIO, T.BinaryIO, int] = subprocess.PIPE,
-                      stderr: T.Union[T.TextIO, T.BinaryIO, int] = subprocess.PIPE,
+                      stdin: T.Union[None, T.TextIO, T.BinaryIO, int] = subprocess.DEVNULL,
+                      stdout: T.Union[None, T.TextIO, T.BinaryIO, int] = subprocess.PIPE,
+                      stderr: T.Union[None, T.TextIO, T.BinaryIO, int] = subprocess.PIPE,
                       **kwargs: T.Any) -> T.Tuple['subprocess.Popen[str]', str, str]:
     p = subprocess.Popen(args, universal_newlines=False, close_fds=False,
                          stdin=stdin, stdout=stdout, stderr=stderr, **kwargs)
@@ -2191,7 +2191,7 @@ def _classify_argument(key: 'OptionKey') -> OptionType:
         assert key.machine is MachineChoice.HOST, str(key)
         return OptionType.BACKEND
     else:
-        assert key.machine is MachineChoice.HOST or key.subproject, str(key)
+        assert key.machine is MachineChoice.HOST, str(key)
         return OptionType.PROJECT
 
 
@@ -2354,12 +2354,6 @@ class OptionKey:
     def as_host(self) -> 'OptionKey':
         """Convenience method for key.evolve(machine=MachineChoice.HOST)."""
         return self.evolve(machine=MachineChoice.HOST)
-
-    def as_native_cross(self) -> 'OptionKey':
-        """Transform to the appropriate key for the native machine in a cross scenario."""
-        if self.is_backend():
-            return self.as_host()
-        return self.as_build()
 
     def is_backend(self) -> bool:
         """Convenience method to check if this is a backend option."""

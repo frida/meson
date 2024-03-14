@@ -492,6 +492,9 @@ class C2000Linker(TILinker):
     # Required for backwards compat with projects created before ti-cgt support existed
     id = 'ar2000'
 
+class C6000Linker(TILinker):
+    id = 'ar6000'
+
 
 class AIXArLinker(ArLikeLinker, StaticLinker):
     id = 'aixar'
@@ -978,7 +981,7 @@ class Xc16DynamicLinker(DynamicLinker):
                          version=version)
 
     def get_link_whole_for(self, args: T.List[str]) -> T.List[str]:
-        if not args:
+        if len(args) < 2:
             return args
         return self._apply_prefix('--start-group') + args + self._apply_prefix('--end-group')
 
@@ -1064,7 +1067,7 @@ class TIDynamicLinker(DynamicLinker):
                          version=version)
 
     def get_link_whole_for(self, args: T.List[str]) -> T.List[str]:
-        if not args:
+        if len(args) < 2:
             return args
         return self._apply_prefix('--start-group') + args + self._apply_prefix('--end-group')
 
@@ -1093,6 +1096,9 @@ class TIDynamicLinker(DynamicLinker):
 class C2000DynamicLinker(TIDynamicLinker):
     # Required for backwards compat with projects created before ti-cgt support existed
     id = 'cl2000'
+
+class C6000DynamicLinker(TIDynamicLinker):
+    id = 'cl6000'
 
 
 class ArmDynamicLinker(PosixDynamicLinkerMixin, DynamicLinker):

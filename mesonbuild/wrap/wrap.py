@@ -351,7 +351,7 @@ class Resolver:
             self.wrapdb_provided_deps.update({i: name for i in info.get('dependency_names', [])})
             self.wrapdb_provided_programs.update({i: name for i in info.get('program_names', [])})
 
-    def get_from_wrapdb(self, subp_name: str) -> PackageDefinition:
+    def get_from_wrapdb(self, subp_name: str) -> T.Optional[PackageDefinition]:
         info = self.wrapdb.get(subp_name)
         if not info:
             return None
@@ -402,14 +402,12 @@ class Resolver:
         return None
 
     def resolve(self, packagename: str, force_method: T.Optional[Method] = None) -> T.Tuple[str, Method]:
-        self.packagename = packagename
-        self.directory = packagename
-        self.wrap = self.wraps.get(packagename)
-        if not self.wrap:
-            self.wrap = self.get_from_wrapdb(packagename)
-        if not self.wrap:
-            m = f'Neither a subproject directory nor a {self.packagename}.wrap file was found.'
-            raise WrapNotFoundException(m)
+        wrap = self.wraps.get(packagename)
+        if wrap is None:
+            wrap = self.get_from_wrapdb(packagename)
+            if wrap is None:
+                raise WrapNotFoundException(f'Neither a subproject directory nor a {packagename}.wrap file was found.')
+        self.wrap = wrap
         self.directory = self.wrap.directory
 
         if self.wrap.has_wrap:
@@ -480,19 +478,19 @@ class Resolver:
             if os.path.isdir(cached_directory):
                 self.copy_tree(cached_directory, self.dirname)
             elif self.wrap.type == 'file':
-                self.get_file()
+                self._get_file(packagename)
             else:
                 self.check_can_download()
                 if self.wrap.type == 'git':
-                    self.get_git()
+                    self._get_git(packagename)
                 elif self.wrap.type == "hg":
-                    self.get_hg()
+                    self._get_hg()
                 elif self.wrap.type == "svn":
-                    self.get_svn()
+                    self._get_svn()
                 else:
                     raise WrapException(f'Unknown wrap type {self.wrap.type!r}')
             try:
-                self.apply_patch()
+                self.apply_patch(packagename)
                 self.apply_diff_files()
             except Exception:
                 windows_proof_rmtree(self.dirname)
@@ -554,8 +552,8 @@ class Resolver:
             return False
         raise WrapException(f'Unknown git submodule output: {out!r}')
 
-    def get_file(self) -> None:
-        path = self.get_file_internal('source')
+    def _get_file(self, packagename: str) -> None:
+        path = self._get_file_internal('source', packagename)
         extract_dir = self.subdir_root
         # Some upstreams ship packages that do not have a leading directory.
         # Create one for them.
@@ -567,9 +565,9 @@ class Resolver:
         except OSError as e:
             raise WrapException(f'failed to unpack archive with error: {str(e)}') from e
 
-    def get_git(self) -> None:
+    def _get_git(self, packagename: str) -> None:
         if not GIT:
-            raise WrapException(f'Git program not found, cannot download {self.packagename}.wrap via git.')
+            raise WrapException(f'Git program not found, cannot download {packagename}.wrap via git.')
         revno = self.wrap.get('revision')
         checkout_cmd = ['-c', 'advice.detachedHead=false', 'checkout', revno, '--']
         is_shallow = False
@@ -632,7 +630,7 @@ class Resolver:
             result = all(ch in '0123456789AaBbCcDdEeFf' for ch in revno)
         return result
 
-    def get_hg(self) -> None:
+    def _get_hg(self) -> None:
         revno = self.wrap.get('revision')
         hg = shutil.which('hg')
         if not hg:
@@ -643,7 +641,7 @@ class Resolver:
             subprocess.check_call([hg, 'checkout', revno],
                                   cwd=self.dirname)
 
-    def get_svn(self) -> None:
+    def _get_svn(self) -> None:
         revno = self.wrap.get('revision')
         svn = shutil.which('svn')
         if not svn:
@@ -742,10 +740,10 @@ class Resolver:
                 time.sleep(d)
         return self.get_data(urlstring)
 
-    def download(self, what: str, ofname: str, fallback: bool = False) -> None:
+    def _download(self, what: str, ofname: str, packagename: str, fallback: bool = False) -> None:
         self.check_can_download()
         srcurl = self.wrap.get(what + ('_fallback_url' if fallback else '_url'))
-        mlog.log('Downloading', mlog.bold(self.packagename), what, 'from', mlog.bold(srcurl))
+        mlog.log('Downloading', mlog.bold(packagename), what, 'from', mlog.bold(srcurl))
         try:
             dhash, tmpfile = self.get_data_with_backoff(srcurl)
             expected = self.wrap.get(what + '_hash').lower()
@@ -755,24 +753,24 @@ class Resolver:
         except WrapException:
             if not fallback:
                 if what + '_fallback_url' in self.wrap.values:
-                    return self.download(what, ofname, fallback=True)
+                    return self._download(what, ofname, packagename, fallback=True)
                 mlog.log('A fallback URL could be specified using',
                          mlog.bold(what + '_fallback_url'), 'key in the wrap file')
             raise
         os.rename(tmpfile, ofname)
 
-    def get_file_internal(self, what: str) -> str:
+    def _get_file_internal(self, what: str, packagename: str) -> str:
         filename = self.wrap.get(what + '_filename')
         if what + '_url' in self.wrap.values:
             cache_path = os.path.join(self.cachedir, filename)
 
             if os.path.exists(cache_path):
                 self.check_hash(what, cache_path)
-                mlog.log('Using', mlog.bold(self.packagename), what, 'from cache.')
+                mlog.log('Using', mlog.bold(packagename), what, 'from cache.')
                 return cache_path
 
             os.makedirs(self.cachedir, exist_ok=True)
-            self.download(what, cache_path)
+            self._download(what, cache_path, packagename)
             return cache_path
         else:
             path = Path(self.wrap.filesdir) / filename
@@ -783,12 +781,12 @@ class Resolver:
 
             return path.as_posix()
 
-    def apply_patch(self) -> None:
+    def apply_patch(self, packagename: str) -> None:
         if 'patch_filename' in self.wrap.values and 'patch_directory' in self.wrap.values:
             m = f'Wrap file {self.wrap.basename!r} must not have both "patch_filename" and "patch_directory"'
             raise WrapException(m)
         if 'patch_filename' in self.wrap.values:
-            path = self.get_file_internal('patch')
+            path = self._get_file_internal('patch', packagename)
             try:
                 shutil.unpack_archive(path, self.subdir_root)
             except Exception:
@@ -809,17 +807,17 @@ class Resolver:
             if not path.exists():
                 raise WrapException(f'Diff file "{path}" does not exist')
             relpath = os.path.relpath(str(path), self.dirname)
-            if GIT:
-                # Git is more likely to be available on Windows and more likely
-                # to apply correctly assuming patches are often generated by git.
-                # See https://github.com/mesonbuild/meson/issues/12092.
-                # The `--work-tree` is necessary in case we're inside a
+            if PATCH:
+                # Always pass a POSIX path to patch, because on Windows it's MSYS
+                # Ignore whitespace when applying patches to workaround
+                # line-ending differences
+                cmd = [PATCH, '-l', '-f', '-p1', '-i', str(Path(relpath).as_posix())]
+            elif GIT:
+                # If the `patch` command is not available, fall back to `git
+                # apply`. The `--work-tree` is necessary in case we're inside a
                 # Git repository: by default, Git will try to apply the patch to
                 # the repository root.
-                cmd = [GIT, '--work-tree', '.', 'apply', '-p1', relpath]
-            elif PATCH:
-                # Always pass a POSIX path to patch, because on Windows it's MSYS
-                cmd = [PATCH, '-f', '-p1', '-i', str(Path(relpath).as_posix())]
+                cmd = [GIT, '--work-tree', '.', 'apply', '--ignore-whitespace', '-p1', relpath]
             else:
                 raise WrapException('Missing "patch" or "git" commands to apply diff files')
 

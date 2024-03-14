@@ -13,7 +13,7 @@ from .. import build
 from .. import mlog
 
 from ..modules import ModuleReturnValue, ModuleObject, ModuleState, ExtensionModule
-from ..backend.backends import TestProtocol, compute_build_subdir
+from ..backend.backends import TestProtocol
 from ..interpreterbase import (
                                ContainerTypeInfo, KwargInfo, MesonOperator,
                                MesonInterpreterObject, ObjectHolder, MutableInterpreterObject,
@@ -209,16 +209,13 @@ class RunProcess(MesonInterpreterObject):
                  subdir: str,
                  mesonintrospect: T.List[str],
                  in_builddir: bool = False,
-                 is_native_cross: bool = False,
                  check: bool = False,
                  capture: bool = True) -> None:
         super().__init__()
         if not isinstance(cmd, ExternalProgram):
             raise AssertionError('BUG: RunProcess must be passed an ExternalProgram')
         self.capture = capture
-        self.returncode, self.stdout, self.stderr = self.run_command(cmd, args, env, source_dir, build_dir,
-                                                                     subdir, mesonintrospect, in_builddir,
-                                                                     is_native_cross, check)
+        self.returncode, self.stdout, self.stderr = self.run_command(cmd, args, env, source_dir, build_dir, subdir, mesonintrospect, in_builddir, check)
         self.methods.update({'returncode': self.returncode_method,
                              'stdout': self.stdout_method,
                              'stderr': self.stderr_method,
@@ -233,7 +230,6 @@ class RunProcess(MesonInterpreterObject):
                     subdir: str,
                     mesonintrospect: T.List[str],
                     in_builddir: bool,
-                    is_native_cross: bool,
                     check: bool = False) -> T.Tuple[int, str, str]:
         command_array = cmd.get_command() + args
         menv = {'MESON_SOURCE_ROOT': source_dir,
@@ -242,7 +238,7 @@ class RunProcess(MesonInterpreterObject):
                 'MESONINTROSPECT': ' '.join([shlex.quote(x) for x in mesonintrospect]),
                 }
         if in_builddir:
-            cwd = os.path.join(build_dir, compute_build_subdir(subdir, is_native_cross))
+            cwd = os.path.join(build_dir, subdir)
         else:
             cwd = os.path.join(source_dir, subdir)
         child_env = os.environ.copy()
@@ -289,6 +285,7 @@ class EnvironmentVariablesHolder(ObjectHolder[mesonlib.EnvironmentVariables], Mu
     def __init__(self, obj: mesonlib.EnvironmentVariables, interpreter: 'Interpreter'):
         super().__init__(obj, interpreter)
         self.methods.update({'set': self.set_method,
+                             'unset': self.unset_method,
                              'append': self.append_method,
                              'prepend': self.prepend_method,
                              })
@@ -312,6 +309,12 @@ class EnvironmentVariablesHolder(ObjectHolder[mesonlib.EnvironmentVariables], Mu
     def set_method(self, args: T.Tuple[str, T.List[str]], kwargs: 'EnvironmentSeparatorKW') -> None:
         name, values = args
         self.held_object.set(name, values, kwargs['separator'])
+
+    @FeatureNew('environment.unset', '1.4.0')
+    @typed_pos_args('environment.unset', str)
+    @noKwargs
+    def unset_method(self, args: T.Tuple[str], kwargs: TYPE_kwargs) -> None:
+        self.held_object.unset(args[0])
 
     @typed_pos_args('environment.append', str, varargs=str, min_varargs=1)
     @typed_kwargs('environment.append', ENV_SEPARATOR_KW)
@@ -376,7 +379,7 @@ class ConfigurationDataHolder(ObjectHolder[build.ConfigurationData], MutableInte
         # We already have typed_pos_args checking that this is either a bool or
         # an int.
         if not isinstance(args[1], bool):
-            mlog.deprecation('configuration_data.set10 with number. the `set10` '
+            mlog.deprecation('configuration_data.set10 with number. The `set10` '
                              'method should only be used with booleans',
                              location=self.interpreter.current_node)
             if args[1] < 0:
@@ -739,7 +742,7 @@ class GeneratedObjectsHolder(ObjectHolder[build.ExtractedObjects]):
 
 class Test(MesonInterpreterObject):
     def __init__(self, name: str, project: str, suite: T.List[str],
-                 exe: T.Union[ExternalProgram, build.Executable, build.CustomTarget],
+                 exe: T.Union[ExternalProgram, build.Executable, build.CustomTarget, build.CustomTargetIndex],
                  depends: T.List[T.Union[build.CustomTarget, build.BuildTarget]],
                  is_parallel: bool,
                  cmd_args: T.List[T.Union[str, mesonlib.File, build.Target]],
@@ -762,7 +765,7 @@ class Test(MesonInterpreterObject):
         self.priority = priority
         self.verbose = verbose
 
-    def get_exe(self) -> T.Union[ExternalProgram, build.Executable, build.CustomTarget]:
+    def get_exe(self) -> T.Union[ExternalProgram, build.Executable, build.CustomTarget, build.CustomTargetIndex]:
         return self.exe
 
     def get_name(self) -> str:
@@ -895,8 +898,7 @@ class BuildTargetHolder(ObjectHolder[_BuildTarget]):
     @noPosargs
     @noKwargs
     def private_dir_include_method(self, args: T.List[TYPE_var], kwargs: TYPE_kwargs) -> build.IncludeDirs:
-        return build.IncludeDirs('', [], False, self.interpreter.coredata.is_native_cross(),
-                                 [self.interpreter.backend.get_target_private_dir(self._target_object)])
+        return build.IncludeDirs('', [], False, [self.interpreter.backend.get_target_private_dir(self._target_object)])
 
     @noPosargs
     @noKwargs

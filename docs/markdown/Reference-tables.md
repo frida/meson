@@ -37,6 +37,7 @@ These are return values of the `get_id` (Compiler family) and
 | rustc     | Rust compiler                    |                 |
 | sun       | Sun Fortran compiler             |                 |
 | c2000     | Texas Instruments C/C++ Compiler (C2000) |                 |
+| c6000     | Texas Instruments C/C++ Compiler (C6000) |                 |
 | ti        | Texas Instruments C/C++ Compiler |                 |
 | valac     | Vala compiler                    |                 |
 | xc16      | Microchip XC16 C compiler        |                 |
@@ -70,6 +71,7 @@ These are return values of the `get_linker_id` method in a compiler object.
 | xc16-ar    | The Microchip linker, used with XC16 only   |
 | ar2000     | The Texas Instruments linker, used with C2000 only |
 | ti-ar      | The Texas Instruments linker |
+| ar6000     | The Texas Instruments linker, used with C6000 only |
 | armlink    | The ARM linker (arm and armclang compilers) |
 | pgi        | Portland/Nvidia PGI                         |
 | nvlink     | Nvidia Linker used with cuda                |
@@ -85,6 +87,7 @@ For languages that don't have separate dynamic linkers such as C# and Java, the
 | Value               | Comment                         |
 | -----               | -------                         |
 | MESONINTROSPECT     | Command to run to run the introspection command, may be of the form `python /path/to/meson introspect`, user is responsible for splitting the path if necessary. |
+| MESONREWRITE        | Command to run to run the rewriting command, only set when running `dist` scripts |
 | MESON_BUILD_ROOT    | Absolute path to the build dir  |
 | MESON_DIST_ROOT     | Points to the root of the staging directory, only set when running `dist` scripts |
 | MESON_SOURCE_ROOT   | Absolute path to the source dir |
@@ -104,6 +107,7 @@ set in the cross file.
 | arm                 | 32 bit ARM processor     |
 | avr                 | Atmel AVR processor      |
 | c2000               | 32 bit C2000 processor   |
+| c6000               | 32 bit C6000 processor   |
 | csky                | 32 bit CSky processor    |
 | dspic               | 16 bit Microchip dsPIC   |
 | e2k                 | MCST Elbrus processor    |

@@ -44,7 +44,7 @@ else:
     # do). This gives up DRYer type checking, with no runtime impact
     Compiler = object
 
-GROUP_FLAGS = re.compile(r'''\.so (?:\.[0-9]+)? (?:\.[0-9]+)? (?:\.[0-9]+)?$ |
+GROUP_FLAGS = re.compile(r'''^(?!-Wl,) .*\.so (?:\.[0-9]+)? (?:\.[0-9]+)? (?:\.[0-9]+)?$ |
                              ^(?:-Wl,)?-l |
                              \.a$''', re.X)
 
@@ -84,7 +84,8 @@ class CLikeCompilerArgs(arglist.CompilerArgs):
                 if group_start < 0:
                     # First occurrence of a library
                     group_start = i
-            if group_start >= 0:
+            # Only add groups if there are multiple libraries.
+            if group_end > group_start >= 0:
                 # Last occurrence of a library
                 new.insert(group_end + 1, '-Wl,--end-group')
                 new.insert(group_start, '-Wl,--start-group')
@@ -338,7 +339,7 @@ class CLikeCompiler(Compiler):
                      extra_args: T.Union[None, T.List[str], T.Callable[['CompileCheckMode'], T.List[str]]] = None,
                      dependencies: T.Optional[T.List['Dependency']] = None) -> T.Tuple[bool, bool]:
         code = f'''{prefix}
-        #include <{hname}>\n'''
+        #include <{hname}>'''
         return self.compiles(code, env, extra_args=extra_args,
                              dependencies=dependencies)
 
@@ -353,7 +354,7 @@ class CLikeCompiler(Compiler):
          #endif
         #else
          #include <{hname}>
-        #endif\n'''
+        #endif'''
         return self.compiles(code, env, extra_args=extra_args,
                              dependencies=dependencies, mode=CompileCheckMode.PREPROCESS, disable_cache=disable_cache)
 
@@ -369,7 +370,7 @@ class CLikeCompiler(Compiler):
                 {symbol};
             #endif
             return 0;
-        }}\n'''
+        }}'''
         return self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)
 
@@ -489,7 +490,7 @@ class CLikeCompiler(Compiler):
                      dependencies: T.Optional[T.List['Dependency']]) -> bool:
         t = f'''{prefix}
         #include <stddef.h>
-        int main(void) {{ static int a[1-2*!({expression})]; a[0]=0; return 0; }}\n'''
+        int main(void) {{ static int a[1-2*!({expression})]; a[0]=0; return 0; }}'''
         return self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)[0]
 
@@ -573,7 +574,7 @@ class CLikeCompiler(Compiler):
         int main(void) {{
             {typename} something;
             return 0;
-        }}\n'''
+        }}'''
         if not self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)[0]:
             return -1
@@ -613,7 +614,7 @@ class CLikeCompiler(Compiler):
         int main(void) {{
             {typename} something;
             return 0;
-        }}\n'''
+        }}'''
         if not self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)[0]:
             return -1
@@ -834,7 +835,7 @@ class CLikeCompiler(Compiler):
             head, main = self._have_prototype_templ()
         else:
             head, main = self._no_prototype_templ()
-        templ = head + stubs_fail + main + '\n'
+        templ = head + stubs_fail + main
 
         res, cached = self.links(templ.format(**fargs), env, extra_args=extra_args,
                                  dependencies=dependencies)
@@ -877,7 +878,7 @@ class CLikeCompiler(Compiler):
             {__builtin_}{func};
         #endif
         return 0;
-        }}\n'''
+        }}'''
         return self.links(t.format(**fargs), env, extra_args=extra_args,
                           dependencies=dependencies)
 
@@ -893,7 +894,7 @@ class CLikeCompiler(Compiler):
         void bar(void) {{
             {typename} foo;
             {members}
-        }}\n'''
+        }}'''
         return self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)
 
@@ -903,7 +904,7 @@ class CLikeCompiler(Compiler):
         t = f'''{prefix}
         void bar(void) {{
             sizeof({typename});
-        }}\n'''
+        }}'''
         return self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)
 
@@ -1051,6 +1052,10 @@ class CLikeCompiler(Compiler):
         elif env.machines[self.for_machine].is_cygwin():
             shlibext = ['dll', 'dll.a']
             prefixes = ['cyg'] + prefixes
+        elif self.id.lower() == 'c6000' or self.id.lower() == 'ti':
+            # TI C6000 compiler can use both extensions for static or dynamic libs.
+            stlibext = ['a', 'lib']
+            shlibext = ['dll', 'so']
         else:
             # Linux/BSDs
             shlibext = ['so']
