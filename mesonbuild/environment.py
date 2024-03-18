@@ -188,6 +188,7 @@ def get_llvm_tool_names(tool: str) -> T.List[str]:
     # unless it becomes a stable release.
     suffixes = [
         '', # base (no suffix)
+        '-18.1', '18.1',
         '-18',  '18',
         '-17',  '17',
         '-16',  '16',
@@ -208,7 +209,7 @@ def get_llvm_tool_names(tool: str) -> T.List[str]:
         '-3.7', '37',
         '-3.6', '36',
         '-3.5', '35',
-        '-15',    # Debian development snapshot
+        '-19',    # Debian development snapshot
         '-devel', # FreeBSD development snapshot
     ]
     names: T.List[str] = []
@@ -650,33 +651,6 @@ class Environment:
         self.default_pkgconfig = ['pkg-config']
         self.wrap_resolver: T.Optional['Resolver'] = None
 
-    def copy_to_native(self) -> Environment:
-        other = Environment.__new__(Environment)
-        for k, v in self.__dict__.items():
-            other.__dict__[k] = v
-
-        other.coredata = self.coredata.copy_to_native()
-
-        machines: PerThreeMachineDefaultable[MachineInfo] = PerThreeMachineDefaultable()
-        machines.build = self.machines.build
-        other.machines = machines.default_missing()
-
-        binaries: PerMachineDefaultable[BinaryTable] = PerMachineDefaultable()
-        binaries.build = self.binaries.build
-        other.binaries = binaries.default_missing()
-
-        properties: PerMachineDefaultable[Properties] = PerMachineDefaultable()
-        properties.build = self.properties.build
-        other.properties = properties.default_missing()
-
-        cmakevars: PerMachineDefaultable[CMakeVariables] = PerMachineDefaultable()
-        cmakevars.build = self.cmakevars.build
-        other.cmakevars = cmakevars.default_missing()
-
-        other.exe_wrapper = None
-
-        return other
-
     def _load_machine_file_options(self, config: 'ConfigParser', properties: Properties, machine: MachineChoice) -> None:
         """Read the contents of a Machine file and put it in the options store."""
 
@@ -898,14 +872,6 @@ class Environment:
     def get_build_dir(self) -> str:
         return self.build_dir
 
-    def build_output_rpath(self, subdir: str, *parts: T.Sequence[str]) -> str:
-        if self.coredata.is_native_cross():
-            assert subdir.startswith('subprojects')
-            result = 'subprojects-native' + subdir[11:]
-        else:
-            result = subdir
-        return os.path.join(result, *parts)
-
     def get_import_lib_dir(self) -> str:
         "Install dir for the import library (library used for linking)"
         return self.get_libdir()
@@ -992,3 +958,6 @@ class Environment:
         if not self.need_exe_wrapper():
             return None
         return self.exe_wrapper
+
+    def has_exe_wrapper(self) -> bool:
+        return self.exe_wrapper and self.exe_wrapper.found()

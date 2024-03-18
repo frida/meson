@@ -9,7 +9,6 @@ import subprocess
 import typing as T
 
 from .. import mesonlib
-from .. import mlog
 from ..arglist import CompilerArgs
 from ..linkers import RSPFileSyntax
 from ..mesonlib import (
@@ -28,7 +27,6 @@ from .mixins.gnu import gnu_common_warning_args
 if T.TYPE_CHECKING:
     from ..build import DFeatures
     from ..dependencies import Dependency
-    from ..programs import ExternalProgram
     from ..envconfig import MachineInfo
     from ..environment import Environment
     from ..linkers.linkers import DynamicLinker
@@ -433,14 +431,12 @@ class DCompiler(Compiler):
 
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice,
                  info: 'MachineInfo', arch: str, *,
-                 exe_wrapper: T.Optional['ExternalProgram'] = None,
                  linker: T.Optional['DynamicLinker'] = None,
                  full_version: T.Optional[str] = None,
                  is_cross: bool = False):
         super().__init__([], exelist, version, for_machine, info, linker=linker,
                          full_version=full_version, is_cross=is_cross)
         self.arch = arch
-        self.exe_wrapper = exe_wrapper
 
     def sanity_check(self, work_dir: str, environment: 'Environment') -> None:
         source_name = os.path.join(work_dir, 'sanity.d')
@@ -451,11 +447,11 @@ class DCompiler(Compiler):
         pc.wait()
         if pc.returncode != 0:
             raise EnvironmentException('D compiler %s cannot compile programs.' % self.name_string())
-        if self.is_cross:
-            if self.exe_wrapper is None:
+        if environment.need_exe_wrapper(self.for_machine):
+            if not environment.has_exe_wrapper():
                 # Can't check if the binaries run so we have to assume they do
                 return
-            cmdlist = self.exe_wrapper.get_command() + [output_name]
+            cmdlist = environment.exe_wrapper.get_command() + [output_name]
         else:
             cmdlist = [output_name]
         if subprocess.call(cmdlist) != 0:
@@ -571,32 +567,13 @@ class DCompiler(Compiler):
                 args.append(extra_args)
         return args
 
-    def run(self, code: 'mesonlib.FileOrString', env: 'Environment', *,
+    def run(self, code: 'mesonlib.FileOrString', env: 'Environment',
             extra_args: T.Union[T.List[str], T.Callable[[CompileCheckMode], T.List[str]], None] = None,
-            dependencies: T.Optional[T.List['Dependency']] = None) -> compilers.RunResult:
-        need_exe_wrapper = env.need_exe_wrapper(self.for_machine)
-        if need_exe_wrapper and self.exe_wrapper is None:
-            raise compilers.CrossNoRunException('Can not run test applications in this cross environment.')
+            dependencies: T.Optional[T.List['Dependency']] = None,
+            run_env: T.Optional[T.Dict[str, str]] = None,
+            run_cwd: T.Optional[str] = None) -> compilers.RunResult:
         extra_args = self._get_compile_extra_args(extra_args)
-        with self._build_wrapper(code, env, extra_args, dependencies, mode=CompileCheckMode.LINK, want_output=True) as p:
-            if p.returncode != 0:
-                mlog.debug(f'Could not compile test file {p.input_name}: {p.returncode}\n')
-                return compilers.RunResult(False)
-            if need_exe_wrapper:
-                cmdlist = self.exe_wrapper.get_command() + [p.output_name]
-            else:
-                cmdlist = [p.output_name]
-            try:
-                pe, so, se = mesonlib.Popen_safe(cmdlist)
-            except Exception as e:
-                mlog.debug(f'Could not run: {cmdlist} (error: {e})\n')
-                return compilers.RunResult(False)
-
-        mlog.debug('Program stdout:\n')
-        mlog.debug(so)
-        mlog.debug('Program stderr:\n')
-        mlog.debug(se)
-        return compilers.RunResult(True, pe.returncode, so, se)
+        return super().run(code, env, extra_args, dependencies, run_env, run_cwd)
 
     def sizeof(self, typename: str, prefix: str, env: 'Environment', *,
                extra_args: T.Union[None, T.List[str], T.Callable[[CompileCheckMode], T.List[str]]] = None,
@@ -661,12 +638,11 @@ class GnuDCompiler(GnuCompiler, DCompiler):
 
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice,
                  info: 'MachineInfo', arch: str, *,
-                 exe_wrapper: T.Optional['ExternalProgram'] = None,
                  linker: T.Optional['DynamicLinker'] = None,
                  full_version: T.Optional[str] = None,
                  is_cross: bool = False):
         DCompiler.__init__(self, exelist, version, for_machine, info, arch,
-                           exe_wrapper=exe_wrapper, linker=linker,
+                           linker=linker,
                            full_version=full_version, is_cross=is_cross)
         GnuCompiler.__init__(self, {})
         default_warn_args = ['-Wall', '-Wdeprecated']
@@ -745,12 +721,11 @@ class LLVMDCompiler(DmdLikeCompilerMixin, DCompiler):
 
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice,
                  info: 'MachineInfo', arch: str, *,
-                 exe_wrapper: T.Optional['ExternalProgram'] = None,
                  linker: T.Optional['DynamicLinker'] = None,
                  full_version: T.Optional[str] = None,
                  is_cross: bool = False, version_output: T.Optional[str] = None):
         DCompiler.__init__(self, exelist, version, for_machine, info, arch,
-                           exe_wrapper=exe_wrapper, linker=linker,
+                           linker=linker,
                            full_version=full_version, is_cross=is_cross)
         DmdLikeCompilerMixin.__init__(self, dmd_frontend_version=find_ldc_dmd_frontend_version(version_output))
         self.base_options = {OptionKey(o) for o in ['b_coverage', 'b_colorout', 'b_vscrt', 'b_ndebug']}
@@ -809,12 +784,11 @@ class DmdDCompiler(DmdLikeCompilerMixin, DCompiler):
 
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice,
                  info: 'MachineInfo', arch: str, *,
-                 exe_wrapper: T.Optional['ExternalProgram'] = None,
                  linker: T.Optional['DynamicLinker'] = None,
                  full_version: T.Optional[str] = None,
                  is_cross: bool = False):
         DCompiler.__init__(self, exelist, version, for_machine, info, arch,
-                           exe_wrapper=exe_wrapper, linker=linker,
+                           linker=linker,
                            full_version=full_version, is_cross=is_cross)
         DmdLikeCompilerMixin.__init__(self, version)
         self.base_options = {OptionKey(o) for o in ['b_coverage', 'b_colorout', 'b_vscrt', 'b_ndebug']}

@@ -74,7 +74,7 @@ class DependencyFallbacksHolder(MesonInterpreterObject):
         name = func_args[0]
         cached_dep = self._get_cached_dep(name, kwargs)
         if cached_dep:
-            self._verify_fallback_consistency(cached_dep, kwargs.get('native', False))
+            self._verify_fallback_consistency(cached_dep)
         return cached_dep
 
     def _do_dependency(self, kwargs: TYPE_nkwargs, func_args: TYPE_nvar, func_kwargs: TYPE_nkwargs) -> T.Optional[Dependency]:
@@ -95,8 +95,7 @@ class DependencyFallbacksHolder(MesonInterpreterObject):
     def _do_existing_subproject(self, kwargs: TYPE_nkwargs, func_args: TYPE_nvar, func_kwargs: TYPE_nkwargs) -> T.Optional[Dependency]:
         subp_name = func_args[0]
         varname = self.subproject_varname
-        native = kwargs.get('native', False)
-        if subp_name and self._get_subproject(subp_name, native):
+        if subp_name and self._get_subproject(subp_name):
             return self._get_subproject_dep(subp_name, varname, kwargs)
         return None
 
@@ -128,21 +127,18 @@ class DependencyFallbacksHolder(MesonInterpreterObject):
         func_kwargs.setdefault('version', [])
         if 'default_options' in kwargs and isinstance(kwargs['default_options'], str):
             func_kwargs['default_options'] = listify(kwargs['default_options'])
-        func_kwargs.setdefault('native', kwargs.get('native', False))
         self.interpreter.do_subproject(subp_name, func_kwargs)
         return self._get_subproject_dep(subp_name, varname, kwargs)
 
-    def _get_subproject(self, subp_name: str, native: bool) -> T.Optional[SubprojectHolder]:
-        sub = self.interpreter.find_subproject(subp_name, native)
+    def _get_subproject(self, subp_name: str) -> T.Optional[SubprojectHolder]:
+        sub = self.interpreter.subprojects.get(subp_name)
         if sub and sub.found():
             return sub
         return None
 
     def _get_subproject_dep(self, subp_name: str, varname: str, kwargs: TYPE_nkwargs) -> T.Optional[Dependency]:
-        native = kwargs.get('native', False)
-
         # Verify the subproject is found
-        subproject = self._get_subproject(subp_name, native)
+        subproject = self._get_subproject(subp_name)
         if not subproject:
             mlog.log('Dependency', mlog.bold(self._display_name), 'from subproject',
                      mlog.bold(subp_name), 'found:', mlog.red('NO'),
@@ -164,7 +160,7 @@ class DependencyFallbacksHolder(MesonInterpreterObject):
         # If we have cached_dep we did all the checks and logging already in
         # self._get_cached_dep().
         if cached_dep:
-            self._verify_fallback_consistency(cached_dep, native)
+            self._verify_fallback_consistency(cached_dep)
             return cached_dep
 
         # Legacy: Use the variable name if provided instead of relying on the
@@ -260,12 +256,10 @@ class DependencyFallbacksHolder(MesonInterpreterObject):
             return None
         return var_dep
 
-    def _verify_fallback_consistency(self, cached_dep: Dependency, native: bool) -> None:
+    def _verify_fallback_consistency(self, cached_dep: Dependency) -> None:
         subp_name = self.subproject_name
-        if subp_name is None:
-            return
         varname = self.subproject_varname
-        subproject = self._get_subproject(subp_name, native)
+        subproject = self._get_subproject(subp_name)
         if subproject and varname:
             var_dep = self._get_subproject_variable(subproject, varname)
             if var_dep and cached_dep.found() and var_dep != cached_dep:
@@ -342,8 +336,7 @@ class DependencyFallbacksHolder(MesonInterpreterObject):
                 subp_name, varname = self.wrap_resolver.find_dep_provider(name)
                 if subp_name:
                     self.forcefallback |= subp_name in force_fallback_for
-                    if self.forcefallback or self.allow_fallback is True or required \
-                            or self._get_subproject(subp_name, kwargs.get('native', False)):
+                    if self.forcefallback or self.allow_fallback is True or required or self._get_subproject(subp_name):
                         self._subproject_impl(subp_name, varname)
                     break
 

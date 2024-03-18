@@ -9,6 +9,7 @@ import contextlib, os.path, re
 import enum
 import itertools
 import typing as T
+from dataclasses import dataclass
 from functools import lru_cache
 
 from .. import coredata
@@ -34,6 +35,7 @@ if T.TYPE_CHECKING:
 
     CompilerType = T.TypeVar('CompilerType', bound='Compiler')
     _T = T.TypeVar('_T')
+    UserOptionType = T.TypeVar('UserOptionType', bound=coredata.UserOption)
 
 """This file contains the data files of all compilers Meson knows
 about. To support a new compiler, add its information below.
@@ -206,35 +208,45 @@ clike_debug_args: T.Dict[bool, T.List[str]] = {
 
 MSCRT_VALS = ['none', 'md', 'mdd', 'mt', 'mtd']
 
-base_options: 'KeyedOptionDictType' = {
-    OptionKey('b_pch'): coredata.UserBooleanOption('Use precompiled headers', True),
-    OptionKey('b_lto'): coredata.UserBooleanOption('Use link time optimization', False),
-    OptionKey('b_lto_threads'): coredata.UserIntegerOption('Use multiple threads for Link Time Optimization', (None, None, 0)),
-    OptionKey('b_lto_mode'): coredata.UserComboOption('Select between different LTO modes.',
-                                                      ['default', 'thin'],
-                                                      'default'),
-    OptionKey('b_thinlto_cache'): coredata.UserBooleanOption('Use LLVM ThinLTO caching for faster incremental builds', False),
-    OptionKey('b_thinlto_cache_dir'): coredata.UserStringOption('Directory to store ThinLTO cache objects', ''),
-    OptionKey('b_sanitize'): coredata.UserComboOption('Code sanitizer to use',
-                                                      ['none', 'address', 'thread', 'undefined', 'memory', 'leak', 'address,undefined'],
-                                                      'none'),
-    OptionKey('b_lundef'): coredata.UserBooleanOption('Use -Wl,--no-undefined when linking', True),
-    OptionKey('b_asneeded'): coredata.UserBooleanOption('Use -Wl,--as-needed when linking', True),
-    OptionKey('b_pgo'): coredata.UserComboOption('Use profile guided optimization',
-                                                 ['off', 'generate', 'use'],
-                                                 'off'),
-    OptionKey('b_coverage'): coredata.UserBooleanOption('Enable coverage tracking.', False),
-    OptionKey('b_colorout'): coredata.UserComboOption('Use colored output',
-                                                      ['auto', 'always', 'never'],
-                                                      'always'),
-    OptionKey('b_ndebug'): coredata.UserComboOption('Disable asserts', ['true', 'false', 'if-release'], 'false'),
-    OptionKey('b_staticpic'): coredata.UserBooleanOption('Build static libraries as position independent', True),
-    OptionKey('b_pie'): coredata.UserBooleanOption('Build executables as position independent', False),
-    OptionKey('b_bitcode'): coredata.UserBooleanOption('Generate and embed bitcode (only macOS/iOS/tvOS)', False),
-    OptionKey('b_vscrt'): coredata.UserComboOption('VS run-time library type to use.',
-                                                   MSCRT_VALS + ['from_buildtype', 'static_from_buildtype'],
-                                                   'from_buildtype'),
+@dataclass
+class BaseOption(T.Generic[coredata._T, coredata._U]):
+    opt_type: T.Type[coredata._U]
+    description: str
+    default: T.Any = None
+    choices: T.Any = None
+
+    def init_option(self, name: OptionKey) -> coredata._U:
+        keywords = {'value': self.default}
+        if self.choices:
+            keywords['choices'] = self.choices
+        return self.opt_type(name.name, self.description, **keywords)
+
+BASE_OPTIONS: T.Mapping[OptionKey, BaseOption] = {
+    OptionKey('b_pch'): BaseOption(coredata.UserBooleanOption, 'Use precompiled headers', True),
+    OptionKey('b_lto'): BaseOption(coredata.UserBooleanOption, 'Use link time optimization', False),
+    OptionKey('b_lto_threads'): BaseOption(coredata.UserIntegerOption, 'Use multiple threads for Link Time Optimization', (None, None, 0)),
+    OptionKey('b_lto_mode'): BaseOption(coredata.UserComboOption, 'Select between different LTO modes.', 'default',
+                                        choices=['default', 'thin']),
+    OptionKey('b_thinlto_cache'): BaseOption(coredata.UserBooleanOption, 'Use LLVM ThinLTO caching for faster incremental builds', False),
+    OptionKey('b_thinlto_cache_dir'): BaseOption(coredata.UserStringOption, 'Directory to store ThinLTO cache objects', ''),
+    OptionKey('b_sanitize'): BaseOption(coredata.UserComboOption, 'Code sanitizer to use', 'none',
+                                        choices=['none', 'address', 'thread', 'undefined', 'memory', 'leak', 'address,undefined']),
+    OptionKey('b_lundef'): BaseOption(coredata.UserBooleanOption, 'Use -Wl,--no-undefined when linking', True),
+    OptionKey('b_asneeded'): BaseOption(coredata.UserBooleanOption, 'Use -Wl,--as-needed when linking', True),
+    OptionKey('b_pgo'): BaseOption(coredata.UserComboOption, 'Use profile guided optimization', 'off',
+                                   choices=['off', 'generate', 'use']),
+    OptionKey('b_coverage'): BaseOption(coredata.UserBooleanOption, 'Enable coverage tracking.', False),
+    OptionKey('b_colorout'): BaseOption(coredata.UserComboOption, 'Use colored output', 'always',
+                                        choices=['auto', 'always', 'never']),
+    OptionKey('b_ndebug'): BaseOption(coredata.UserComboOption, 'Disable asserts', 'false', choices=['true', 'false', 'if-release']),
+    OptionKey('b_staticpic'): BaseOption(coredata.UserBooleanOption, 'Build static libraries as position independent', True),
+    OptionKey('b_pie'): BaseOption(coredata.UserBooleanOption, 'Build executables as position independent', False),
+    OptionKey('b_bitcode'): BaseOption(coredata.UserBooleanOption, 'Generate and embed bitcode (only macOS/iOS/tvOS)', False),
+    OptionKey('b_vscrt'): BaseOption(coredata.UserComboOption, 'VS run-time library type to use.', 'from_buildtype',
+                                     choices=MSCRT_VALS + ['from_buildtype', 'static_from_buildtype']),
 }
+
+base_options: KeyedOptionDictType = {key: base_opt.init_option(key) for key, base_opt in BASE_OPTIONS.items()}
 
 def option_enabled(boptions: T.Set[OptionKey], options: 'KeyedOptionDictType',
                    option: OptionKey) -> bool:
@@ -577,6 +589,14 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
         """
         return []
 
+    def create_option(self, option_type: T.Type[UserOptionType], option_key: OptionKey, *args: T.Any, **kwargs: T.Any) -> T.Tuple[OptionKey, UserOptionType]:
+        return option_key, option_type(f'{self.language}_{option_key.name}', *args, **kwargs)
+
+    @staticmethod
+    def update_options(options: MutableKeyedOptionDictType, *args: T.Tuple[OptionKey, UserOptionType]) -> MutableKeyedOptionDictType:
+        options.update(args)
+        return options
+
     def get_options(self) -> 'MutableKeyedOptionDictType':
         return {}
 
@@ -623,10 +643,33 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
                           dependencies: T.Optional[T.List['Dependency']] = None) -> T.Tuple[bool, bool]:
         raise EnvironmentException('Language %s does not support header symbol checks.' % self.get_display_language())
 
-    def run(self, code: 'mesonlib.FileOrString', env: 'Environment', *,
+    def run(self, code: 'mesonlib.FileOrString', env: 'Environment',
             extra_args: T.Union[T.List[str], T.Callable[[CompileCheckMode], T.List[str]], None] = None,
-            dependencies: T.Optional[T.List['Dependency']] = None) -> RunResult:
-        raise EnvironmentException('Language %s does not support run checks.' % self.get_display_language())
+            dependencies: T.Optional[T.List['Dependency']] = None,
+            run_env: T.Optional[T.Dict[str, str]] = None,
+            run_cwd: T.Optional[str] = None) -> RunResult:
+        need_exe_wrapper = env.need_exe_wrapper(self.for_machine)
+        if need_exe_wrapper and not env.has_exe_wrapper():
+            raise CrossNoRunException('Can not run test applications in this cross environment.')
+        with self._build_wrapper(code, env, extra_args, dependencies, mode=CompileCheckMode.LINK, want_output=True) as p:
+            if p.returncode != 0:
+                mlog.debug(f'Could not compile test file {p.input_name}: {p.returncode}\n')
+                return RunResult(False)
+            if need_exe_wrapper:
+                cmdlist = env.exe_wrapper.get_command() + [p.output_name]
+            else:
+                cmdlist = [p.output_name]
+            try:
+                pe, so, se = mesonlib.Popen_safe(cmdlist, env=run_env, cwd=run_cwd)
+            except Exception as e:
+                mlog.debug(f'Could not run: {cmdlist} (error: {e})\n')
+                return RunResult(False)
+
+        mlog.debug('Program stdout:\n')
+        mlog.debug(so)
+        mlog.debug('Program stderr:\n')
+        mlog.debug(se)
+        return RunResult(True, pe.returncode, so, se)
 
     # Caching run() in general seems too risky (no way to know what the program
     # depends on), but some callers know more about the programs they intend to
@@ -768,14 +811,10 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
                     ofile.write(code)
                 # ccache would result in a cache miss
                 no_ccache = True
-                contents = code
+                code_debug = f'Code:\n{code}'
             else:
                 srcname = code.fname
-                if not is_object(code.fname):
-                    with open(code.fname, encoding='utf-8') as f:
-                        contents = f.read()
-                else:
-                    contents = '<binary>'
+                code_debug = f'Source file: {srcname}'
 
             # Construct the compiler command-line
             commands = self.compiler_args()
@@ -796,7 +835,7 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
             command_list = self.get_exelist(ccache=not no_ccache) + commands.to_native()
             mlog.debug('Running compile:')
             mlog.debug('Working directory: ', tmpdirname)
-            mlog.debug('Code:\n', contents)
+            mlog.debug(code_debug)
             os_env = os.environ.copy()
             os_env['LC_ALL'] = 'C'
             if no_ccache:
@@ -1327,10 +1366,12 @@ def get_global_options(lang: str,
     link_options = env.options.get(largkey, [])
 
     cargs = coredata.UserArrayOption(
+        f'{lang}_{argkey.name}',
         description + ' compiler',
         comp_options, split_args=True, allow_dups=True)
 
     largs = coredata.UserArrayOption(
+        f'{lang}_{largkey.name}',
         description + ' linker',
         link_options, split_args=True, allow_dups=True)
 

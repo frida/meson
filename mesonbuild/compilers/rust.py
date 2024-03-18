@@ -19,7 +19,6 @@ if T.TYPE_CHECKING:
     from ..environment import Environment  # noqa: F401
     from ..linkers.linkers import DynamicLinker
     from ..mesonlib import MachineChoice
-    from ..programs import ExternalProgram
     from ..dependencies import Dependency
 
 
@@ -59,13 +58,11 @@ class RustCompiler(Compiler):
 
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice,
                  is_cross: bool, info: 'MachineInfo',
-                 exe_wrapper: T.Optional['ExternalProgram'] = None,
                  full_version: T.Optional[str] = None,
                  linker: T.Optional['DynamicLinker'] = None):
         super().__init__([], exelist, version, for_machine, info,
                          is_cross=is_cross, full_version=full_version,
                          linker=linker)
-        self.exe_wrapper = exe_wrapper
         self.base_options.update({OptionKey(o) for o in ['b_colorout', 'b_ndebug']})
         if 'link' in self.linker.id:
             self.base_options.add(OptionKey('b_vscrt'))
@@ -87,29 +84,34 @@ class RustCompiler(Compiler):
         pc, stdo, stde = Popen_safe_logged(cmdlist, cwd=work_dir)
         if pc.returncode != 0:
             raise EnvironmentException(f'Rust compiler {self.name_string()} cannot compile programs.')
-        if self.is_cross:
-            if self.exe_wrapper is None:
+        self._native_static_libs(work_dir, source_name)
+        if environment.need_exe_wrapper(self.for_machine):
+            if not environment.has_exe_wrapper():
                 # Can't check if the binaries run so we have to assume they do
                 return
-            cmdlist = self.exe_wrapper.get_command() + [output_name]
+            cmdlist = environment.exe_wrapper.get_command() + [output_name]
         else:
             cmdlist = [output_name]
         pe = subprocess.Popen(cmdlist, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         pe.wait()
         if pe.returncode != 0:
             raise EnvironmentException(f'Executables created by Rust compiler {self.name_string()} are not runnable.')
+
+    def _native_static_libs(self, work_dir: str, source_name: str) -> None:
         # Get libraries needed to link with a Rust staticlib
         cmdlist = self.exelist + ['--crate-type', 'staticlib', '--print', 'native-static-libs', source_name]
         p, stdo, stde = Popen_safe_logged(cmdlist, cwd=work_dir)
-        if p.returncode == 0:
-            match = re.search('native-static-libs: (.*)$', stde, re.MULTILINE)
-            if match:
-                # Exclude some well known libraries that we don't need because they
-                # are always part of C/C++ linkers. Rustc probably should not print
-                # them, pkg-config for example never specify them.
-                # FIXME: https://github.com/rust-lang/rust/issues/55120
-                exclude = {'-lc', '-lgcc_s', '-lkernel32', '-ladvapi32'}
-                self.native_static_libs = [i for i in match.group(1).split() if i not in exclude]
+        if p.returncode != 0:
+            raise EnvironmentException('Rust compiler cannot compile staticlib.')
+        match = re.search('native-static-libs: (.*)$', stde, re.MULTILINE)
+        if not match:
+            raise EnvironmentException('Failed to find native-static-libs in Rust compiler output.')
+        # Exclude some well known libraries that we don't need because they
+        # are always part of C/C++ linkers. Rustc probably should not print
+        # them, pkg-config for example never specify them.
+        # FIXME: https://github.com/rust-lang/rust/issues/55120
+        exclude = {'-lc', '-lgcc_s', '-lkernel32', '-ladvapi32'}
+        self.native_static_libs = [i for i in match.group(1).split() if i not in exclude]
 
     def get_dependency_gen_args(self, outtarget: str, outfile: str) -> T.List[str]:
         return ['--dep-info', outfile]
@@ -154,15 +156,12 @@ class RustCompiler(Compiler):
     # C compiler for dynamic linking, as such we invoke the C compiler's
     # use_linker_args method instead.
 
-    def get_options(self) -> 'MutableKeyedOptionDictType':
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        return {
-            key: coredata.UserComboOption(
-                'Rust edition to use',
-                ['none', '2015', '2018', '2021'],
-                'none',
-            ),
-        }
+    def get_options(self) -> MutableKeyedOptionDictType:
+        return dict((self.create_option(coredata.UserComboOption,
+                                        OptionKey('std', machine=self.for_machine, lang=self.language),
+                                        'Rust edition to use',
+                                        ['none', '2015', '2018', '2021'],
+                                        'none'),))
 
     def get_dependency_compile_args(self, dep: 'Dependency') -> T.List[str]:
         # Rust doesn't have dependency compile arguments so simply return

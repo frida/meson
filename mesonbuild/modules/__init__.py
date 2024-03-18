@@ -53,9 +53,6 @@ class ModuleState:
         self.project_args = interpreter.build.projects_args.host.get(interpreter.subproject, {})
         self.current_node = interpreter.current_node
 
-    def is_native_cross(self) -> bool:
-        return self._interpreter.coredata.is_native_cross()
-
     def get_include_args(self, include_dirs: T.Iterable[T.Union[str, build.IncludeDirs]], prefix: str = '-I') -> T.List[str]:
         if not include_dirs:
             return []
