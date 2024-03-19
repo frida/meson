@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 from .. import mparser
 from .. import environment
 from .. import coredata
@@ -1035,7 +1037,7 @@ class Interpreter(InterpreterBase, HoldableObject):
         FeatureNew.single_use('Cargo subproject', '1.3.0', self.subproject, location=self.current_node)
         with mlog.nested(subp_name):
             ast, options = cargo.interpret(subp_name, subdir, self.environment)
-            self.coredata.update_project_options(options)
+            self.coredata.update_project_options(options, subp_name)
             return self._do_subproject_meson(
                 subp_name, subdir, default_options, kwargs, ast,
                 # FIXME: Are there other files used by cargo interpreter?
@@ -1187,10 +1189,16 @@ class Interpreter(InterpreterBase, HoldableObject):
         else:
             option_file = old_option_file
         if os.path.exists(option_file):
+            with open(option_file, 'rb') as f:
+                # We want fast  not cryptographically secure, this is just to
+                # see if the option file has changed
+                self.coredata.options_files[self.subproject] = (option_file, hashlib.sha1(f.read()).hexdigest())
             oi = optinterpreter.OptionInterpreter(self.subproject)
             oi.process(option_file)
-            self.coredata.update_project_options(oi.options)
+            self.coredata.update_project_options(oi.options, self.subproject)
             self.add_build_def_file(option_file)
+        else:
+            self.coredata.options_files[self.subproject] = None
 
         if self.subproject:
             self.project_default_options = {k.evolve(subproject=self.subproject): v

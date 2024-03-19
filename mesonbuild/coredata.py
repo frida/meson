@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2013-2024 The Meson development team
-# Copyright © 2023 Intel Corporation
+# Copyright © 2023-2024 Intel Corporation
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from collections import OrderedDict, abc
 from dataclasses import dataclass
 
 from .mesonlib import (
-    HoldableObject,
+    HoldableObject, MesonBugException,
     MesonException, EnvironmentException, MachineChoice, PerMachine,
     PerMachineDefaultable, default_libdir, default_libexecdir,
     default_prefix, default_datadir, default_includedir, default_infodir,
@@ -40,6 +40,7 @@ if T.TYPE_CHECKING:
     from .environment import Environment
     from .mesonlib import FileOrString
     from .cmake.traceparser import CMakeCacheEntry
+    from .interpreterbase import SubProject
 
     class SharedCMDOptions(Protocol):
 
@@ -574,6 +575,11 @@ class CoreData:
         self.cross_files = self.__load_config_files(options, scratch_dir, 'cross')
         self.compilers: PerMachine[T.Dict[str, Compiler]] = PerMachine(OrderedDict(), OrderedDict())
 
+        # Stores the (name, hash) of the options file, The name will be either
+        # "meson_options.txt" or "meson.options".
+        # This is used by mconf to reload the option file if it's changed.
+        self.options_files: T.Dict[SubProject, T.Optional[T.Tuple[str, str]]] = {}
+
         # Set of subprojects that have already been initialized once, this is
         # required to be stored and reloaded with the coredata, as we don't
         # want to overwrite options for such subprojects.
@@ -892,13 +898,15 @@ class CoreData:
         # mypy cannot analyze type of OptionKey
         return T.cast('T.List[str]', self.options[OptionKey('link_args', machine=for_machine, lang=lang)].value)
 
-    def update_project_options(self, options: 'MutableKeyedOptionDictType') -> None:
+    def update_project_options(self, options: 'MutableKeyedOptionDictType', subproject: SubProject) -> None:
         for key, value in options.items():
             if not key.is_project():
                 continue
             if key not in self.options:
                 self.options[key] = value
                 continue
+            if key.subproject != subproject:
+                raise MesonBugException(f'Tried to set an option for subproject {key.subproject} from {subproject}!')
 
             oldval = self.options[key]
             if type(oldval) is not type(value):
@@ -913,6 +921,11 @@ class CoreData:
                 except MesonException:
                     mlog.warning(f'Old value(s) of {key} are no longer valid, resetting to default ({value.value}).',
                                  fatal=False)
+
+        # Find any extranious keys for this project and remove them
+        for key in list(self.options.keys() - options.keys()):
+            if key.is_project() and key.subproject == subproject:
+                del self.options[key]
 
     def is_cross_build(self, when_building_for: MachineChoice = MachineChoice.HOST) -> bool:
         if when_building_for == MachineChoice.BUILD:
