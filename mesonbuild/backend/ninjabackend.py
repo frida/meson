@@ -2180,15 +2180,12 @@ class NinjaBackend(backends.Backend):
         compile_args += self.build.get_project_args(swiftc, target.subproject, target.for_machine)
         compile_args += self.build.get_global_args(swiftc, target.for_machine)
         for i in reversed(target.get_include_dirs()):
-            basedir = i.get_curdir()
-            for d in i.get_incdirs():
-                if d not in ('', '.'):
-                    expdir = os.path.join(basedir, d)
-                else:
-                    expdir = basedir
-                srctreedir = os.path.normpath(os.path.join(self.environment.get_build_dir(), self.build_to_src, expdir))
-                sargs = swiftc.get_include_args(srctreedir, False)
-                compile_args += sargs
+            for d in i.expand_incdirs(self.environment.get_build_dir()):
+                srctreedir = os.path.normpath(os.path.join(self.environment.get_build_dir(), self.build_to_src, d.source))
+                compile_args += swiftc.get_include_args(srctreedir, i.is_system)
+                if d.build is not None:
+                    buildtreedir = os.path.normpath(os.path.join(self.environment.get_build_dir(), d.build))
+                    compile_args += swiftc.get_include_args(buildtreedir, i.is_system)
         compile_args += target.get_extra_args('swift')
         link_args = swiftc.get_output_args(os.path.join(self.environment.get_build_dir(), self.get_target_filename(target)))
         link_args += self.build.get_project_link_args(swiftc, target.subproject, target.for_machine)
