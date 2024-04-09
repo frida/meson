@@ -2419,6 +2419,10 @@ class NinjaBackend(backends.Backend):
         for i in reversed(target.get_include_dirs()):
             for path in i.abs_string_list(self.source_dir, self.build_dir):
                 compile_args.extend(swiftc.get_include_args(path, False))
+        for dep in reversed(target.get_external_deps()):
+            if not dep.found():
+                continue
+            compile_args += swiftc.get_dependency_compile_args(dep)
         compile_args += target.get_extra_args('swift')
         link_args = swiftc.get_output_args(os.path.join(self.environment.get_build_dir(), self.get_target_filename(target)))
         link_args += self.build.get_project_link_args(swiftc, target)
