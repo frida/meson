@@ -643,7 +643,7 @@ class Backend:
         if not isinstance(target, build.BuildTarget):
             return False
         for s in target.get_sources():
-            if s.endswith('swift'):
+            if isinstance(s, (str, File)) and s.endswith('swift'):
                 return True
         return False
 
