@@ -2361,13 +2361,16 @@ class NinjaBackend(backends.Backend):
             result.append(self.get_target_filename(l))
         return result
 
-    def split_swift_generated_sources(self, target: build.BuildTarget) -> T.List[str]:
+    def split_swift_generated_sources(self, target: build.BuildTarget) -> T.Tuple[T.List[str], T.List[str]]:
         all_srcs = self.get_target_generated_sources(target)
         srcs: T.List[str] = []
+        others: T.List[str] = []
         for i in all_srcs:
             if i.endswith('.swift'):
                 srcs.append(i)
-        return srcs
+            else:
+                others.append(i)
+        return srcs, others
 
     def generate_swift_target(self, target: build.BuildTarget) -> None:
         module_name = target.swift_module_name
@@ -2441,7 +2444,7 @@ class NinjaBackend(backends.Backend):
             if reldir == '':
                 reldir = '.'
             link_args += ['-L', os.path.normpath(os.path.join(self.environment.get_build_dir(), reldir))]
-        rel_generated = self.split_swift_generated_sources(target)
+        (rel_generated, other_generated) = self.split_swift_generated_sources(target)
         abs_generated = [os.path.join(self.environment.get_build_dir(), x) for x in rel_generated]
         # We need absolute paths because swiftc needs to be invoked in a subdir
         # and this is the easiest way about it.
@@ -2457,7 +2460,7 @@ class NinjaBackend(backends.Backend):
 
         # Swiftc does not seem to be able to emit objects and module files in one go.
         elem = NinjaBuildElement(self.all_outputs, rel_objects, rulename, abssrc)
-        elem.add_dep(in_module_files + rel_generated)
+        elem.add_dep(in_module_files + rel_generated + other_generated)
         elem.add_dep(abs_headers)
         elem.add_item('ARGS', swiftc.get_compile_only_args() + compile_args + header_imports + abs_generated + module_includes)
         elem.add_item('RUNDIR', rundir)
@@ -2467,7 +2470,7 @@ class NinjaBackend(backends.Backend):
         mod_gen_args = [el for el in compile_args if el != '-g']
 
         elem = NinjaBuildElement(self.all_outputs, out_module_name, rulename, abssrc)
-        elem.add_dep(in_module_files + rel_generated)
+        elem.add_dep(in_module_files + rel_generated + other_generated)
         elem.add_item('ARGS', swiftc.get_mod_gen_args() + mod_gen_args + abs_generated + module_includes)
         elem.add_item('RUNDIR', rundir)
         self.add_build(elem)
