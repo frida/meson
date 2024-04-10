@@ -85,6 +85,16 @@ class SwiftCompiler(Compiler):
                     args[i] = '-I' + self.sdk_path + match.group(1)
         return args
 
+    def get_dependency_link_args(self, dep: Dependency) -> T.List[str]:
+        result: T.List[str] = []
+        for arg in dep.get_link_args():
+            if arg.startswith("-Wl,"):
+                for flag in arg[4:].split(","):
+                    result += ["-Xlinker", flag]
+            else:
+                result.append(arg)
+        return result
+
     def depfile_for_object(self, objfile: str) -> T.Optional[str]:
         return os.path.splitext(objfile)[0] + '.' + self.get_depfile_suffix()
 
