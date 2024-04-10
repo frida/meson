@@ -2355,6 +2355,16 @@ class NinjaBackend(backends.Backend):
                 result.append(self.swift_module_file_name(l))
         return result
 
+    def determine_swift_external_dep_link_args(self, target: build.BuildTarget, swiftc: 'SwiftCompiler') -> T.List[str]:
+        args: T.List[str] = []
+        for dep in target.get_external_deps():
+            args += swiftc.get_dependency_link_args(dep)
+        for d in target.get_dependencies():
+            if isinstance(d, build.StaticLibrary):
+                for dep in d.get_external_deps():
+                    args += swiftc.get_dependency_link_args(dep)
+        return args
+
     def get_swift_link_deps(self, target: build.BuildTarget) -> T.List[str]:
         result = []
         for l in target.link_targets:
@@ -2444,6 +2454,7 @@ class NinjaBackend(backends.Backend):
             if reldir == '':
                 reldir = '.'
             link_args += ['-L', os.path.normpath(os.path.join(self.environment.get_build_dir(), reldir))]
+        link_args += self.determine_swift_external_dep_link_args(target, swiftc)
         (rel_generated, other_generated) = self.split_swift_generated_sources(target)
         abs_generated = [os.path.join(self.environment.get_build_dir(), x) for x in rel_generated]
         # We need absolute paths because swiftc needs to be invoked in a subdir
