@@ -2480,20 +2480,10 @@ class NinjaBackend(backends.Backend):
 
         rulename = self.compiler_to_rule_name(swiftc)
 
-        # Swiftc does not seem to be able to emit objects and module files in one go.
-        elem = NinjaBuildElement(self.all_outputs, rel_objects, rulename, abssrc)
+        elem = NinjaBuildElement(self.all_outputs, [out_module_name] + rel_objects, rulename, abssrc)
         elem.add_dep(in_module_files + rel_generated + other_generated)
         elem.add_dep(abs_headers)
-        elem.add_item('ARGS', swiftc.get_compile_only_args() + compile_args + header_imports + abs_generated + module_includes)
-        elem.add_item('RUNDIR', rundir)
-        self.add_build(elem)
-
-        # -g makes swiftc create a .o file with potentially the same name as one of the compile target generated ones.
-        mod_gen_args = [el for el in compile_args if el != '-g']
-
-        elem = NinjaBuildElement(self.all_outputs, out_module_name, rulename, abssrc)
-        elem.add_dep(in_module_files + rel_generated + other_generated)
-        elem.add_item('ARGS', swiftc.get_mod_gen_args() + mod_gen_args + abs_generated + module_includes)
+        elem.add_item('ARGS', swiftc.get_mod_gen_args() + swiftc.get_compile_only_args() + compile_args + header_imports + abs_generated + module_includes)
         elem.add_item('RUNDIR', rundir)
         self.add_build(elem)
         if isinstance(target, build.StaticLibrary):
