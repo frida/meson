@@ -222,6 +222,10 @@ class DependencyFallbacksHolder(MesonInterpreterObject):
 
         info: mlog.TV_LoggableList = [mlog.blue('(cached)')]
         override = self.build.dependency_overrides[self.for_machine].get(identifier)
+        if not override and self.subproject_name:
+            identifier_without_modules = tuple((k, () if k in {'modules', 'optional_modules'} else v) for k, v in identifier)
+            if identifier_without_modules != identifier:
+                override = self.build.dependency_overrides[self.for_machine].get(identifier_without_modules)
         if override:
             if override.explicit:
                 info = [mlog.blue('(overridden)')]
