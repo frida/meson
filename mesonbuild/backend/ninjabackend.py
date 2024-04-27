@@ -2769,8 +2769,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             self.generate_rust_compile_rules(T.cast('RustCompiler', compiler))
             return
         if langname == 'swift':
-            if self.environment.machines.matches_build_machine(compiler.for_machine):
-                self.generate_swift_compile_rules(T.cast('SwiftCompiler', compiler))
+            self.generate_swift_compile_rules(T.cast('SwiftCompiler', compiler))
             return
         if langname == 'cython':
             self.generate_cython_compile_rules(compiler)
