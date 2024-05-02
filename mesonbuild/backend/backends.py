@@ -1050,7 +1050,7 @@ class Backend:
                     if dep.name == 'glib-2.0' and dep.version_reqs is not None:
                         for req in dep.version_reqs:
                             if req.startswith(('>=', '==')):
-                                commands += ['--target-glib', req[2:]]
+                                commands += ['--target-glib', req[2:].lstrip()]
                                 break
                     commands += ['--pkg', dep.name]
                 elif isinstance(dep, dependencies.ExternalLibrary):
