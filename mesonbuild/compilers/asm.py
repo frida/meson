@@ -12,6 +12,7 @@ from .mixins.metrowerks import MetrowerksCompiler, mwasmarm_instruction_set_args
 from .mixins.ti import TICompiler
 
 if T.TYPE_CHECKING:
+    from ..dependencies import Dependency
     from ..environment import Environment
     from ..linkers.linkers import DynamicLinker
     from ..mesonlib import MachineChoice
@@ -298,6 +299,9 @@ class MasmARMCompiler(ASMCompiler):
 
     def get_depfile_format(self) -> str:
         return 'msvc'
+
+    def get_dependency_compile_args(self, dep: 'Dependency') -> T.List[str]:
+        return [arg for arg in super().get_dependency_compile_args(dep) if not arg.startswith("-D")]
 
     def depfile_for_object(self, objfile: str) -> T.Optional[str]:
         return None
