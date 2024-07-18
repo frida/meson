@@ -208,6 +208,9 @@ class MasmARMCompiler(Compiler):
     language = 'masm'
     id = 'armasm'
 
+    def get_argument_syntax(self) -> str:
+        return 'msvc'
+
     def needs_static_linker(self) -> bool:
         return True
 
