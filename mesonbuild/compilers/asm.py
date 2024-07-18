@@ -253,6 +253,9 @@ class MasmARMCompiler(Compiler):
     def get_crt_compile_args(self, crt_val: str, buildtype: str) -> T.List[str]:
         return []
 
+    def get_dependency_compile_args(self, dep: 'Dependency') -> T.List[str]:
+        return [arg for arg in super().get_dependency_compile_args(dep) if not arg.startswith("-D")]
+
     def depfile_for_object(self, objfile: str) -> T.Optional[str]:
         return None
 
