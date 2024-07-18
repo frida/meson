@@ -255,6 +255,9 @@ class MasmARMCompiler(ASMCompiler):
     id = 'armasm'
     _SUPPORTED_ARCHES = {'arm', 'aarch64'}
 
+    def get_argument_syntax(self) -> str:
+        return 'msvc'
+
     def needs_static_linker(self) -> bool:
         return True
 
