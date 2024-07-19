@@ -626,6 +626,8 @@ def detect_windows_arch(compilers: CompilerDict) -> str:
         compiler = T.cast('VisualStudioLikeCompiler', compiler)
         if compiler.id == 'msvc' and (compiler.target in {'x86', '80x86'}):
             return 'x86'
+        if compiler.id == 'msvc' and os_arch == 'arm64' and compiler.target == 'x64':
+            return 'x86_64'
         if compiler.id == 'clang-cl' and (compiler.target in {'x86', 'i686'}):
             return 'x86'
         if compiler.id == 'gcc' and compiler.has_builtin_define('__i386__'):
