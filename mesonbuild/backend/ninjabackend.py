@@ -1547,6 +1547,8 @@ class NinjaBackend(backends.Backend):
         for dep in itertools.chain(target.link_targets, target.link_whole_targets):
             if not dep.is_linkable_target():
                 continue
+            if isinstance(dep, (build.CustomTarget, build.CustomTargetIndex)):
+                continue
             for i in dep.sources:
                 if hasattr(i, 'fname'):
                     i = i.fname
