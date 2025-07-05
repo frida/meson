@@ -745,7 +745,7 @@ class GnuLikeDynamicLinkerMixin(DynamicLinkerBase):
 
     def thread_flags(self) -> T.List[str]:
         m = self.environment.machines[self.for_machine]
-        if m.is_haiku() or m.is_qnx():
+        if m.is_haiku() or m.is_qnx() or m.is_none():
             return []
         return ['-pthread']
 
