@@ -1238,7 +1238,7 @@ class CLikeCompiler(Compiler):
     def thread_flags(self, env: 'Environment') -> T.List[str]:
         # TODO: does this belong here or in GnuLike or maybe PosixLike?
         host_m = env.machines[self.for_machine]
-        if host_m.is_haiku() or host_m.is_darwin():
+        if host_m.is_haiku() or host_m.is_darwin() or host_m.is_none():
             return []
         return ['-pthread']
 

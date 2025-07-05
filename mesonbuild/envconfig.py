@@ -366,6 +366,12 @@ class MachineInfo(HoldableObject):
         """Machine is IRIX?"""
         return self.system.startswith('irix')
 
+    def is_none(self) -> bool:
+        """
+        Machine has no standard OS, e.g. kernel or firmware?
+        """
+        return self.system == 'none'
+
     # Various prefixes and suffixes for import libraries, shared libraries,
     # static libraries, and executables.
     # Versioning is added to these names in the backends as-needed.
