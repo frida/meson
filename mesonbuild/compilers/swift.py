@@ -70,7 +70,7 @@ class SwiftCompiler(Compiler):
         return ['-emit-dependencies']
 
     def get_dependency_compile_args(self, dep: Dependency) -> T.List[str]:
-        args = dep.get_compile_args()
+        args = [arg for arg in dep.get_compile_args() if arg != '-pthread']
         # Some deps might sneak in a hardcoded path to an older macOS SDK, which can
         # cause compilation errors. Let's replace all .sdk paths with the current one.
         # SwiftPM does it this way: https://github.com/swiftlang/swift-package-manager/pull/6772
@@ -91,7 +91,7 @@ class SwiftCompiler(Compiler):
             if arg.startswith("-Wl,"):
                 for flag in arg[4:].split(","):
                     result += ["-Xlinker", flag]
-            else:
+            elif arg != '-pthread':
                 result.append(arg)
         return result
 
