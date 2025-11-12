@@ -92,6 +92,8 @@ class SwiftCompiler(Compiler):
                 for flag in arg[4:].split(","):
                     result += ["-Xlinker", flag]
             elif arg != '-pthread':
+                if arg.endswith('.a'):
+                    result.append('-Xlinker')
                 result.append(arg)
         return result
 
