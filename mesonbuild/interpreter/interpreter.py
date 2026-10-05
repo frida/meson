@@ -3262,7 +3262,6 @@ class Interpreter(InterpreterBase, HoldableObject):
         var_types=STR_VARG,
         kw_types=[NATIVE_KW, LANGUAGE_KW],
     )
-    @apply_machine_map
     def func_add_project_arguments(self, node: mparser.FunctionNode, args: T.Tuple[T.List[str]], kwargs: 'kwtypes.FuncAddProjectArgs') -> None:
         self._add_project_arguments(node, self.current_build_project().project_args[kwargs['native']],
                                     args[0], kwargs)
@@ -3272,7 +3271,6 @@ class Interpreter(InterpreterBase, HoldableObject):
         var_types=STR_VARG,
         kw_types=[NATIVE_KW, LANGUAGE_KW],
     )
-    @apply_machine_map
     def func_add_project_link_arguments(self, node: mparser.FunctionNode, args: T.Tuple[T.List[str]], kwargs: 'kwtypes.FuncAddProjectArgs') -> None:
         self._add_project_arguments(node, self.current_build_project().project_link_args[kwargs['native']],
                                     args[0], kwargs)
