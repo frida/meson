@@ -39,7 +39,8 @@ t2 = executable('test@0@'.format('@0@'.format(var2)), sources: ['t2.cpp'], link_
 t3 = executable(var3, 't3.cpp', link_with: [sharedlib, staticlib], dependencies: [dep1])
 
 cus3 = custom_target('custom target test 3', output: 'file4', input: t3,
-                     command: [find_program('cp.py'), '@INPUT@', '@OUTPUT@'])
+                     command: [find_program('cp.py'), '@INPUT@', '@OUTPUT@'],
+                     depends: t1)
 
 ### BEGIN: Test inspired by taisei: https://github.com/taisei-project/taisei/blob/master/meson.build#L293
 systype = '@0@'.format(host_machine.system())
@@ -57,6 +58,21 @@ message(osmesa_lib_name) # Infinite recursion gets triggered here when the param
 test('test case 1', t1)
 test('test case 2', t2, depends: t3)
 benchmark('benchmark 1', t3, args: [cus1, cus2, cus3])
+
+### BEGIN: Stuff to test the handling of `UnknownValue`
+var_1 = 1
+var_2 = 2
+unknown_var = 'var_1'
+if host_machine.system() == 'windows'
+    unknown_var = 'var_2'
+endif
+# The IntrospectionInterpreter can't know the value of unknown_var and use the `UnknownValue` class.
+
+message(get_variable(unknown_var))
+
+dependency(unknown_var, version: [unknown_var], required: false)
+dependency(unknown_var, version: unknown_var, required: false)
+### END: Stuff to test the handling of `UnknownValue`
 
 ### Stuff to test the AST JSON printer
 foreach x : ['a', 'b', 'c']

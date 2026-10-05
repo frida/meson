@@ -10,17 +10,18 @@ from ..mesonlib import MesonException
 
 if T.TYPE_CHECKING:
     from ..build import Build
-    from ..interpreter import Interpreter
 
 class Vs2012Backend(Vs2010Backend):
 
     name = 'vs2012'
 
-    def __init__(self, build: T.Optional[Build], interpreter: T.Optional[Interpreter]):
-        super().__init__(build, interpreter)
+    def __init__(self, build: T.Optional[Build]):
+        super().__init__(build)
         self.vs_version = '2012'
         self.sln_file_version = '12.00'
         self.sln_version_comment = '2012'
+
+    def detect_toolset(self) -> None:
         if self.environment is not None:
             # TODO: we assume host == build
             comps = self.environment.coredata.compilers.host

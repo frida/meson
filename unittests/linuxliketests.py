@@ -9,6 +9,7 @@ import textwrap
 import os
 import shutil
 import hashlib
+import zipfile
 from unittest import mock, skipUnless, SkipTest
 from glob import glob
 from pathlib import Path
@@ -25,27 +26,39 @@ import mesonbuild.modules.gnome
 from mesonbuild.mesonlib import (
     MachineChoice, is_windows, is_osx, is_cygwin, is_openbsd, is_haiku,
     is_sunos, windows_proof_rmtree, version_compare, is_linux,
-    OptionKey, EnvironmentException
+    EnvironmentException
 )
+from mesonbuild.options import OptionKey
 from mesonbuild.compilers import (
     detect_c_compiler, detect_cpp_compiler, compiler_from_language,
 )
-from mesonbuild.compilers.c import AppleClangCCompiler
+from mesonbuild.compilers.c import AppleClangCCompiler, ElbrusCompiler
 from mesonbuild.compilers.cpp import AppleClangCPPCompiler
 from mesonbuild.compilers.objc import AppleClangObjCCompiler
 from mesonbuild.compilers.objcpp import AppleClangObjCPPCompiler
-from mesonbuild.dependencies.pkgconfig import PkgConfigDependency, PkgConfigCLI, PkgConfigInterface
+from mesonbuild.dependencies.pkgconfig import (
+    PkgConfigDependency, PkgConfigCLI, PkgConfigCLIImplementation, PkgConfigInterface,
+)
+from mesonbuild.programs import NonExistingExternalProgram
 import mesonbuild.modules.pkgconfig
 
 PKG_CONFIG = os.environ.get('PKG_CONFIG', 'pkg-config')
 
 
 from run_tests import (
-    get_fake_env
+    get_fake_env, Backend,
 )
 
 from .baseplatformtests import BasePlatformTests
-from .helpers import *
+from .helpers import (
+    skip_if_not_language, skip_if_not_base_option, get_rpath,
+    skipIfNoExecutable, skipIfNoPkgconfig, skipIfNoPkgconfigDep,
+    chdir, get_soname
+)
+
+if T.TYPE_CHECKING:
+    from mesonbuild.compilers import Compiler
+
 
 def _prepend_pkg_config_path(path: str) -> str:
     """Prepend a string value to pkg_config_path
@@ -103,6 +116,21 @@ class LinuxlikeTests(BasePlatformTests):
         soname = get_soname(lib1)
         self.assertEqual(soname, 'libmylib.so')
 
+    @skip_if_not_language('rust')
+    def test_rust_soname(self):
+        '''
+        Test that the soname is set correctly for shared libraries. This can't
+        be an ordinary test case because we need to run `readelf` and actually
+        check the soname.
+        https://github.com/mesonbuild/meson/issues/785
+        '''
+        testdir = os.path.join(self.rust_test_dir, '2 sharedlib')
+        self.init(testdir)
+        self.build()
+        lib1 = os.path.join(self.builddir, 'cdylib/libnot_so_rusty.so')
+        soname = get_soname(lib1)
+        self.assertEqual(soname, 'libnot_so_rusty.so')
+
     def test_custom_soname(self):
         '''
         Test that the soname is set correctly for shared libraries when
@@ -147,7 +175,7 @@ class LinuxlikeTests(BasePlatformTests):
         testdir = os.path.join(self.common_test_dir, '44 pkgconfig-gen')
         self.init(testdir)
         env = get_fake_env(testdir, self.builddir, self.prefix)
-        kwargs = {'required': True, 'silent': True}
+        kwargs = {'required': True, 'silent': True, 'native': MachineChoice.HOST}
         os.environ['PKG_CONFIG_LIBDIR'] = self.privatedir
         foo_dep = PkgConfigDependency('libfoo', env, kwargs)
         self.assertTrue(foo_dep.found())
@@ -163,7 +191,23 @@ class LinuxlikeTests(BasePlatformTests):
         self.assertEqual(libhello_nolib.get_variable(pkgconfig='foo'), 'bar')
         self.assertEqual(libhello_nolib.get_variable(pkgconfig='prefix'), self.prefix)
         impl = libhello_nolib.pkgconfig
-        if not isinstance(impl, PkgConfigCLI) or version_compare(impl.pkgbin_version, ">=0.29.1"):
+        if isinstance(impl, PkgConfigCLI) and impl.implementation == PkgConfigCLIImplementation.PKGCONF \
+                and version_compare(impl.pkgbin_version, ">=3.0.4") \
+                and version_compare(impl.pkgbin_version, "<3.0.5"):
+            # pkgconf 3.0.4 (only) unescapes '\ ' when storing a variable's
+            # value (fixing double-escaping when the variable is expanded into a
+            # fragment, see https://github.com/pkgconf/pkgconf/issues/575), so
+            # --variable returns the canonical (unescaped) value instead of
+            # preserving the literal backslash. This was superseded in 3.0.5,
+            # which fixes the double-escaping differently (consuming quoting
+            # after expansion rather than at variable-storage time) and so
+            # restores the literal-backslash behavior below. See
+            # https://github.com/pkgconf/pkgconf/issues/579.
+            self.assertEqual(libhello_nolib.get_variable(pkgconfig='escaped_var'), 'hello world')
+        elif not isinstance(impl, PkgConfigCLI) or (
+                impl.implementation == PkgConfigCLIImplementation.FREEDESKTOP and version_compare(impl.pkgbin_version, ">=0.29.1")) or (
+                impl.implementation == PkgConfigCLIImplementation.PKGCONF and (
+                    version_compare(impl.pkgbin_version, "<3.0.4") or version_compare(impl.pkgbin_version, ">=3.0.5"))):
             self.assertEqual(libhello_nolib.get_variable(pkgconfig='escaped_var'), r'hello\ world')
         self.assertEqual(libhello_nolib.get_variable(pkgconfig='unescaped_var'), 'hello world')
 
@@ -248,6 +292,22 @@ class LinuxlikeTests(BasePlatformTests):
             content = f.read()
             self.assertNotIn('-lstat2', content)
 
+    def test_pkgconfig_fibonacci(self):
+        testdir = os.path.join(self.unit_test_dir, '138 pkgconfig fibonacci')
+        self.init(testdir)
+        self.build()
+
+        with open(os.path.join(self.builddir, 'meson-uninstalled/top-uninstalled.pc'), encoding='utf-8') as f:
+            lines = f.readlines()
+
+        libs_line = next(l for l in lines if l.startswith('Libs:'))
+        libs = libs_line.split()
+        num_libs = len(libs) - 2
+        for i in libs[2:]:
+            num_libs -= 1
+            self.assertTrue(i.startswith('-ll'))
+            self.assertEqual(int(i[3:]), num_libs)
+
     @mock.patch.dict(os.environ)
     def test_pkgconfig_uninstalled(self):
         testdir = os.path.join(self.common_test_dir, '44 pkgconfig-gen')
@@ -280,7 +340,6 @@ class LinuxlikeTests(BasePlatformTests):
 
         symdir = f'{self.builddir}-symlink'
         os.symlink(self.builddir, symdir)
-        self.addCleanup(os.unlink, symdir)
         self.change_builddir(symdir)
 
         self.init(testdir)
@@ -316,6 +375,30 @@ class LinuxlikeTests(BasePlatformTests):
         testdir = os.path.join(self.framework_test_dir, '7 gnome')
         self.init(testdir, extra_args=['-Db_sanitize=address', '-Db_lundef=false'])
         self.build()
+
+    @skipIfNoExecutable('g-ir-scanner')
+    @skipIfNoPkgconfigDep('gobject-2.0')
+    def test_generate_gir_target_dependencies(self):
+        testdir = os.path.join(self.framework_test_dir, '12 multiple gir')
+        self.init(testdir)
+
+        targets = {target['name']: target for target in self.introspect('--targets')}
+        for gir, library in [('Meson-1.0.gir', 'girlib'),
+                             ('MesonSub-1.0.gir', 'girsubproject')]:
+            self.assertIn(targets[library]['id'], targets[gir]['depends'])
+
+    def test_qt5dependency_no_lrelease(self):
+        '''
+        Test that qt5 detection with qmake works. This can't be an ordinary
+        test case because it involves setting the environment.
+        '''
+        testdir = os.path.join(self.framework_test_dir, '4 qt')
+        def _no_lrelease(self, prog, *args, **kwargs):
+            if 'lrelease' in prog:
+                return NonExistingExternalProgram(prog)
+            return self._interpreter.find_program_impl(prog, *args, **kwargs)
+        with mock.patch.object(mesonbuild.modules.ModuleState, 'find_program', _no_lrelease):
+            self.init(testdir, inprocess=True, extra_args=['-Dmethod=qmake', '-Dexpect_lrelease=false'])
 
     def test_qt5dependency_qmake_detection(self):
         '''
@@ -432,6 +515,26 @@ class LinuxlikeTests(BasePlatformTests):
         libdir = self.installdir + os.path.join(self.prefix, self.libdir)
         self._test_soname_impl(libdir, True)
 
+    @skip_if_not_base_option('b_sanitize')
+    def test_c_link_args_and_env(self):
+        '''
+        Test that the CFLAGS / CXXFLAGS environment variables are
+        included on the linker command line when c_link_args is
+        set but c_args is not.
+        '''
+        if is_cygwin():
+            raise SkipTest('asan not available on Cygwin')
+        if is_openbsd():
+            raise SkipTest('-fsanitize=address is not supported on OpenBSD')
+        if is_sunos():
+            raise SkipTest('-fsanitize=address is not supported on illumos')
+
+        testdir = os.path.join(self.common_test_dir, '1 trivial')
+        env = {'CFLAGS': '-fsanitize=address'}
+        self.init(testdir, extra_args=['-Dc_link_args="-L/usr/lib"'],
+                  override_envvars=env)
+        self.build()
+
     def test_compiler_check_flags_order(self):
         '''
         Test that compiler check flags override all other flags. This can't be
@@ -485,7 +588,7 @@ class LinuxlikeTests(BasePlatformTests):
         # Check that all the listed -std=xxx options for this compiler work just fine when used
         # https://en.wikipedia.org/wiki/Xcode#Latest_versions
         # https://www.gnu.org/software/gcc/projects/cxx-status.html
-        key = OptionKey('std', lang=compiler.language)
+        key = OptionKey(f'{compiler.language}_std')
         for v in compiler.get_options()[key].choices:
             # we do it like this to handle gnu++17,c++17 and gnu17,c17 cleanly
             # thus, C++ first
@@ -576,8 +679,6 @@ class LinuxlikeTests(BasePlatformTests):
         Test that files installed by these tests have the correct permissions.
         Can't be an ordinary test because our installed_files.txt is very basic.
         '''
-        if is_cygwin():
-            self.new_builddir_in_tempdir()
         # Test file modes
         testdir = os.path.join(self.common_test_dir, '12 data')
         self.init(testdir)
@@ -630,8 +731,6 @@ class LinuxlikeTests(BasePlatformTests):
         '''
         Test that files are installed with correct permissions using install_mode.
         '''
-        if is_cygwin():
-            self.new_builddir_in_tempdir()
         testdir = os.path.join(self.common_test_dir, '190 install_mode')
         self.init(testdir)
         self.build()
@@ -670,8 +769,6 @@ class LinuxlikeTests(BasePlatformTests):
         install umask of 022, regardless of the umask at time the worktree
         was checked out or the build was executed.
         '''
-        if is_cygwin():
-            self.new_builddir_in_tempdir()
         # Copy source tree to a temporary directory and change permissions
         # there to simulate a checkout with umask 002.
         orig_testdir = os.path.join(self.unit_test_dir, '26 install umask')
@@ -756,8 +853,13 @@ class LinuxlikeTests(BasePlatformTests):
         self.assertNotIn('-std=c++98', plain_comp)
         self.assertNotIn('-std=c++11', plain_comp)
         # Now werror
-        self.assertIn('-Werror', plain_comp)
-        self.assertNotIn('-Werror', c98_comp)
+        self.assertIn('-Werror', plain_comp.split())
+        self.assertNotIn('-Werror', c98_comp.split())
+
+    def test_sanity_check_fails_on_bad_c_args(self):
+        testdir = os.path.join(self.common_test_dir, '1 trivial')
+        with self.assertRaises((subprocess.CalledProcessError, RuntimeError)):
+            self.init(testdir, extra_args=['-Dc_args=-Wbad-flag-does-not-exist'])
 
     def test_run_installed(self):
         if is_cygwin() or is_osx():
@@ -978,6 +1080,24 @@ class LinuxlikeTests(BasePlatformTests):
             self.assertEqual(got_rpath, yonder_libdir, rpath_format)
 
     @skip_if_not_base_option('b_sanitize')
+    def test_env_cflags_ldflags(self):
+        if is_cygwin():
+            raise SkipTest('asan not available on Cygwin')
+        if is_openbsd():
+            raise SkipTest('-fsanitize=address is not supported on OpenBSD')
+        if is_sunos():
+            raise SkipTest('-fsanitize=address is not supported on illumos')
+
+        testdir = os.path.join(self.common_test_dir, '1 trivial')
+        env = {'CFLAGS': '-fsanitize=address', 'LDFLAGS': '-I.'}
+        self.init(testdir, override_envvars=env)
+        self.build()
+        compdb = self.get_compdb()
+        for i in compdb:
+            self.assertIn("-fsanitize=address", i["command"])
+        self.wipe()
+
+    @skip_if_not_base_option('b_sanitize')
     def test_pch_with_address_sanitizer(self):
         if is_cygwin():
             raise SkipTest('asan not available on Cygwin')
@@ -1023,14 +1143,12 @@ class LinuxlikeTests(BasePlatformTests):
         self.init(testdir, extra_args=['-Db_coverage=true'], default_args=False)
         self.build('reconfigure')
 
+    @skip_if_not_language('vala')
     def test_vala_generated_source_buildir_inside_source_tree(self):
         '''
         Test that valac outputs generated C files in the expected location when
         the builddir is a subdir of the source tree.
         '''
-        if not shutil.which('valac'):
-            raise SkipTest('valac not installed.')
-
         testdir = os.path.join(self.vala_test_dir, '8 generated sources')
         newdir = os.path.join(self.builddir, 'srctree')
         shutil.copytree(testdir, newdir)
@@ -1102,8 +1220,8 @@ class LinuxlikeTests(BasePlatformTests):
         self.assertPathExists(os.path.join(pkg_dir, 'librelativepath.pc'))
 
         env = get_fake_env(testdir, self.builddir, self.prefix)
-        env.coredata.set_options({OptionKey('pkg_config_path'): pkg_dir}, subproject='')
-        kwargs = {'required': True, 'silent': True}
+        env.coredata.optstore.set_option(OptionKey('pkg_config_path'), pkg_dir)
+        kwargs = {'required': True, 'silent': True, 'native': MachineChoice.HOST}
         relative_path_dep = PkgConfigDependency('librelativepath', env, kwargs)
         self.assertTrue(relative_path_dep.found())
 
@@ -1118,14 +1236,49 @@ class LinuxlikeTests(BasePlatformTests):
         pkg_dir = os.path.join(testdir, 'pkgconfig')
 
         env = get_fake_env(testdir, self.builddir, self.prefix)
-        env.coredata.set_options({OptionKey('pkg_config_path'): pkg_dir}, subproject='')
+        env.coredata.optstore.set_option(OptionKey('pkg_config_path'), pkg_dir)
 
         # Regression test: This used to modify the value of `pkg_config_path`
         # option, adding the meson-uninstalled directory to it.
         PkgConfigInterface.setup_env({}, env, MachineChoice.HOST, uninstalled=True)
 
-        pkg_config_path = env.coredata.options[OptionKey('pkg_config_path')].value
+        pkg_config_path = env.coredata.optstore.get_value_for('pkg_config_path')
         self.assertEqual(pkg_config_path, [pkg_dir])
+
+    def test_pkgconfig_uninstalled_env_added(self):
+        '''
+        Checks that the meson-uninstalled dir is added to PKG_CONFIG_PATH
+        '''
+        testdir = os.path.join(self.unit_test_dir, '111 pkgconfig duplicate path entries')
+        meson_uninstalled_dir = os.path.join(self.builddir, 'meson-uninstalled')
+
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+
+        newEnv = PkgConfigInterface.setup_env({}, env, MachineChoice.HOST, uninstalled=True)
+
+        pkg_config_path_dirs = newEnv['PKG_CONFIG_PATH'].split(os.pathsep)
+
+        self.assertEqual(len(pkg_config_path_dirs), 1)
+        self.assertEqual(pkg_config_path_dirs[0], meson_uninstalled_dir)
+
+    def test_pkgconfig_uninstalled_env_prepended(self):
+        '''
+        Checks that the meson-uninstalled dir is prepended to PKG_CONFIG_PATH
+        '''
+        testdir = os.path.join(self.unit_test_dir, '111 pkgconfig duplicate path entries')
+        meson_uninstalled_dir = os.path.join(self.builddir, 'meson-uninstalled')
+        external_pkg_config_path_dir = os.path.join('usr', 'local', 'lib', 'pkgconfig')
+
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+
+        env.coredata.optstore.set_option(OptionKey('pkg_config_path'), external_pkg_config_path_dir)
+
+        newEnv = PkgConfigInterface.setup_env({}, env, MachineChoice.HOST, uninstalled=True)
+
+        pkg_config_path_dirs = newEnv['PKG_CONFIG_PATH'].split(os.pathsep)
+
+        self.assertEqual(pkg_config_path_dirs[0], meson_uninstalled_dir)
+        self.assertEqual(pkg_config_path_dirs[1], external_pkg_config_path_dir)
 
     @skipIfNoPkgconfig
     def test_pkgconfig_internal_libraries(self):
@@ -1183,8 +1336,9 @@ class LinuxlikeTests(BasePlatformTests):
         myenv['PKG_CONFIG_PATH'] = _prepend_pkg_config_path(self.privatedir)
         stdo = subprocess.check_output([PKG_CONFIG, '--libs-only-l', 'libsomething'], env=myenv)
         deps = [b'-lgobject-2.0', b'-lgio-2.0', b'-lglib-2.0', b'-lsomething']
-        if is_windows() or is_cygwin() or is_osx() or is_openbsd():
+        if is_windows() or is_osx() or is_openbsd():
             # On Windows, libintl is a separate library
+            # It used to be on Cygwin as well, but no longer is.
             deps.append(b'-lintl')
         self.assertEqual(set(deps), set(stdo.split()))
 
@@ -1319,7 +1473,7 @@ class LinuxlikeTests(BasePlatformTests):
         see: https://github.com/mesonbuild/meson/issues/9000
              https://stackoverflow.com/questions/48532868/gcc-library-option-with-a-colon-llibevent-a
         '''
-        testdir = os.path.join(self.unit_test_dir, '98 link full name','libtestprovider')
+        testdir = os.path.join(self.unit_test_dir, '97 link full name','libtestprovider')
         oldprefix = self.prefix
         # install into installdir without using DESTDIR
         installdir = self.installdir
@@ -1332,7 +1486,7 @@ class LinuxlikeTests(BasePlatformTests):
         self.new_builddir()
         env = {'LIBRARY_PATH': os.path.join(installdir, self.libdir),
                'PKG_CONFIG_PATH': _prepend_pkg_config_path(os.path.join(installdir, self.libdir, 'pkgconfig'))}
-        testdir = os.path.join(self.unit_test_dir, '98 link full name','proguser')
+        testdir = os.path.join(self.unit_test_dir, '97 link full name','proguser')
         self.init(testdir,override_envvars=env)
 
         # test for link with full path
@@ -1445,7 +1599,7 @@ class LinuxlikeTests(BasePlatformTests):
         env = get_fake_env()
         cc = detect_c_compiler(env, MachineChoice.HOST)
         linker = cc.linker
-        if not linker.export_dynamic_args(env):
+        if not linker.export_dynamic_args():
             raise SkipTest('Not applicable for linkers without --export-dynamic')
         self.init(testdir)
         build_ninja = os.path.join(self.builddir, 'build.ninja')
@@ -1551,11 +1705,11 @@ class LinuxlikeTests(BasePlatformTests):
             raise SkipTest('Solaris currently cannot override the linker.')
         if not shutil.which(check):
             raise SkipTest(f'Could not find {check}.')
-        envvars = [mesonbuild.envconfig.ENV_VAR_PROG_MAP[f'{lang}_ld']]
+        envvars = mesonbuild.envconfig.ENV_VAR_PROG_MAP[f'{lang}_ld'].copy()
 
         # Also test a deprecated variable if there is one.
         if f'{lang}_ld' in mesonbuild.envconfig.DEPRECATED_ENV_PROG_MAP:
-            envvars.append(
+            envvars.extend(
                 mesonbuild.envconfig.DEPRECATED_ENV_PROG_MAP[f'{lang}_ld'])
 
         for envvar in envvars:
@@ -1565,6 +1719,8 @@ class LinuxlikeTests(BasePlatformTests):
                 if isinstance(comp, (AppleClangCCompiler, AppleClangCPPCompiler,
                                      AppleClangObjCCompiler, AppleClangObjCPPCompiler)):
                     raise SkipTest('AppleClang is currently only supported with ld64')
+                if isinstance(comp, ElbrusCompiler):
+                    raise SkipTest('ElbrusCompiler currently cannot override the linker.')
                 if lang != 'rust' and comp.use_linker_args('bfd', '') == []:
                     raise SkipTest(
                         f'Compiler {comp.id} does not support using alternative linkers')
@@ -1578,6 +1734,9 @@ class LinuxlikeTests(BasePlatformTests):
 
     def test_ld_environment_variable_lld(self):
         self._check_ld('ld.lld', 'lld', 'c', 'ld.lld')
+
+    def test_ld_environment_variable_wild(self):
+        self._check_ld('ld.wild', 'wild', 'c', 'ld.wild')
 
     @skip_if_not_language('rust')
     @skipIfNoExecutable('ld.gold')  # need an additional check here because _check_ld checks for gcc
@@ -1681,18 +1840,13 @@ class LinuxlikeTests(BasePlatformTests):
             self.assertNotIn('-lfoo', content)
 
     def test_prelinking(self):
-        # Prelinking currently only works on recently new GNU toolchains.
-        # Skip everything else. When support for other toolchains is added,
-        # remove limitations as necessary.
-        if is_osx():
-            raise SkipTest('Prelinking not supported on Darwin.')
-        if 'clang' in os.environ.get('CC', 'dummy'):
-            raise SkipTest('Prelinking not supported with Clang.')
         testdir = os.path.join(self.unit_test_dir, '86 prelinking')
         env = get_fake_env(testdir, self.builddir, self.prefix)
         cc = detect_c_compiler(env, MachineChoice.HOST)
         if cc.id == "gcc" and not version_compare(cc.version, '>=9'):
             raise SkipTest('Prelinking not supported with gcc 8 or older.')
+        if cc.id == 'clang' and not version_compare(cc.version, '>=14'):
+            raise SkipTest('Prelinking not supported with Clang 13 or older.')
         self.init(testdir)
         self.build()
         outlib = os.path.join(self.builddir, 'libprelinked.a')
@@ -1702,10 +1856,9 @@ class LinuxlikeTests(BasePlatformTests):
         p = subprocess.run([ar, 't', outlib],
                            stdout=subprocess.PIPE,
                            stderr=subprocess.DEVNULL,
-                           text=True, timeout=1)
+                           encoding='utf-8', text=True, timeout=1)
         obj_files = p.stdout.strip().split('\n')
-        self.assertEqual(len(obj_files), 1)
-        self.assertTrue(obj_files[0].endswith('-prelink.o'))
+        self.assertTrue(any(o.endswith('-prelink.o') for o in obj_files))
 
     def do_one_test_with_nativefile(self, testdir, args):
         testdir = os.path.join(self.common_test_dir, testdir)
@@ -1741,7 +1894,7 @@ class LinuxlikeTests(BasePlatformTests):
 
     @skipUnless(is_linux() or is_osx(), 'Test only applicable to Linux and macOS')
     def test_install_strip(self):
-        testdir = os.path.join(self.unit_test_dir, '104 strip')
+        testdir = os.path.join(self.unit_test_dir, '103 strip')
         self.init(testdir)
         self.build()
 
@@ -1816,3 +1969,181 @@ class LinuxlikeTests(BasePlatformTests):
         self.assertIn('build t9-e1: c_LINKER t9-e1.p/main.c.o | libt9-s1.a libt9-s2.a libt9-s3.a\n', content)
         self.assertIn('build t12-e1: c_LINKER t12-e1.p/main.c.o | libt12-s1.a libt12-s2.a libt12-s3.a\n', content)
         self.assertIn('build t13-e1: c_LINKER t13-e1.p/main.c.o | libt12-s1.a libt13-s3.a\n', content)
+
+    def test_top_options_in_sp(self):
+        testdir = os.path.join(self.unit_test_dir, '127 pkgsubproj')
+        self.init(testdir)
+
+    def test_unreadable_dir_in_declare_dep(self):
+        testdir = os.path.join(self.unit_test_dir, '125 declare_dep var')
+        tmpdir = Path(tempfile.mkdtemp())
+        self.addCleanup(windows_proof_rmtree, tmpdir)
+        declaredepdir = tmpdir / 'test'
+        declaredepdir.mkdir()
+        try:
+            tmpdir.chmod(0o444)
+            self.init(testdir, extra_args=f'-Ddir={declaredepdir}')
+        finally:
+            tmpdir.chmod(0o755)
+
+    def check_has_flag(self, compdb, src, argument):
+        for i in compdb:
+            if src in i['file']:
+                self.assertIn(argument, i['command'])
+                return
+        self.fail(f'Source {src} not found in compdb')
+
+    def test_persp_options(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'{self.backend.name!r} backend can\'t install files')
+
+        testdir = os.path.join(self.unit_test_dir, '122 persp options')
+
+        with self.subTest('init'):
+            self.init(testdir, extra_args='-Doptimization=1')
+            compdb = self.get_compdb()
+            mainsrc = 'toplevel.c'
+            sub1src = 'sub1.c'
+            sub2src = 'sub2.c'
+            self.check_has_flag(compdb, mainsrc, '-O1')
+            self.check_has_flag(compdb, sub1src, '-O1')
+            self.check_has_flag(compdb, sub2src, '-O1')
+
+        # Set subproject option to O2
+        with self.subTest('set subproject option'):
+            self.setconf(['-Dround=2', '-D', 'sub2:optimization=3'])
+            compdb = self.get_compdb()
+            self.check_has_flag(compdb, mainsrc, '-O1')
+            self.check_has_flag(compdb, sub1src, '-O1')
+            self.check_has_flag(compdb, sub2src, '-O3')
+
+        # Change an already set override.
+        with self.subTest('change subproject option'):
+            self.setconf(['-Dround=3', '-D', 'sub2:optimization=2'])
+            compdb = self.get_compdb()
+            self.check_has_flag(compdb, mainsrc, '-O1')
+            self.check_has_flag(compdb, sub1src, '-O1')
+            self.check_has_flag(compdb, sub2src, '-O2')
+
+        # Set top level option to O3
+        with self.subTest('change main project option'):
+            self.setconf(['-Dround=4', '-D:optimization=3'])
+            compdb = self.get_compdb()
+            self.check_has_flag(compdb, mainsrc, '-O3')
+            self.check_has_flag(compdb, sub1src, '-O1')
+            self.check_has_flag(compdb, sub2src, '-O2')
+
+        # Unset subproject
+        with self.subTest('unset subproject option'):
+            self.setconf(['-Dround=5', '-U', 'sub2:optimization'])
+            compdb = self.get_compdb()
+            self.check_has_flag(compdb, mainsrc, '-O3')
+            self.check_has_flag(compdb, sub1src, '-O1')
+            self.check_has_flag(compdb, sub2src, '-O1')
+
+        # Set global value
+        with self.subTest('set global option'):
+            self.setconf(['-Dround=6', '-D', 'optimization=2'])
+            compdb = self.get_compdb()
+            self.check_has_flag(compdb, mainsrc, '-O3')
+            self.check_has_flag(compdb, sub1src, '-O2')
+            self.check_has_flag(compdb, sub2src, '-O2')
+
+    @skip_if_not_language('rust')
+    @skip_if_not_base_option('b_sanitize')
+    def test_rust_sanitizers(self):
+        args = ['-Drust_nightly=disabled', '-Db_lundef=false']
+        testdir = os.path.join(self.rust_test_dir, '28 mixed')
+        tests = ['address']
+
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.find_library('ubsan', []):
+            tests += ['address,undefined']
+
+        for value in tests:
+            self.init(testdir, extra_args=args + ['-Db_sanitize=' + value])
+            self.build()
+            self.wipe()
+
+    @skip_if_not_language('rust')
+    def test_rust_staticlib_rlib_deps(self):
+        '''
+        Test that when a C executable links with a Rust staticlib, the rlib
+        dependencies of the staticlib are not passed to the C linker.
+        See: https://github.com/mesonbuild/meson/issues/11721
+        '''
+        testdir = os.path.join(self.rust_test_dir, '36 staticlib rlib deps')
+        self.init(testdir)
+        targets = self.introspect('--targets')
+        for t in targets:
+            if t['type'] == 'executable':
+                for src in t['target_sources']:
+                    if 'linker' in src or src['language'] == 'rust':
+                        for param in src['parameters']:
+                            self.assertNotIn('liblib.rlib', param)
+
+    @skip_if_not_language('java')
+    def test_jar_install_reproducible(self):
+        '''
+        Test that a jar without a Class-Path manifest attribute is installed
+        unmodified, so that its manifest keeps the timestamp from build time
+        instead of getting stamped with the time of installation.
+        See https://reproducible-builds.org/ for why this is good.
+        '''
+        testdir = os.path.join(self.java_test_dir, '1 basic')
+        self.init(testdir)
+        self.build()
+        self.install()
+        built = Path(self.builddir, 'myprog.jar').read_bytes()
+        installed = Path(self.installdir, 'usr/bin/myprog.jar').read_bytes()
+        self.assertEqual(built, installed)
+
+    @skip_if_not_language('java')
+    def test_jar_install_strips_classpath(self):
+        '''
+        Test that installing a jar that links with other jars strips the
+        Class-Path attribute from its manifest while preserving the other
+        attributes, the entry order and the entry timestamps.
+        '''
+        testdir = os.path.join(self.java_test_dir, '7 linking')
+        self.init(testdir)
+        self.build()
+        self.install()
+        with zipfile.ZipFile(os.path.join(self.builddir, 'myprog.jar')) as jar:
+            manifest = jar.read('META-INF/MANIFEST.MF').decode('utf-8')
+            self.assertIn('Class-Path:', manifest)
+            built_infos = [(i.filename, i.date_time) for i in jar.infolist()]
+            built_contents = {i.filename: jar.read(i) for i in jar.infolist()}
+        with zipfile.ZipFile(os.path.join(self.installdir, 'usr', 'bin', 'myprog.jar')) as jar:
+            manifest = jar.read('META-INF/MANIFEST.MF').decode('utf-8')
+            self.assertNotIn('Class-Path:', manifest)
+            self.assertIn('Main-Class:', manifest)
+            # Entry order and mtimes must be preserved from the built jar
+            installed_infos = [(i.filename, i.date_time) for i in jar.infolist()]
+            self.assertEqual(installed_infos, built_infos)
+            for info in jar.infolist():
+                if info.filename != 'META-INF/MANIFEST.MF':
+                    self.assertEqual(jar.read(info), built_contents[info.filename])
+
+    def test_sanitizers(self):
+        testdir = os.path.join(self.unit_test_dir, '129 sanitizers')
+
+        with self.subTest('no b_sanitize value'):
+            try:
+                out = self.init(testdir)
+                self.assertRegex(out, 'value *: *none')
+            finally:
+                self.wipe()
+
+        for value, expected in { '': 'none',
+                                 'none': 'none',
+                                 'address': 'address',
+                                 'undefined,address': 'address,undefined',
+                                 'address,undefined': 'address,undefined' }.items():
+            with self.subTest('b_sanitize=' + value):
+                try:
+                    out = self.init(testdir, extra_args=['-Db_sanitize=' + value])
+                    self.assertRegex(out, 'value *: *' + expected)
+                finally:
+                    self.wipe()

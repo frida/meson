@@ -10,7 +10,7 @@ this problem, Meson provides an API that makes it easy for any IDE or
 build tools to integrate Meson builds and provide an experience
 comparable to a solution native to the IDE.
 
-All the resources required for such a IDE integration can be found in
+All the resources required for such an IDE integration can be found in
 the `meson-info` directory in the build directory.
 
 The first thing to do when setting up a Meson project in an IDE is to
@@ -64,6 +64,8 @@ specified. The JSON format for one target is defined as follows:
     "build_by_default": true / false,
     "target_sources": [],
     "extra_files": ["/path/to/file1.hpp", "/path/to/file2.hpp"],
+    "dependencies": ["external-dependency-name"],
+    "depends": ["target1-id", "target2-id"],
     "installed": true / false,
 }
 ```
@@ -76,6 +78,11 @@ corresponding install location is set to `null`.
 The `subproject` key specifies the name of the subproject this target
 was defined in, or `null` if the target was defined in the top level
 project.
+
+The `dependencies` key lists external dependencies used by the target.
+The `depends` key lists the IDs of other targets that must be built before
+this target. Those IDs can be looked up in the same targets introspection
+data.
 
 *(New in 0.56.0)* The `extra_files` key lists all files specified via
 the `extra_files` kwarg of a build target. See
@@ -93,12 +100,20 @@ can provide code completion for all source files.
 ```json
 {
     "language": "language ID",
+    "machine": "build" / "host",
     "compiler": ["The", "compiler", "command"],
     "parameters": ["list", "of", "compiler", "parameters"],
     "sources": ["list", "of", "all", "source", "files", "for", "this", "language"],
     "generated_sources": ["list", "of", "all", "source", "files", "that", "where", "generated", "somewhere", "else"]
 }
 ```
+
+*(New in 1.7.0)* The `machine` and `language` keys make it possible to
+to access further information about the compiler in the `compilers`
+introspection information.  `machine` can be absent if `language` is
+`unknown`.  In this case, information about the compiler is not
+available; Meson is therefore unable to know if the output relates
+to either the build of the host machine.
 
 It should be noted that the compiler parameters stored in the
 `parameters` differ from the actual parameters used to compile the

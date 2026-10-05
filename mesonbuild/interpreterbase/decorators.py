@@ -3,23 +3,32 @@
 
 from __future__ import annotations
 
-from .. import mesonlib, mlog
+from .. import coredata, mesonlib, mlog
 from .disabler import Disabler
+from .baseobjects import DefaultObject
 from .exceptions import InterpreterException, InvalidArguments
+from .helpers import resolve_second_level_holders
 from ._unholder import _unholder
 
-from dataclasses import dataclass
-from functools import wraps
+from functools import partial, wraps
 import abc
+import dataclasses
 import itertools
 import copy
 import typing as T
 
+_T = T.TypeVar('_T')
+
 if T.TYPE_CHECKING:
-    from typing_extensions import Protocol
+    from typing_extensions import Protocol, TypeAlias, TypeIs, Unpack
 
     from .. import mparser
-    from .baseobjects import InterpreterObject, SubProject, TV_func, TYPE_var, TYPE_kwargs
+    from ..mesonlib import SubProject
+    from ..modules import ModuleObject, ModuleState
+    from ..mparser import FunctionNode
+    from ..optinterpreter import OptionInterpreter
+    from .baseobjects import InterpreterObject, TV_func, TYPE_var, TYPE_kwargs
+    from .interpreterbase import InterpreterBase
     from .operator import MesonOperator
 
     _TV_IntegerObject = T.TypeVar('_TV_IntegerObject', bound=InterpreterObject, contravariant=True)
@@ -29,58 +38,95 @@ if T.TYPE_CHECKING:
         def __call__(s, self: _TV_IntegerObject, other: _TV_ARG1) -> TYPE_var: ...
     _TV_FN_Operator = T.TypeVar('_TV_FN_Operator', bound=FN_Operator)
 
-def get_callee_args(wrapped_args: T.Sequence[T.Any]) -> T.Tuple['mparser.BaseNode', T.List['TYPE_var'], 'TYPE_kwargs', 'SubProject']:
-    # First argument could be InterpreterBase, InterpreterObject or ModuleObject.
-    # In the case of a ModuleObject it is the 2nd argument (ModuleState) that
-    # contains the needed information.
-    s = wrapped_args[0]
-    if not hasattr(s, 'current_node'):
+    CalleeArgs: TypeAlias = T.Tuple[mparser.BaseNode | None, T.List[TYPE_var], TYPE_kwargs, SubProject]
+
+    MesonVersionTarget = mesonlib.Range[mesonlib.Version] | mesonlib.NoProjectVersion | None
+
+    _FeatureKey: TypeAlias = _T | 'ContainerTypeInfo' | type | tuple[type, ...]
+    _FeatureValue: TypeAlias = str | tuple[str, str]
+    _FeatureValues: TypeAlias = dict[_FeatureKey, _FeatureValue]
+
+    class _KwargInfoKWs(T.TypedDict, T.Generic[_T], total=False):
+        name: str
+        required: bool
+        listify: bool
+        accept_second_level_holder: bool
+        default: _T | None
+        since: str | None
+        since_message: str
+        since_values: _FeatureValues | None
+        deprecated: str | None
+        deprecated_message: str
+        deprecated_values: _FeatureValues | None
+        feature_validator: T.Callable[[_T], T.Iterable[FeatureCheckBase]] | None
+        validator: T.Callable[[T.Any], str | None] | None
+        convertor: T.Callable[[_T], object] | None
+        not_set_warning: str | None
+        extra_types: T.Mapping[type, T.Callable[[object], str]] | None
+        as_default: list[tuple[object, str | tuple[str, str]]] | None
+
+    class _PosArgKWs(T.TypedDict, total=False):
+
+        since: str | None
+        since_message: str
+        since_values: _FeatureValues | None
+        deprecated: str | None
+        deprecated_message: str
+        deprecated_values: _FeatureValues | None
+        feature_validator: T.Callable[[T.Any], T.Iterable[FeatureCheckBase]] | None
+        validator: T.Callable[[T.Any], str | None] | None
+        convertor: T.Callable[[T.Any], object] | None
+        listify: bool
+        accept_second_level_holder: bool
+
+    class _OptArgKWs(_PosArgKWs, total=False):
+
+        default: TYPE_var | None
+        optional_since: str | None
+        optional_since_message: str
+
+    class _VarArgKWs(_PosArgKWs, total=False):
+
+        min_args: int
+        max_args: int
+        variadic_since: str | None
+        variadic_since_message: str
+
+
+def is_module(obj: object) -> TypeIs[ModuleObject]:
+    return not hasattr(obj, 'current_node')
+
+
+@T.overload
+def get_callee_args(wrapped_args: T.Tuple[InterpreterObject, T.List[TYPE_var], TYPE_kwargs]) -> CalleeArgs: ...
+
+
+@T.overload
+def get_callee_args(wrapped_args: T.Tuple[InterpreterBase, FunctionNode, T.List[TYPE_var], TYPE_kwargs]) -> CalleeArgs: ...
+
+
+@T.overload
+def get_callee_args(wrapped_args: T.Tuple[ModuleObject, ModuleState, T.List[TYPE_var], TYPE_kwargs]) -> CalleeArgs: ...
+
+
+@T.overload
+def get_callee_args(wrapped_args: T.Tuple[OptionInterpreter, T.List[TYPE_var], TYPE_kwargs]) -> CalleeArgs: ...
+
+
+def get_callee_args(wrapped_args: T.Union[
+            T.Tuple[InterpreterObject, T.List[TYPE_var], TYPE_kwargs],
+            T.Tuple[InterpreterBase, FunctionNode, T.List[TYPE_var], TYPE_kwargs],
+            T.Tuple[ModuleObject, ModuleState, T.List[TYPE_var], TYPE_kwargs],
+            T.Tuple[OptionInterpreter, T.List[TYPE_var], TYPE_kwargs],
+        ]) -> CalleeArgs:
+    if is_module(wrapped_args[0]):
         s = wrapped_args[1]
-    node = s.current_node
-    subproject = s.subproject
-    args = kwargs = None
-    if len(wrapped_args) >= 3:
-        args = wrapped_args[-2]
-        kwargs = wrapped_args[-1]
-    return node, args, kwargs, subproject
-
-def noPosargs(f: TV_func) -> TV_func:
-    @wraps(f)
-    def wrapped(*wrapped_args: T.Any, **wrapped_kwargs: T.Any) -> T.Any:
-        args = get_callee_args(wrapped_args)[1]
-        if args:
-            raise InvalidArguments('Function does not take positional arguments.')
-        return f(*wrapped_args, **wrapped_kwargs)
-    return T.cast('TV_func', wrapped)
-
-def noKwargs(f: TV_func) -> TV_func:
-    @wraps(f)
-    def wrapped(*wrapped_args: T.Any, **wrapped_kwargs: T.Any) -> T.Any:
-        kwargs = get_callee_args(wrapped_args)[2]
-        if kwargs:
-            raise InvalidArguments('Function does not take keyword arguments.')
-        return f(*wrapped_args, **wrapped_kwargs)
-    return T.cast('TV_func', wrapped)
-
-def stringArgs(f: TV_func) -> TV_func:
-    @wraps(f)
-    def wrapped(*wrapped_args: T.Any, **wrapped_kwargs: T.Any) -> T.Any:
-        args = get_callee_args(wrapped_args)[1]
-        if not isinstance(args, list):
-            mlog.debug('Not a list:', str(args))
-            raise InvalidArguments('Argument not a list.')
-        if not all(isinstance(s, str) for s in args):
-            mlog.debug('Element not a string:', str(args))
-            raise InvalidArguments('Arguments must be strings.')
-        return f(*wrapped_args, **wrapped_kwargs)
-    return T.cast('TV_func', wrapped)
+    else:
+        s = wrapped_args[0]
+    return s.current_node, wrapped_args[-2], wrapped_args[-1], s.subproject
 
 def noArgsFlattening(f: TV_func) -> TV_func:
     setattr(f, 'no-args-flattening', True)  # noqa: B010
-    return f
-
-def noSecondLevelHolderResolving(f: TV_func) -> TV_func:
-    setattr(f, 'no-second-level-holder-flattening', True)  # noqa: B010
     return f
 
 def unholder_return(f: TV_func) -> T.Callable[..., TYPE_var]:
@@ -101,26 +147,19 @@ def disablerIfNotFound(f: TV_func) -> TV_func:
         return ret
     return T.cast('TV_func', wrapped)
 
-@dataclass(repr=False, eq=False)
-class permittedKwargs:
-    permitted: T.Set[str]
-
-    def __call__(self, f: TV_func) -> TV_func:
-        @wraps(f)
-        def wrapped(*wrapped_args: T.Any, **wrapped_kwargs: T.Any) -> T.Any:
-            kwargs = get_callee_args(wrapped_args)[2]
-            unknowns = set(kwargs).difference(self.permitted)
-            if unknowns:
-                ustr = ', '.join([f'"{u}"' for u in sorted(unknowns)])
-                raise InvalidArguments(f'Got unknown keyword arguments {ustr}')
-            return f(*wrapped_args, **wrapped_kwargs)
-        return T.cast('TV_func', wrapped)
+def kwargs_get_close_matches(invalid_kwargs: T.Set[str], valid_kwargs: T.Set[str]) -> T.List[str]:
+    with_close_matches = []
+    from difflib import get_close_matches
+    for invalid in sorted(invalid_kwargs):
+        close_matches = get_close_matches(invalid, valid_kwargs)
+        with_close_matches.append(f'"{invalid}" (did you mean "{close_matches[0]}"?)' if close_matches else f'"{invalid}"')
+    return with_close_matches
 
 def typed_operator(operator: MesonOperator,
                    types: T.Union[T.Type, T.Tuple[T.Type, ...]]) -> T.Callable[['_TV_FN_Operator'], '_TV_FN_Operator']:
     """Decorator that does type checking for operator calls.
 
-    The principle here is similar to typed_pos_args, however much simpler
+    The principle here is similar to TypedArgs, however much simpler
     since only one other object ever is passed
     """
     def inner(f: '_TV_FN_Operator') -> '_TV_FN_Operator':
@@ -133,124 +172,58 @@ def typed_operator(operator: MesonOperator,
     return inner
 
 
-def typed_pos_args(name: str, *types: T.Union[T.Type, T.Tuple[T.Type, ...]],
-                   varargs: T.Optional[T.Union[T.Type, T.Tuple[T.Type, ...]]] = None,
-                   optargs: T.Optional[T.List[T.Union[T.Type, T.Tuple[T.Type, ...]]]] = None,
-                   min_varargs: int = 0, max_varargs: int = 0) -> T.Callable[..., T.Any]:
-    """Decorator that types type checking of positional arguments.
-
-    This supports two different models of optional arguments, the first is the
-    variadic argument model. Variadic arguments are a possibly bounded,
-    possibly unbounded number of arguments of the same type (unions are
-    supported). The second is the standard default value model, in this case
-    a number of optional arguments may be provided, but they are still
-    ordered, and they may have different types.
-
-    This function does not support mixing variadic and default arguments.
-
-    :name: The name of the decorated function (as displayed in error messages)
-    :varargs: They type(s) of any variadic arguments the function takes. If
-        None the function takes no variadic args
-    :min_varargs: the minimum number of variadic arguments taken
-    :max_varargs: the maximum number of variadic arguments taken. 0 means unlimited
-    :optargs: The types of any optional arguments parameters taken. If None
-        then no optional parameters are taken.
-
-    Some examples of usage blow:
-    >>> @typed_pos_args('mod.func', str, (str, int))
-    ... def func(self, state: ModuleState, args: T.Tuple[str, T.Union[str, int]], kwargs: T.Dict[str, T.Any]) -> T.Any:
-    ...     pass
-
-    >>> @typed_pos_args('method', str, varargs=str)
-    ... def method(self, node: BaseNode, args: T.Tuple[str, T.List[str]], kwargs: T.Dict[str, T.Any]) -> T.Any:
-    ...     pass
-
-    >>> @typed_pos_args('method', varargs=str, min_varargs=1)
-    ... def method(self, node: BaseNode, args: T.Tuple[T.List[str]], kwargs: T.Dict[str, T.Any]) -> T.Any:
-    ...     pass
-
-    >>> @typed_pos_args('method', str, optargs=[(str, int), str])
-    ... def method(self, node: BaseNode, args: T.Tuple[str, T.Optional[T.Union[str, int]], T.Optional[str]], kwargs: T.Dict[str, T.Any]) -> T.Any:
-    ...     pass
-
-    When should you chose `typed_pos_args('name', varargs=str,
-    min_varargs=1)` vs `typed_pos_args('name', str, varargs=str)`?
-
-    The answer has to do with the semantics of the function, if all of the
-    inputs are the same type (such as with `files()`) then the former is
-    correct, all of the arguments are string names of files. If the first
-    argument is something else the it should be separated.
-    """
-    def inner(f: TV_func) -> TV_func:
-
-        @wraps(f)
-        def wrapper(*wrapped_args: T.Any, **wrapped_kwargs: T.Any) -> T.Any:
-            args = get_callee_args(wrapped_args)[1]
-
-            # These are implementation programming errors, end users should never see them.
-            assert isinstance(args, list), args
-            assert max_varargs >= 0, 'max_varags cannot be negative'
-            assert min_varargs >= 0, 'min_varags cannot be negative'
-            assert optargs is None or varargs is None, \
-                'varargs and optargs not supported together as this would be ambiguous'
-
-            num_args = len(args)
-            num_types = len(types)
-            a_types = types
-
-            if varargs:
-                min_args = num_types + min_varargs
-                max_args = num_types + max_varargs
-                if max_varargs == 0 and num_args < min_args:
-                    raise InvalidArguments(f'{name} takes at least {min_args} arguments, but got {num_args}.')
-                elif max_varargs != 0 and (num_args < min_args or num_args > max_args):
-                    raise InvalidArguments(f'{name} takes between {min_args} and {max_args} arguments, but got {num_args}.')
-            elif optargs:
-                if num_args < num_types:
-                    raise InvalidArguments(f'{name} takes at least {num_types} arguments, but got {num_args}.')
-                elif num_args > num_types + len(optargs):
-                    raise InvalidArguments(f'{name} takes at most {num_types + len(optargs)} arguments, but got {num_args}.')
-                # Add the number of positional arguments required
-                if num_args > num_types:
-                    diff = num_args - num_types
-                    a_types = tuple(list(types) + list(optargs[:diff]))
-            elif num_args != num_types:
-                raise InvalidArguments(f'{name} takes exactly {num_types} arguments, but got {num_args}.')
-
-            for i, (arg, type_) in enumerate(itertools.zip_longest(args, a_types, fillvalue=varargs), start=1):
-                if not isinstance(arg, type_):
-                    if isinstance(type_, tuple):
-                        shouldbe = 'one of: {}'.format(", ".join(f'"{t.__name__}"' for t in type_))
-                    else:
-                        shouldbe = f'"{type_.__name__}"'
-                    raise InvalidArguments(f'{name} argument {i} was of type "{type(arg).__name__}" but should have been {shouldbe}')
-
-            # Ensure that we're actually passing a tuple.
-            # Depending on what kind of function we're calling the length of
-            # wrapped_args can vary.
-            nargs = list(wrapped_args)
-            i = nargs.index(args)
-            if varargs:
-                # if we have varargs we need to split them into a separate
-                # tuple, as python's typing doesn't understand tuples with
-                # fixed elements and variadic elements, only one or the other.
-                # so in that case we need T.Tuple[int, str, float, T.Tuple[str, ...]]
-                pos = args[:len(types)]
-                var = list(args[len(types):])
-                pos.append(var)
-                nargs[i] = tuple(pos)
-            elif optargs:
-                if num_args < num_types + len(optargs):
-                    diff = num_types + len(optargs) - num_args
-                    nargs[i] = tuple(list(args) + [None] * diff)
-                else:
-                    nargs[i] = tuple(args)
+def _types_description(types: tuple[type | ContainerTypeInfo, ...] | type | ContainerTypeInfo) -> str:
+    candidates: list[str] = []
+    types_tuple = types if isinstance(types, tuple) else (types, )
+    for t in types_tuple:
+        if isinstance(t, ContainerTypeInfo):
+            desc, extra = t.description()
+            if extra:
+                desc = f'"{desc}" {extra}'
             else:
-                nargs[i] = tuple(args)
-            return f(*nargs, **wrapped_kwargs)
+                desc = f'"{desc}"'
+            candidates.append(desc)
+        else:
+            candidates.append(f'"{t.__name__}"')
+    shouldbe = 'one of: ' if len(candidates) > 1 else ''
+    shouldbe += ', '.join(candidates)
+    return shouldbe
 
-        return T.cast('TV_func', wrapper)
-    return inner
+
+def _raw_description(t: object) -> str:
+    """describe a raw type (ie, one that is not a ContainerTypeInfo)."""
+    if isinstance(t, list):
+        if t:
+            return f"array[{' | '.join(sorted(mesonlib.OrderedSet(type(v).__name__ for v in t)))}]"
+        return 'array[]'
+    elif isinstance(t, dict):
+        if t:
+            return f"dict[{' | '.join(sorted(mesonlib.OrderedSet(type(v).__name__ for v in t.values())))}]"
+        return 'dict[]'
+    return type(t).__name__
+
+
+def _check_value_type(types: tuple[type | ContainerTypeInfo, ...] | type | ContainerTypeInfo,
+                      value: T.Any) -> bool:
+    types_tuple = types if isinstance(types, tuple) else (types, )
+    for t in types_tuple:
+        if isinstance(t, ContainerTypeInfo):
+            if t.check(value):
+                return True
+        elif isinstance(value, t):
+            return True
+    return False
+
+
+def _shouldbe_format(name: str, argument_type: T.Literal['positional', 'keyword'],
+                     argument_name: str, argument: object,
+                     types: tuple[type | ContainerTypeInfo, ...] | type | ContainerTypeInfo,
+                     extra: str | None = None) -> str:
+    should_be = _types_description(types)
+    if extra:
+        should_be = f'{should_be}. {extra}'
+    return (f'"{name}" {argument_type} argument "{argument_name}" was of type '
+            f'"{_raw_description(argument)}" but should have been {should_be}')
 
 
 class ContainerTypeInfo:
@@ -305,10 +278,10 @@ class ContainerTypeInfo:
         iter_ = iter(value.values()) if isinstance(value, dict) else iter(value)
         return any(isinstance(i, self.contains) for i in iter_)
 
-    def description(self) -> str:
+    def description(self) -> tuple[str, str | None]:
         """Human readable description of this container type.
 
-        :return: string to be printed
+        :return: a tuple of: the type as a string, an extra message if there is one
         """
         container = 'dict' if self.container is dict else 'array'
         if isinstance(self.contains, tuple):
@@ -316,25 +289,20 @@ class ContainerTypeInfo:
         else:
             contains = self.contains.__name__
         s = f'{container}[{contains}]'
+        extra: str | None = None
         if self.pairs:
-            s += ' that has even size'
+            extra = 'that has even size'
         if not self.allow_empty:
-            s += ' that cannot be empty'
-        return s
-
-_T = T.TypeVar('_T')
-
-class _NULL_T:
-    """Special null type for evolution, this is an implementation detail."""
+            extra = 'that cannot be empty'
+        return s, extra
 
 
-_NULL = _NULL_T()
-
+@dataclasses.dataclass(slots=True, eq=False)
 class KwargInfo(T.Generic[_T]):
 
     """A description of a keyword argument to a meson function
 
-    This is used to describe a value to the :func:typed_kwargs function.
+    This is used to describe a value to the :func:TypedArgs function.
 
     :param name: the name of the parameter
     :param types: A type or tuple of types that are allowed, or a :class:ContainerType
@@ -344,7 +312,7 @@ class KwargInfo(T.Generic[_T]):
         a container, but internally we only want to work with containers
     :param default: A default value to use if this isn't set. defaults to None,
         this may be safely set to a mutable type, as long as that type does not
-        itself contain mutable types, typed_kwargs will copy the default
+        itself contain mutable types, TypedArgs will copy the default
     :param since: Meson version in which this argument has been added. defaults to None
     :param since_message: An extra message to pass to FeatureNew when since is triggered
     :param deprecated: Meson version in which this argument has been deprecated. defaults to None
@@ -365,48 +333,38 @@ class KwargInfo(T.Generic[_T]):
         added in.
     :param not_set_warning: A warning message that is logged if the kwarg is not
         set by the user.
+    :param feature_validator: A callable returning an iterable of FeatureNew | FeatureDeprecated objects.
+    :param extra_types:
+        A mapping of types to a callable that is passed that type and returns an
+        error message. These types are specifically *not* added to the general
+        error message
+    :param as_default: Extra values to treat as empty values. These are always considered to be broken.
     """
-    def __init__(self, name: str,
-                 types: T.Union[T.Type[_T], T.Tuple[T.Union[T.Type[_T], ContainerTypeInfo], ...], ContainerTypeInfo],
-                 *, required: bool = False, listify: bool = False,
-                 default: T.Optional[_T] = None,
-                 since: T.Optional[str] = None,
-                 since_message: T.Optional[str] = None,
-                 since_values: T.Optional[T.Dict[T.Union[_T, ContainerTypeInfo, type], T.Union[str, T.Tuple[str, str]]]] = None,
-                 deprecated: T.Optional[str] = None,
-                 deprecated_message: T.Optional[str] = None,
-                 deprecated_values: T.Optional[T.Dict[T.Union[_T, ContainerTypeInfo, type], T.Union[str, T.Tuple[str, str]]]] = None,
-                 validator: T.Optional[T.Callable[[T.Any], T.Optional[str]]] = None,
-                 convertor: T.Optional[T.Callable[[_T], object]] = None,
-                 not_set_warning: T.Optional[str] = None):
-        self.name = name
-        self.types = types
-        self.required = required
-        self.listify = listify
-        self.default = default
-        self.since = since
-        self.since_message = since_message
-        self.since_values = since_values
-        self.deprecated = deprecated
-        self.deprecated_message = deprecated_message
-        self.deprecated_values = deprecated_values
-        self.validator = validator
-        self.convertor = convertor
-        self.not_set_warning = not_set_warning
 
-    def evolve(self, *,
-               name: T.Union[str, _NULL_T] = _NULL,
-               required: T.Union[bool, _NULL_T] = _NULL,
-               listify: T.Union[bool, _NULL_T] = _NULL,
-               default: T.Union[_T, None, _NULL_T] = _NULL,
-               since: T.Union[str, None, _NULL_T] = _NULL,
-               since_message: T.Union[str, None, _NULL_T] = _NULL,
-               since_values: T.Union[T.Dict[T.Union[_T, ContainerTypeInfo, type], T.Union[str, T.Tuple[str, str]]], None, _NULL_T] = _NULL,
-               deprecated: T.Union[str, None, _NULL_T] = _NULL,
-               deprecated_message: T.Union[str, None, _NULL_T] = _NULL,
-               deprecated_values: T.Union[T.Dict[T.Union[_T, ContainerTypeInfo, type], T.Union[str, T.Tuple[str, str]]], None, _NULL_T] = _NULL,
-               validator: T.Union[T.Callable[[_T], T.Optional[str]], None, _NULL_T] = _NULL,
-               convertor: T.Union[T.Callable[[_T], TYPE_var], None, _NULL_T] = _NULL) -> 'KwargInfo':
+    name: str
+    types: type[None] | type[_T] | ContainerTypeInfo | tuple[type[None] | type[_T] | ContainerTypeInfo, ...]
+    accept_second_level_holder: bool = dataclasses.field(default=False, kw_only=True)
+    required: bool = dataclasses.field(default=False, kw_only=True)
+    listify: bool = dataclasses.field(default=False, kw_only=True)
+    default: _T | None = dataclasses.field(default=None, kw_only=True)
+    since: str | None = dataclasses.field(default=None, kw_only=True)
+    since_message: str = dataclasses.field(default='', kw_only=True)
+    since_values: _FeatureValues | None = dataclasses.field(default=None, kw_only=True)
+    deprecated: str | None = dataclasses.field(default=None, kw_only=True)
+    deprecated_message: str = dataclasses.field(default='', kw_only=True)
+    deprecated_values: _FeatureValues | None = dataclasses.field(default=None, kw_only=True)
+    feature_validator: T.Callable[[_T], T.Iterable[FeatureCheckBase]] | None = \
+        dataclasses.field(default=None, kw_only=True)
+    validator: T.Callable[[T.Any], str | None] | None = \
+        dataclasses.field(default=None, kw_only=True)
+    convertor: T.Callable[[_T], object] | None = dataclasses.field(default=None, kw_only=True)
+    not_set_warning: str | None = dataclasses.field(default=None, kw_only=True)
+    extra_types: T.Mapping[type, T.Callable[[object], str]] | None = \
+        dataclasses.field(default=None, kw_only=True)
+    as_default: list[tuple[object, str | tuple[str, str]]] | None = \
+        dataclasses.field(default=None, kw_only=True)
+
+    def evolve(self, **kwargs: Unpack[_KwargInfoKWs]) -> KwargInfo[_T]:
         """Create a shallow copy of this KwargInfo, with modifications.
 
         This allows us to create a new copy of a KwargInfo with modifications.
@@ -418,161 +376,360 @@ class KwargInfo(T.Generic[_T]):
         meaning in many of these cases. _NULL itself is never stored, always
         being replaced by either the copy in self, or the provided new version.
         """
-        return type(self)(
-            name if not isinstance(name, _NULL_T) else self.name,
-            self.types,
-            listify=listify if not isinstance(listify, _NULL_T) else self.listify,
-            required=required if not isinstance(required, _NULL_T) else self.required,
-            default=default if not isinstance(default, _NULL_T) else self.default,
-            since=since if not isinstance(since, _NULL_T) else self.since,
-            since_message=since_message if not isinstance(since_message, _NULL_T) else self.since_message,
-            since_values=since_values if not isinstance(since_values, _NULL_T) else self.since_values,
-            deprecated=deprecated if not isinstance(deprecated, _NULL_T) else self.deprecated,
-            deprecated_message=deprecated_message if not isinstance(deprecated_message, _NULL_T) else self.deprecated_message,
-            deprecated_values=deprecated_values if not isinstance(deprecated_values, _NULL_T) else self.deprecated_values,
-            validator=validator if not isinstance(validator, _NULL_T) else self.validator,
-            convertor=convertor if not isinstance(convertor, _NULL_T) else self.convertor,
-        )
+        return dataclasses.replace(self, **kwargs)
 
 
-def typed_kwargs(name: str, *types: KwargInfo, allow_unknown: bool = False) -> T.Callable[..., T.Any]:
-    """Decorator for type checking keyword arguments.
+@dataclasses.dataclass(slots=True, eq=False)
+class _PosArgInfoBase:
 
-    Used to wrap a meson DSL implementation function, where it checks various
-    things about keyword arguments, including the type, and various other
-    information. For non-required values it sets the value to a default, which
-    means the value will always be provided.
+    types: type | T.Tuple[type | ContainerTypeInfo, ...] | ContainerTypeInfo
+    accept_second_level_holder: bool = dataclasses.field(default=False, kw_only=True)
+    since: str | None = dataclasses.field(default=None, kw_only=True)
+    since_message: str = dataclasses.field(default='', kw_only=True)
+    since_values: _FeatureValues | None = dataclasses.field(default=None, kw_only=True)
+    deprecated: str | None = dataclasses.field(default=None, kw_only=True)
+    deprecated_message: str = dataclasses.field(default='', kw_only=True)
+    deprecated_values: _FeatureValues | None = dataclasses.field(default=None, kw_only=True)
+    feature_validator: T.Callable[[T.Any], T.Iterable[FeatureCheckBase]] | None = \
+        dataclasses.field(default=None, kw_only=True)
+    validator: T.Optional[T.Callable[[T.Any], str | None]] = dataclasses.field(default=None, kw_only=True)
+    convertor: T.Optional[T.Callable[[T.Any], object]] = dataclasses.field(default=None, kw_only=True)
+    listify: bool = dataclasses.field(default=False, kw_only=True)
 
-    If type is a :class:ContainerTypeInfo, then the default value will be
-    passed as an argument to the container initializer, making a shallow copy
 
-    :param name: the name of the function, including the object it's attached to
-        (if applicable)
-    :param *types: KwargInfo entries for each keyword argument.
-    """
-    def inner(f: TV_func) -> TV_func:
+@dataclasses.dataclass(slots=True, eq=False)
+class PosArgInfo(_PosArgInfoBase):
 
-        def types_description(types_tuple: T.Tuple[T.Union[T.Type, ContainerTypeInfo], ...]) -> str:
-            candidates = []
-            for t in types_tuple:
-                if isinstance(t, ContainerTypeInfo):
-                    candidates.append(t.description())
+    def evolve(self, **kwargs: Unpack[_PosArgKWs]) -> PosArgInfo:
+        return dataclasses.replace(self, **kwargs)
+
+
+@dataclasses.dataclass(slots=True, eq=False)
+class OptArgInfo(_PosArgInfoBase):
+
+    default: TYPE_var | None = dataclasses.field(default=None, kw_only=True)
+    optional_since: str | None = dataclasses.field(default=None, kw_only=True)
+    optional_since_message: str = dataclasses.field(default='', kw_only=True)
+
+    def evolve(self, **kwargs: Unpack[_OptArgKWs]) -> OptArgInfo:
+        return dataclasses.replace(self, **kwargs)
+
+
+@dataclasses.dataclass(slots=True, eq=False)
+class VarArgInfo(_PosArgInfoBase):
+
+    min_args: int = dataclasses.field(default=0, kw_only=True)
+    max_args: int = dataclasses.field(default=0, kw_only=True)
+    variadic_since: str | None = dataclasses.field(default=None, kw_only=True)
+    variadic_since_message: str = dataclasses.field(default='', kw_only=True)
+
+    def evolve(self, **kwargs: Unpack[_VarArgKWs]) -> VarArgInfo:
+        return dataclasses.replace(self, **kwargs)
+
+
+@dataclasses.dataclass(slots=True, eq=False)
+class TypedArgs:
+
+    name: str
+    pos_types: list[PosArgInfo] = dataclasses.field(default_factory=list, kw_only=True)
+    opt_types: list[OptArgInfo] = dataclasses.field(default_factory=list, kw_only=True)
+    var_types: VarArgInfo | None = dataclasses.field(default=None, kw_only=True)
+    kw_types: list[KwargInfo] = dataclasses.field(default_factory=list, kw_only=True)
+    unknown_kwargs: bool = dataclasses.field(default=False, kw_only=True)
+    process_posargs: bool = dataclasses.field(default=True, kw_only=True)
+
+    def _emit_feature_change(self, value: object, values: dict[_T, str | tuple[str, str]],
+                             feature: type[FeatureDeprecated | FeatureNew],
+                             subproject: SubProject, node: mparser.BaseNode | None,
+                             info: KwargInfo) -> None:
+        for n, version in values.items():
+            if isinstance(version, tuple):
+                version, msg = version
+            else:
+                msg = ''
+
+            warning: str | None = None
+            if isinstance(n, ContainerTypeInfo):
+                if n.check_any(value):
+                    d, extra = n.description()
+                    warning = f'of type "{d}"'
+                    if extra:
+                        warning = f'{warning} {extra}'
+            elif isinstance(n, (type, tuple)):
+                if isinstance(value, n):
+                    warning = f'of type "{type(value).__name__}"'
+            elif isinstance(value, list):
+                if n in value:
+                    warning = f'value "{n}" in list'
+            elif isinstance(value, dict):
+                if n in value:
+                    warning = f'value "{n}" in dict keys'
+            elif n == value:
+                warning = f'value "{n}"'
+            if warning:
+                feature.single_use(f'"{self.name}" keyword argument "{info.name}" {warning}', version, subproject, msg, location=node)
+
+    def _process_kwargs(self, node: mparser.BaseNode | None, _kwargs: TYPE_kwargs, subproject: SubProject) -> None:
+        # Cast here, as the convertor function may place something other than a TYPE_var in the kwargs
+        kwargs = T.cast('T.Dict[str, object]', _kwargs)
+        make_err = partial(InvalidArguments.from_node, node=node) if node is not None else InvalidArguments
+
+        if not self.unknown_kwargs:
+            all_names = {t.name for t in self.kw_types}
+            unknowns = set(kwargs).difference(all_names)
+            if unknowns:
+                ustr = ', '.join(kwargs_get_close_matches(unknowns, all_names))
+                has_args = ''
+                if not self.kw_types:
+                    has_args = ' Function expects no keyword arguments.'
+                raise make_err(f'"{self.name}" got unknown keyword arguments {ustr}.{has_args}')
+
+        for info in self.kw_types:
+            types_tuple = info.types if isinstance(info.types, tuple) else (info.types,)
+            value = kwargs.get(info.name)
+            if isinstance(value, DefaultObject):
+                # Ensure that default() is not used for required options
+                # Otherwise, set the value to None, which will send us down
+                # the "unset" path
+                if info.required:
+                    raise make_err(f'"{self.name}" got a default() value for the required keyword argument "{info.name}". '
+                                   'default() may not be used for required keyword arguments.')
+                value = None
+
+            if value is not None:
+                extra: str | None
+                if info.since:
+                    feature_name = info.name + ' arg in ' + self.name
+                    FeatureNew.single_use(feature_name, info.since, subproject, info.since_message, location=node)
+                if info.deprecated:
+                    feature_name = info.name + ' arg in ' + self.name
+                    FeatureDeprecated.single_use(feature_name, info.deprecated, subproject, info.deprecated_message, location=node)
+                if info.as_default:
+                    found = mesonlib.first(info.as_default, lambda x: value == x[0])
+                    if found is not None:
+                        msg = found[1]
+                        extra = ''
+                        if isinstance(msg, tuple):
+                            msg, extra = msg
+                        FeatureBroken.single_use(f"Using '{value}' as an empty value in {info.name}", msg, subproject, extra, node)
+                        value = copy.copy(info.default)
+                if info.listify:
+                    kwargs[info.name] = value = mesonlib.listify(value)
+                if not info.accept_second_level_holder:
+                    kwargs[info.name] = value = resolve_second_level_holders(value)
+                if not _check_value_type(types_tuple, value):
+                    extra = None
+                    if info.extra_types:
+                        extra_desc: T.List[str] = []
+                        if isinstance(value, list):
+                            for (t, cb), v in itertools.product(info.extra_types.items(), value):
+                                if isinstance(v, t):
+                                    extra_desc.append(cb(v))
+                        else:
+                            for t, cb in info.extra_types.items():
+                                if isinstance(value, t):
+                                    extra_desc.append(cb(value))
+                        extra = '. '.join(extra_desc)
+
+                    raise make_err(
+                        _shouldbe_format(self.name, 'keyword', info.name, value, types_tuple, extra))
+
+                if info.validator is not None:
+                    msg = info.validator(value)
+                    if msg is not None:
+                        raise make_err(f'"{self.name}" keyword argument "{info.name}" {msg}')
+
+                if info.feature_validator is not None:
+                    for each in info.feature_validator(value):
+                        each.use(subproject, node)
+
+                if info.deprecated_values is not None:
+                    self._emit_feature_change(value, info.deprecated_values, FeatureDeprecated, subproject, node, info)
+
+                if info.since_values is not None:
+                    self._emit_feature_change(value, info.since_values, FeatureNew, subproject, node, info)
+
+            elif info.required:
+                raise make_err(f'"{self.name}" is missing required keyword argument "{info.name}"')
+            else:
+                # set the value to the default, this ensuring all kwargs are present
+                # This both simplifies the typing checking and the usage
+                assert _check_value_type(types_tuple, info.default), f'In function {self.name} default value of {info.name} is not a valid type, got {type(info.default)} expected {_types_description(types_tuple)}'
+                # Create a shallow copy of the container. This allows mutable
+                # types to be used safely as default values
+                kwargs[info.name] = copy.copy(info.default)
+                if info.not_set_warning:
+                    mlog.warning(info.not_set_warning)
+
+            if info.convertor:
+                kwargs[info.name] = info.convertor(kwargs[info.name])
+
+    def _pw_emit_feature_change(self, value: object, values: T.Dict[_T, T.Union[str, T.Tuple[str, str]]],
+                                feature: T.Type[FeatureDeprecated | FeatureNew],
+                                subproject: SubProject, node: mparser.BaseNode | None,
+                                index: int) -> None:
+        for n, version in values.items():
+            if isinstance(version, tuple):
+                version, msg = version
+            else:
+                msg = ''
+
+            warning: T.Optional[str] = None
+            if isinstance(n, ContainerTypeInfo):
+                if n.check_any(value):
+                    d, extra = n.description()
+                    warning = f'of type "{d}"'
+                    if extra:
+                        warning = f'{warning} {extra}'
+            elif isinstance(n, (type, tuple)):
+                if isinstance(value, n):
+                    warning = f'of type "{type(value).__name__}"'
+            elif isinstance(value, list):
+                if n in value:
+                    warning = f'value "{n}" in list'
+            elif isinstance(value, dict):
+                if n in value:
+                    warning = f'value "{n}" in dict keys'
+            elif n == value:
+                warning = f'value "{n}"'
+            if warning:
+                feature.single_use(f'"{self.name}" positional argument "{index}" {warning}', version, subproject, msg, location=node)
+
+    def _process_args(self, node: mparser.BaseNode | None, args: list[TYPE_var], subproject: SubProject) -> tuple[object, ...]:
+        assert not (self.opt_types and self.var_types), \
+            'Cannot use optional arguments and variadic arguments together due to ambiguity'
+
+        nargs = T.cast('list[object]', args).copy()
+        num_args = len(args)
+        num_types = len(self.pos_types)
+        types: tuple[_PosArgInfoBase, ...] = tuple(self.pos_types)
+        make_err = partial(InvalidArguments.from_node, node=node) if node is not None else InvalidArguments
+
+        if self.var_types:
+            min_args = num_types + self.var_types.min_args
+            max_args = num_types + self.var_types.max_args
+            if self.var_types.max_args == 0 and num_args < min_args:
+                raise make_err(f'"{self.name}" takes at least {min_args} arguments, but got {num_args}.')
+            elif self.var_types.max_args != 0 and (num_args < min_args or num_args > max_args):
+                raise make_err(f'"{self.name}" takes between {min_args} and {max_args} arguments, but got {num_args}.')
+        elif self.opt_types:
+            if num_args < num_types:
+                raise make_err(f'"{self.name}" takes at least {num_types} arguments, but got {num_args}.')
+
+            num_types_tot = num_types + len(self.opt_types)
+            if num_args > num_types_tot:
+                raise make_err(f'"{self.name}" takes at most {num_types_tot} arguments, but got {num_args}.')
+
+            # The number of unset optional arguments we need to use the default values for
+            unset_opt_args = num_args - num_types
+            # Add the types to cover optional arguments that have been passed
+            types = tuple(list(types) + list(self.opt_types[:unset_opt_args]))
+            assert len(types) == num_args, (len(types), num_args)
+        elif num_args != num_types:
+            raise make_err(f'"{self.name}" takes exactly {num_types} arguments, but got {num_args}.')
+
+        for i, (value, info) in enumerate(itertools.zip_longest(args, types, fillvalue=self.var_types), start=1):
+            assert info is not None, 'We should never get a None info'
+            types_tuple = info.types if isinstance(info.types, tuple) else (info.types,)
+
+            if isinstance(value, DefaultObject) and DefaultObject not in types_tuple:
+                if isinstance(info, PosArgInfo):
+                    raise make_err('default() objects are not allowed for required positional arguments')
+                elif isinstance(info, OptArgInfo):
+                    FeatureNew.single_use('default() object for optional positional arguments', '1.13.0',
+                                          subproject, location=node)
+                    # Replace the DefaultObject with the default value, but skip further validation.
+                    # If the default is None, and we don't have None in the types_tuple (common),
+                    # then we'll fail validation later.
+                    nargs[i - 1] = value = copy.copy(info.default)
+                    continue
                 else:
-                    candidates.append(t.__name__)
-            shouldbe = 'one of: ' if len(candidates) > 1 else ''
-            shouldbe += ', '.join(candidates)
-            return shouldbe
+                    raise make_err('default() objects are not allowed for variadic arguments')
 
-        def raw_description(t: object) -> str:
-            """describe a raw type (ie, one that is not a ContainerTypeInfo)."""
-            if isinstance(t, list):
-                if t:
-                    return f"array[{' | '.join(sorted(mesonlib.OrderedSet(type(v).__name__ for v in t)))}]"
-                return 'array[]'
-            elif isinstance(t, dict):
-                if t:
-                    return f"dict[{' | '.join(sorted(mesonlib.OrderedSet(type(v).__name__ for v in t.values())))}]"
-                return 'dict[]'
-            return type(t).__name__
+            if info.since:
+                feature_name = f'positional argument "{i}" in {self.name}'
+                FeatureNew.single_use(feature_name, info.since, subproject, info.since_message, location=node)
 
-        def check_value_type(types_tuple: T.Tuple[T.Union[T.Type, ContainerTypeInfo], ...],
-                             value: T.Any) -> bool:
-            for t in types_tuple:
-                if isinstance(t, ContainerTypeInfo):
-                    if t.check(value):
-                        return True
-                elif isinstance(value, t):
-                    return True
-            return False
+            if info.deprecated:
+                feature_name = f'positional argument "{i}" in {self.name}'
+                FeatureDeprecated.single_use(feature_name, info.deprecated, subproject, info.deprecated_message, location=node)
 
+            if info.listify:
+                nargs[i - 1] = value = mesonlib.listify(value)
+            if not info.accept_second_level_holder:
+                nargs[i - 1] = value = resolve_second_level_holders(value)
+
+            if not _check_value_type(types_tuple, value):
+                raise make_err(_shouldbe_format(self.name, 'positional', str(i), value, types_tuple))
+
+            if info.validator is not None:
+                msg = info.validator(value)
+                if msg is not None:
+                    raise make_err(f'"{self.name}" positional argument "{i}" {msg}')
+
+            if info.feature_validator is not None:
+                for each in info.feature_validator(value):
+                    each.use(subproject, node)
+
+            if info.deprecated_values is not None:
+                self._pw_emit_feature_change(
+                    value, info.deprecated_values, FeatureDeprecated, subproject, node, i)
+
+            if info.since_values is not None:
+                self._pw_emit_feature_change(
+                    value, info.since_values, FeatureNew, subproject, node, i)
+
+            if info.convertor:
+                nargs[i - 1] = info.convertor(value)
+
+        if self.opt_types:
+            for i, info in enumerate(self.opt_types[unset_opt_args:], start=num_args):
+                if info.optional_since:
+                    feature_name = f'positional argument "{i}" in {self.name} as optional'
+                    FeatureNew.single_use(feature_name, info.optional_since, subproject,
+                                          info.optional_since_message, node)
+
+                nargs.append(copy.copy(info.default))
+        elif self.var_types:
+            # if we have varargs we need to split them into a separate
+            # tuple, as python's typing doesn't understand tuples with
+            # fixed elements and variadic elements, only one or the other.
+            # so in that case we need T.Tuple[int, str, float, T.Tuple[str, ...]]
+            pos = nargs[:len(types)]
+            var = list(nargs[len(types):])
+            nargs = pos
+            nargs.append(var)
+
+            if self.var_types.variadic_since is not None and len(var) > 1:
+                FeatureNew.single_use(f'"{self.name}": More than one variadic argument',
+                                      self.var_types.variadic_since,
+                                      subproject, location=node)
+
+        return tuple(nargs)
+
+    # TODO: need to use two different types here to avoid passing the original type through
+    def __call__(self, f: TV_func) -> T.Callable[..., T.Any]:
         @wraps(f)
         def wrapper(*wrapped_args: T.Any, **wrapped_kwargs: T.Any) -> T.Any:
+            node, _args, _kwargs, subproject = get_callee_args(wrapped_args)
 
-            def emit_feature_change(values: T.Dict[_T, T.Union[str, T.Tuple[str, str]]], feature: T.Union[T.Type['FeatureDeprecated'], T.Type['FeatureNew']]) -> None:
-                for n, version in values.items():
-                    if isinstance(version, tuple):
-                        version, msg = version
-                    else:
-                        msg = None
+            assert _args is not None, 'for mypy'
+            assert _kwargs is not None, 'for mypy'
 
-                    warning: T.Optional[str] = None
-                    if isinstance(n, ContainerTypeInfo):
-                        if n.check_any(value):
-                            warning = f'of type {n.description()}'
-                    elif isinstance(n, type):
-                        if isinstance(value, n):
-                            warning = f'of type {n.__name__}'
-                    elif isinstance(value, list):
-                        if n in value:
-                            warning = f'value "{n}" in list'
-                    elif isinstance(value, dict):
-                        if n in value.keys():
-                            warning = f'value "{n}" in dict keys'
-                    elif n == value:
-                        warning = f'value "{n}"'
-                    if warning:
-                        feature.single_use(f'"{name}" keyword argument "{info.name}" {warning}', version, subproject, msg, location=node)
-
-            node, _, _kwargs, subproject = get_callee_args(wrapped_args)
-            # Cast here, as the convertor function may place something other than a TYPE_var in the kwargs
-            kwargs = T.cast('T.Dict[str, object]', _kwargs)
-
-            if not allow_unknown:
-                all_names = {t.name for t in types}
-                unknowns = set(kwargs).difference(all_names)
-                if unknowns:
-                    ustr = ', '.join([f'"{u}"' for u in sorted(unknowns)])
-                    raise InvalidArguments(f'{name} got unknown keyword arguments {ustr}')
-
-            for info in types:
-                types_tuple = info.types if isinstance(info.types, tuple) else (info.types,)
-                value = kwargs.get(info.name)
-                if value is not None:
-                    if info.since:
-                        feature_name = info.name + ' arg in ' + name
-                        FeatureNew.single_use(feature_name, info.since, subproject, info.since_message, location=node)
-                    if info.deprecated:
-                        feature_name = info.name + ' arg in ' + name
-                        FeatureDeprecated.single_use(feature_name, info.deprecated, subproject, info.deprecated_message, location=node)
-                    if info.listify:
-                        kwargs[info.name] = value = mesonlib.listify(value)
-                    if not check_value_type(types_tuple, value):
-                        shouldbe = types_description(types_tuple)
-                        raise InvalidArguments(f'{name} keyword argument {info.name!r} was of type {raw_description(value)} but should have been {shouldbe}')
-
-                    if info.validator is not None:
-                        msg = info.validator(value)
-                        if msg is not None:
-                            raise InvalidArguments(f'{name} keyword argument "{info.name}" {msg}')
-
-                    if info.deprecated_values is not None:
-                        emit_feature_change(info.deprecated_values, FeatureDeprecated)
-
-                    if info.since_values is not None:
-                        emit_feature_change(info.since_values, FeatureNew)
-
-                elif info.required:
-                    raise InvalidArguments(f'{name} is missing required keyword argument "{info.name}"')
-                else:
-                    # set the value to the default, this ensuring all kwargs are present
-                    # This both simplifies the typing checking and the usage
-                    assert check_value_type(types_tuple, info.default), f'In function {name} default value of {info.name} is not a valid type, got {type(info.default)} expected {types_description(types_tuple)}'
-                    # Create a shallow copy of the container. This allows mutable
-                    # types to be used safely as default values
-                    kwargs[info.name] = copy.copy(info.default)
-                    if info.not_set_warning:
-                        mlog.warning(info.not_set_warning)
-
-                if info.convertor:
-                    kwargs[info.name] = info.convertor(kwargs[info.name])
+            self._process_kwargs(node, _kwargs, subproject)
+            if self.process_posargs:
+                args = self._process_args(node, _args, subproject)
+                w = list(wrapped_args)
+                i = w.index(_args)
+                w[i] = args
+                wrapped_args = tuple(w)
 
             return f(*wrapped_args, **wrapped_kwargs)
-        return T.cast('TV_func', wrapper)
-    return inner
+        return T.cast('T.Callable[..., T.Any]', wrapper)
 
 
 # This cannot be a dataclass due to https://github.com/python/mypy/issues/5374
-class FeatureCheckBase(metaclass=abc.ABCMeta):
+class FeatureCheckBase(metaclass=mesonlib.SimpleABC):
     "Base class for feature version checks"
 
     feature_registry: T.ClassVar[T.Dict[str, T.Dict[str, T.Set[T.Tuple[str, T.Optional['mparser.BaseNode']]]]]]
@@ -581,43 +738,52 @@ class FeatureCheckBase(metaclass=abc.ABCMeta):
 
     def __init__(self, feature_name: str, feature_version: str, extra_message: str = ''):
         self.feature_name = feature_name
-        self.feature_version = feature_version
+        self.feature_version_for_msg = feature_version
         self.extra_message = extra_message
+        self.feature_version = feature_version
+        # Map versions in the constraint of the form '0.46.0' to '0.46', to
+        # ensure that '0.46' in project(meson_version: '>=0.46') allows
+        # using features in '0.46.0'.  Meson versioning is basically
+        # semver, i.e. '0.46.0' is the lowest version which satisfies the
+        # constraint '>=0.46', but meson.version_compare() is more like
+        # rpm versions for historical reasons.
+        while self.feature_version.endswith('.0'):
+            self.feature_version = self.feature_version[:-2]
 
     @staticmethod
-    def get_target_version(subproject: str) -> str:
+    def get_target_version(subproject: str) -> MesonVersionTarget:
         # Don't do any checks if project() has not been parsed yet
         if subproject not in mesonlib.project_meson_versions:
-            return ''
+            return None
         return mesonlib.project_meson_versions[subproject]
 
     @staticmethod
     @abc.abstractmethod
-    def check_version(target_version: str, feature_version: str) -> bool:
+    def check_version(target_version: MesonVersionTarget, feature_version: str) -> bool:
         pass
 
     def use(self, subproject: 'SubProject', location: T.Optional['mparser.BaseNode'] = None) -> None:
         tv = self.get_target_version(subproject)
         # No target version
-        if tv == '' and not self.unconditional:
+        if tv is None and not self.unconditional:
             return
         # Target version is new enough, don't warn
         if self.check_version(tv, self.feature_version) and not self.emit_notice:
             return
         # Feature is too new for target version or we want to emit notices, register it
         if subproject not in self.feature_registry:
-            self.feature_registry[subproject] = {self.feature_version: set()}
+            self.feature_registry[subproject] = {self.feature_version_for_msg: set()}
         register = self.feature_registry[subproject]
-        if self.feature_version not in register:
-            register[self.feature_version] = set()
+        if self.feature_version_for_msg not in register:
+            register[self.feature_version_for_msg] = set()
 
         feature_key = (self.feature_name, location)
-        if feature_key in register[self.feature_version]:
+        if feature_key in register[self.feature_version_for_msg]:
             # Don't warn about the same feature multiple times
             # FIXME: This is needed to prevent duplicate warnings, but also
             # means we won't warn about a feature used in multiple places.
             return
-        register[self.feature_version].add(feature_key)
+        register[self.feature_version_for_msg].add(feature_key)
         # Target version is new enough, don't warn even if it is registered for notice
         if self.check_version(tv, self.feature_version):
             return
@@ -642,23 +808,21 @@ class FeatureCheckBase(metaclass=abc.ABCMeta):
         if '\n' in warning_str:
             mlog.warning(warning_str)
 
-    def log_usage_warning(self, tv: str, location: T.Optional['mparser.BaseNode']) -> None:
+    def log_usage_warning(self, tv: MesonVersionTarget, location: T.Optional['mparser.BaseNode']) -> None:
         raise InterpreterException('log_usage_warning not implemented')
 
     @staticmethod
-    def get_warning_str_prefix(tv: str) -> str:
+    def get_warning_str_prefix(tv: MesonVersionTarget) -> str:
         raise InterpreterException('get_warning_str_prefix not implemented')
 
     @staticmethod
-    def get_notice_str_prefix(tv: str) -> str:
+    def get_notice_str_prefix(tv: MesonVersionTarget) -> str:
         raise InterpreterException('get_notice_str_prefix not implemented')
 
     def __call__(self, f: TV_func) -> TV_func:
         @wraps(f)
         def wrapped(*wrapped_args: T.Any, **wrapped_kwargs: T.Any) -> T.Any:
             node, _, _, subproject = get_callee_args(wrapped_args)
-            if subproject is None:
-                raise AssertionError(f'{wrapped_args!r}')
             self.use(subproject, node)
             return f(*wrapped_args, **wrapped_kwargs)
         return T.cast('TV_func', wrapped)
@@ -675,26 +839,38 @@ class FeatureNew(FeatureCheckBase):
 
     # Class variable, shared across all instances
     #
-    # Format: {subproject: {feature_version: set(feature_names)}}
+    # Format: {subproject: {feature_version_for_msg: set(feature_names)}}
     feature_registry = {}
 
     @staticmethod
-    def check_version(target_version: str, feature_version: str) -> bool:
-        return mesonlib.version_compare_condition_with_min(target_version, feature_version)
+    def check_version(target_version: MesonVersionTarget, feature_version: str) -> bool:
+        if isinstance(target_version, mesonlib.Range):
+            return mesonlib.version_compare_condition_with_min(target_version, feature_version)
+        else:
+            # Warn for anything newer than the current semver base slot.
+            major = coredata.version.split('.', maxsplit=1)[0]
+            return mesonlib.version_compare(feature_version, f'<{major}.0')
 
     @staticmethod
-    def get_warning_str_prefix(tv: str) -> str:
-        return f'Project specifies a minimum meson_version \'{tv}\' but uses features which were added in newer versions:'
+    def get_warning_str_prefix(tv: MesonVersionTarget) -> str:
+        if isinstance(tv, mesonlib.Range) and tv.min is not None:
+            return f'Project specifies a minimum meson_version \'{tv}\' but uses features which were added in newer versions:'
+        else:
+            return 'Project specifies no minimum version but uses features which were added in versions:'
 
     @staticmethod
-    def get_notice_str_prefix(tv: str) -> str:
+    def get_notice_str_prefix(tv: MesonVersionTarget) -> str:
         return ''
 
-    def log_usage_warning(self, tv: str, location: T.Optional['mparser.BaseNode']) -> None:
+    def log_usage_warning(self, tv: MesonVersionTarget, location: T.Optional['mparser.BaseNode']) -> None:
+        if isinstance(tv, mesonlib.Range) and tv.min is not None:
+            prefix = f"Project targets '{tv}'"
+        else:
+            prefix = 'Project does not target a minimum version'
         args = [
-            'Project targets', f"'{tv}'",
+            prefix,
             'but uses feature introduced in',
-            f"'{self.feature_version}':",
+            f"'{self.feature_version_for_msg}':",
             f'{self.feature_name}.',
         ]
         if self.extra_message:
@@ -706,28 +882,36 @@ class FeatureDeprecated(FeatureCheckBase):
 
     # Class variable, shared across all instances
     #
-    # Format: {subproject: {feature_version: set(feature_names)}}
+    # Format: {subproject: {feature_version_for_msg: set(feature_names)}}
     feature_registry = {}
     emit_notice = True
 
     @staticmethod
-    def check_version(target_version: str, feature_version: str) -> bool:
-        # For deprecation checks we need to return the inverse of FeatureNew checks
-        return not mesonlib.version_compare_condition_with_min(target_version, feature_version)
+    def check_version(target_version: MesonVersionTarget, feature_version: str) -> bool:
+        if isinstance(target_version, mesonlib.Range):
+            # For deprecation checks we need to return the inverse of FeatureNew checks
+            return not mesonlib.version_compare_condition_with_min(target_version, feature_version)
+        else:
+            # Always warn for functionality deprecated in the current semver slot (i.e. the current version).
+            return False
 
     @staticmethod
-    def get_warning_str_prefix(tv: str) -> str:
+    def get_warning_str_prefix(tv: MesonVersionTarget) -> str:
         return 'Deprecated features used:'
 
     @staticmethod
-    def get_notice_str_prefix(tv: str) -> str:
+    def get_notice_str_prefix(tv: MesonVersionTarget) -> str:
         return 'Future-deprecated features used:'
 
-    def log_usage_warning(self, tv: str, location: T.Optional['mparser.BaseNode']) -> None:
+    def log_usage_warning(self, tv: MesonVersionTarget, location: T.Optional['mparser.BaseNode']) -> None:
+        if isinstance(tv, mesonlib.Range):
+            prefix = f"Project targets '{tv}'"
+        else:
+            prefix = 'Project does not target a minimum version'
         args = [
-            'Project targets', f"'{tv}'",
+            prefix,
             'but uses feature deprecated since',
-            f"'{self.feature_version}':",
+            f"'{self.feature_version_for_msg}':",
             f'{self.feature_name}.',
         ]
         if self.extra_message:
@@ -740,67 +924,30 @@ class FeatureBroken(FeatureCheckBase):
 
     # Class variable, shared across all instances
     #
-    # Format: {subproject: {feature_version: set(feature_names)}}
+    # Format: {subproject: {feature_version_for_msg: set(feature_names)}}
     feature_registry = {}
     unconditional = True
 
     @staticmethod
-    def check_version(target_version: str, feature_version: str) -> bool:
+    def check_version(target_version: MesonVersionTarget, feature_version: str) -> bool:
         # always warn for broken stuff
         return False
 
     @staticmethod
-    def get_warning_str_prefix(tv: str) -> str:
+    def get_warning_str_prefix(tv: MesonVersionTarget) -> str:
         return 'Broken features used:'
 
     @staticmethod
-    def get_notice_str_prefix(tv: str) -> str:
+    def get_notice_str_prefix(tv: MesonVersionTarget) -> str:
         return ''
 
-    def log_usage_warning(self, tv: str, location: T.Optional['mparser.BaseNode']) -> None:
+    def log_usage_warning(self, tv: MesonVersionTarget, location: T.Optional['mparser.BaseNode']) -> None:
         args = [
             'Project uses feature that was always broken,',
             'and is now deprecated since',
-            f"'{self.feature_version}':",
+            f"'{self.feature_version_for_msg}':",
             f'{self.feature_name}.',
         ]
         if self.extra_message:
             args.append(self.extra_message)
         mlog.deprecation(*args, location=location)
-
-
-# This cannot be a dataclass due to https://github.com/python/mypy/issues/5374
-class FeatureCheckKwargsBase(metaclass=abc.ABCMeta):
-
-    @property
-    @abc.abstractmethod
-    def feature_check_class(self) -> T.Type[FeatureCheckBase]:
-        pass
-
-    def __init__(self, feature_name: str, feature_version: str,
-                 kwargs: T.List[str], extra_message: T.Optional[str] = None):
-        self.feature_name = feature_name
-        self.feature_version = feature_version
-        self.kwargs = kwargs
-        self.extra_message = extra_message
-
-    def __call__(self, f: TV_func) -> TV_func:
-        @wraps(f)
-        def wrapped(*wrapped_args: T.Any, **wrapped_kwargs: T.Any) -> T.Any:
-            node, _, kwargs, subproject = get_callee_args(wrapped_args)
-            if subproject is None:
-                raise AssertionError(f'{wrapped_args!r}')
-            for arg in self.kwargs:
-                if arg not in kwargs:
-                    continue
-                name = arg + ' arg in ' + self.feature_name
-                self.feature_check_class.single_use(
-                        name, self.feature_version, subproject, self.extra_message, node)
-            return f(*wrapped_args, **wrapped_kwargs)
-        return T.cast('TV_func', wrapped)
-
-class FeatureNewKwargs(FeatureCheckKwargsBase):
-    feature_check_class = FeatureNew
-
-class FeatureDeprecatedKwargs(FeatureCheckKwargsBase):
-    feature_check_class = FeatureDeprecated

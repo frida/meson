@@ -10,12 +10,11 @@ import typing as T
 
 from ... import mesonlib
 from ...linkers.linkers import ArmClangDynamicLinker
-from ...mesonlib import OptionKey
+from ...options import OptionKey
 from ..compilers import clike_debug_args
 from .clang import clang_color_args
 
 if T.TYPE_CHECKING:
-    from ...environment import Environment
     from ...compilers.compilers import Compiler
 else:
     # This is a bit clever, for mypy we pretend that these mixins descend from
@@ -90,7 +89,7 @@ class ArmCompiler(Compiler):
         # PCH files."
         return 'pch'
 
-    def thread_flags(self, env: 'Environment') -> T.List[str]:
+    def thread_flags(self,) -> T.List[str]:
         return []
 
     def get_coverage_args(self) -> T.List[str]:
@@ -140,6 +139,9 @@ class ArmclangCompiler(Compiler):
 
     def get_colorout_args(self, colortype: str) -> T.List[str]:
         return clang_color_args[colortype][:]
+
+    def get_cpp_permissive_args(self) -> T.List[str]:
+        return ['-fpermissive']
 
     def get_pch_suffix(self) -> str:
         return 'gch'

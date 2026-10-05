@@ -2,6 +2,7 @@ project(
   'generated cython sources',
   ['cython', 'c'],
   default_options : ['buildtype=release'],
+  meson_version : '>= 1.10.0',
 )
 
 if meson.backend() != 'ninja'
@@ -74,9 +75,36 @@ test(
   env : ['PYTHONPATH=' + meson.current_build_dir()]
 )
 
+# A generator whose output is *not* a .pyx file, mixed with a Cython .pyx
+# source in the same target.
+gen_c = generator(
+  find_program('generator.py'),
+  arguments : ['@INPUT@', '@OUTPUT@'],
+  output : '@BASENAME@',
+)
+
+genc_ext = py3.extension_module(
+  'genc',
+  gen_c.process('genc.pyx.in', 'answer.c.in'),
+)
+
+test(
+  'generator with non-pyx output',
+  py3,
+  args : [files('test.py'), 'genc'],
+  env : ['PYTHONPATH=' + meson.current_build_dir()]
+)
+
 stuff_pxi = fs.copyfile(
   'stuff.pxi.in',
   'stuff.pxi'
+)
+
+stuff_pxi_2 = configure_file(
+  input: 'stuff.pxi.in',
+  output: 'stuff.pxi',
+  configuration: configuration_data(),
+  install: false
 )
 
 # Need to copy the cython source to the build directory
@@ -85,7 +113,7 @@ includestuff_pyx = fs.copyfile(
   'includestuff.pyx'
 )
 
-stuff_pxi_dep = declare_dependency(sources: stuff_pxi)
+stuff_pxi_dep = declare_dependency(sources: [stuff_pxi, stuff_pxi_2])
 
 includestuff_ext = py3.extension_module(
   'includestuff',

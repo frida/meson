@@ -9,12 +9,13 @@ source /ci/common.sh
 pkgs=(
   python python-pip pypy3
   ninja make git sudo fakeroot autoconf automake patch
-  libelf gcc gcc-fortran gcc-objc vala rust bison flex cython go dlang-dmd
-  mono boost qt5-base gtkmm3 gtest gmock protobuf gobject-introspection
-  itstool gtk3 java-environment=8 gtk-doc llvm clang sdl2 graphviz
-  doxygen vulkan-validation-layers openssh mercurial gtk-sharp-2 qt5-tools
+  libelf gcc gcc-fortran gcc-objc vala rust byacc flex cython go dlang-dmd
+  mono boost boost-libs qt5-base gtkmm3 gtest gmock protobuf gobject-introspection
+  itstool glib2-devel gtk3 java-environment=8 gtk-doc llvm clang sdl2 graphviz
+  doxygen vulkan-headers vulkan-icd-loader vulkan-validation-layers openssh mercurial gtk-sharp-3 qt5-tools
   libwmf cmake netcdf-fortran openmpi nasm gnustep-base gettext
-  python-lxml hotdoc rust-bindgen qt6-base qt6-tools wayland wayland-protocols
+  python-lxml hotdoc rust-bindgen qt6-base qt6-tools qt6-declarative wayland wayland-protocols
+  intel-oneapi-mkl zlib-static
   # cuda
 )
 
@@ -23,6 +24,9 @@ cleanup_pkgs=(go)
 
 AUR_USER=docker
 PACMAN_OPTS='--needed --noprogressbar --noconfirm'
+
+# Workaround for cmake-4.0 vs wxwidgets-gtk2
+export CMAKE_POLICY_VERSION_MINIMUM=3.5
 
 # Patch config files
 sed -i 's/#Color/Color/g'                            /etc/pacman.conf
@@ -41,6 +45,9 @@ useradd -m $AUR_USER
 echo "${AUR_USER}:" | chpasswd -e
 echo "$AUR_USER      ALL = NOPASSWD: ALL" >> /etc/sudoers
 
+# fix installing packages from source, attempting to install debug info
+sed -i '/OPTIONS/{s|debug|!debug|}' /etc/makepkg.conf
+
 # Install yay
 su $AUR_USER -c 'cd; git clone https://aur.archlinux.org/yay.git'
 su $AUR_USER -c 'cd; cd yay; makepkg'
@@ -54,4 +61,6 @@ su $AUR_USER -c "yay -S $PACMAN_OPTS ${aur_pkgs[*]}"
 
 # cleanup
 pacman -Rs --noconfirm "${cleanup_pkgs[@]}"
-su $AUR_USER -c "yes | yay -Scc"
+# clear the pacman cache first, since the yay user may not have permission
+pacman -Sc --noconfirm
+su $AUR_USER -c "yes | yay -Sc --aur"

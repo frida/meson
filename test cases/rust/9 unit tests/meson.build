@@ -1,8 +1,9 @@
-project('rust unit tests', 'rust')
+project('rust unit tests', 'rust', meson_version: '>=1.11.0')
 
 t = executable(
   'rust_test',
   ['test.rs'],
+  override_options: {'rust_panic': 'none'},
   rust_args : ['--test'],
 )
 
@@ -11,7 +12,7 @@ test(
   t,
   protocol : 'rust',
   suite : ['foo'],
-  should_fail : true,
+  expected_fail : true,
 )
 
 test(
@@ -31,17 +32,45 @@ test(
   suite : ['foo'],
 )
 
+rust = import('rust')
+
+rustdoc = find_program('rustdoc', required: false)
+if rustdoc.found()
+  doclib = static_library('rust_doc_lib', ['doctest1.rs'], build_by_default : false)
+  rust.doctest('rust doctests', doclib,
+    protocol : 'rust',
+    suite : ['doctests'],
+  )
+
+  # abort not valid for shared libraries:
+  #   error: the linked panic runtime `panic_unwind` is not compiled with this crate's panic strategy `abort`
+  if get_option('rust_panic') != 'abort'
+    doclib = shared_library('rust_doc_lib', ['doctest1.rs'], build_by_default : false)
+    rust.doctest('rust shared doctests', doclib,
+      protocol : 'rust',
+      suite : ['doctests'],
+    )
+  endif
+endif
+
 exe = executable('rust_exe', ['test2.rs', 'test.rs'], build_by_default : false)
+rust.test('rust_test_from_exe_xfail', exe, expected_fail : true)
+rust.test('rust_test_from_exe', exe, args: ['--skip', 'test_add_intentional_fail'])
 
-rust = import('unstable-rust')
-rust.test('rust_test_from_exe', exe, should_fail : true)
+test2_gen = configure_file(input: 'test2.rs', output: 'main.rs', copy: true)
+exe_ss = executable('rust_exe_ss', structured_sources([test2_gen, 'test.rs']), build_by_default : false)
+rust.test('rust_test_from_exe_ss', exe_ss, args: ['--skip', 'test_add_intentional_fail'])
 
-lib = static_library('rust_static', ['test.rs'], build_by_default : false, rust_crate_type : 'lib')
+lib = static_library('rust_static', ['test.rs'], build_by_default : false, rust_abi: 'c')
 rust.test('rust_test_from_static', lib, args: ['--skip', 'test_add_intentional_fail'])
 
 lib = shared_library('rust_shared', ['test.rs'], build_by_default : false)
 rust.test('rust_test_from_shared', lib, args: ['--skip', 'test_add_intentional_fail'])
 
-helper = static_library('helper', 'helper.rs')
-lib = static_library('rust_link_with', 'test3.rs', build_by_default : false)
-rust.test('rust_test_link_with', lib, link_with : helper, rust_args : ['--cfg', 'broken="false"'])
+if get_option('rust_panic') != 'abort'
+  # abort not valid when linking into tests:
+  #   error: the crate `helper` requires panic strategy `abort` which is incompatible with this crate's strategy of `unwind`
+  helper = static_library('helper', 'helper.rs')
+  lib = static_library('rust_link_with', 'test3.rs', build_by_default : false)
+  rust.test('rust_test_link_with', lib, link_with : helper, rust_args : ['--cfg', 'broken="false"'])
+endif

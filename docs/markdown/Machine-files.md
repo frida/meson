@@ -180,6 +180,9 @@ strip = '/usr/i586-mingw32msvc/bin/strip'
 pkg-config = '/usr/bin/i586-mingw32msvc-pkg-config'
 ```
 
+The compiler may be prefixed with a supported compiler cache wrapper,
+namely ccache, sccache, kache or buildcache, e.g. `c = ['kache', 'cc']`.
+
 An incomplete list of internally used programs that can be overridden
 here is:
 
@@ -273,7 +276,7 @@ list of strings.
 [cmake]
 
 CMAKE_C_COMPILER    = '/usr/bin/gcc'
-CMAKE_CXX_COMPILER  = 'C:\\user\\bin\\g++'
+CMAKE_CXX_COMPILER  = 'C:\\usr\\bin\\g++'
 CMAKE_SOME_VARIABLE = ['some', 'value with spaces']
 ```
 

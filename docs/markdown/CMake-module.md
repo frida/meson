@@ -138,8 +138,8 @@ and supports the following methods:
    `include_type` kwarg *(new in 0.56.0)* controls the include type of the
    returned dependency object similar to the same kwarg in the
    [[dependency]] function.
- - `include_directories(target)` returns a Meson [[@inc]]
-   object for the specified target. Using this method is not necessary
+ - `include_directories(target)` returns an array of Meson [[@inc]]
+   objects for the specified target. Using this method is not necessary
    if the dependency object is used.
  - `target(target)` returns the raw build target.
  - `target_type(target)` returns the type of the target as a string
@@ -187,7 +187,7 @@ from CMake will be used.
 
 Meson will try to automatically guess most of the required CMake
 toolchain variables from existing entries in the cross and native
-files. These variables will be stored in an automatically generate
+files. These variables will be stored in an automatically generated
 CMake toolchain file in the build directory. The remaining variables
 that can't be guessed can be added by the user in the `[cmake]`
 cross/native file section (*new in 0.56.0*).

@@ -9,10 +9,8 @@ import shutil
 import typing as T
 
 from glob import glob
-from .wrap import (open_wrapdburl, WrapException, get_releases, get_releases_data,
-                   parse_patch_url)
-from pathlib import Path
-
+from .wrap import (open_wrapdburl, read_and_decompress, WrapException, get_releases,
+                   get_releases_data, parse_patch_url)
 from .. import mesonlib, msubprojects
 
 if T.TYPE_CHECKING:
@@ -38,7 +36,7 @@ def add_arguments(parser: 'argparse.ArgumentParser') -> None:
     p = subparsers.add_parser('install', help='install the specified project')
     p.add_argument('--allow-insecure', default=False, action='store_true',
                    help='Allow insecure server connections.')
-    p.add_argument('name')
+    p.add_argument('name', nargs='+')
     p.set_defaults(wrap_func=install)
 
     p = msubprojects.add_wrap_update_parser(subparsers)
@@ -89,20 +87,35 @@ def get_latest_version(name: str, allow_insecure: bool) -> T.Tuple[str, str]:
     version, revision = latest_version.rsplit('-', 1)
     return version, revision
 
-def install(options: 'argparse.Namespace') -> None:
-    name = options.name
-    if not os.path.isdir('subprojects'):
-        raise SystemExit('Subprojects dir not found. Run this script in your source root directory.')
-    if os.path.isdir(os.path.join('subprojects', name)):
+def install_one(name: str, allow_insecure: bool) -> None:
+    subproject_dir_name = mesonlib.get_subproject_dir()
+    if os.path.isdir(os.path.join(subproject_dir_name, name)):
         raise SystemExit('Subproject directory for this project already exists.')
-    wrapfile = os.path.join('subprojects', name + '.wrap')
+    wrapfile = os.path.join(subproject_dir_name, name + '.wrap')
     if os.path.exists(wrapfile):
-        raise SystemExit('Wrap file already exists.')
-    (version, revision) = get_latest_version(name, options.allow_insecure)
-    url = open_wrapdburl(f'https://wrapdb.mesonbuild.com/v2/{name}_{version}-{revision}/{name}.wrap', options.allow_insecure, True)
+        raise SystemExit(f'Wrap file for {name} already exists.')
+    (version, revision) = get_latest_version(name, allow_insecure)
+    url = open_wrapdburl(f'https://wrapdb.mesonbuild.com/v2/{name}_{version}-{revision}/{name}.wrap', allow_insecure, True, True)
     with open(wrapfile, 'wb') as f:
-        f.write(url.read())
+        f.write(read_and_decompress(url))
     print(f'Installed {name} version {version} revision {revision}')
+
+def install(options: 'argparse.Namespace') -> None:
+    subproject_dir_name = mesonlib.get_subproject_dir()
+    if subproject_dir_name is None or not os.path.isdir(subproject_dir_name):
+        raise SystemExit('Subprojects dir not found. Run this script in your source root directory.')
+
+    failed = 0
+
+    for name in dict.fromkeys(options.name):
+        try:
+            install_one(name, options.allow_insecure)
+        except WrapException as e:
+            print(str(e), file=sys.stderr)
+            failed += 1
+
+    if failed > 0:
+        raise SystemExit(1)
 
 def get_current_version(wrapfile: str) -> T.Tuple[str, str, str, str, T.Optional[str]]:
     cp = configparser.ConfigParser(interpolation=None)
@@ -143,11 +156,20 @@ def do_promotion(from_path: str, spdir_name: str) -> None:
         outputdir = os.path.join(spdir_name, sproj_name)
         if os.path.exists(outputdir):
             raise SystemExit(f'Output dir {outputdir} already exists. Will not overwrite.')
-        shutil.copytree(from_path, outputdir, ignore=shutil.ignore_patterns('subprojects'))
+
+        subpdir = mesonlib.get_subproject_dir()
+        if subpdir is not None:
+            ignore = shutil.ignore_patterns(subpdir)
+        else:
+            ignore = None
+
+        shutil.copytree(from_path, outputdir, ignore=ignore)
 
 def promote(options: 'argparse.Namespace') -> None:
     argument = options.project_path
-    spdir_name = 'subprojects'
+    spdir_name = mesonlib.get_subproject_dir()
+    if spdir_name is None:
+        raise SystemExit('Subproject dir not found. Run this script in your source root directory.')
     sprojs = mesonlib.detect_subprojects(spdir_name)
 
     # check if the argument is a full path to a subproject directory or wrap file
@@ -170,7 +192,8 @@ def promote(options: 'argparse.Namespace') -> None:
 
 def status(options: 'argparse.Namespace') -> None:
     print('Subproject status')
-    for w in glob('subprojects/*.wrap'):
+    subdir = mesonlib.unwrap(mesonlib.get_subproject_dir(), "This should only happen in a non-native subproject")
+    for w in glob(f'{subdir}/*.wrap'):
         name = os.path.basename(w)[:-5]
         try:
             (latest_branch, latest_revision) = get_latest_version(name, options.allow_insecure)
@@ -189,8 +212,12 @@ def status(options: 'argparse.Namespace') -> None:
 
 def update_db(options: 'argparse.Namespace') -> None:
     data = get_releases_data(options.allow_insecure)
-    Path('subprojects').mkdir(exist_ok=True)
-    with Path('subprojects/wrapdb.json').open('wb') as f:
+    subproject_dir_name = mesonlib.get_subproject_dir()
+    if subproject_dir_name is None:
+        raise SystemExit('Subproject dir not found. Run this script in your source root directory.')
+
+    os.makedirs(subproject_dir_name, exist_ok=True)
+    with open(os.path.join(subproject_dir_name, 'wrapdb.json'), 'wb') as f:
         f.write(data)
 
 def run(options: 'argparse.Namespace') -> int:

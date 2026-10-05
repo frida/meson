@@ -9,6 +9,7 @@ from ..envconfig import CMakeSkipCompilerTest
 from .common import language_map, cmake_get_generator_args
 from .. import mlog
 
+import os.path
 import shutil
 import typing as T
 from enum import Enum
@@ -154,7 +155,13 @@ class CMakeToolchain:
         # Only set these in a cross build. Otherwise CMake will trip up in native
         # builds and thing they are cross (which causes TRY_RUN() to break)
         if self.env.is_cross_build(when_building_for=self.for_machine):
-            defaults['CMAKE_SYSTEM_NAME'] = [SYSTEM_MAP.get(self.minfo.system, self.minfo.system)]
+            # OHOS is modelled as an Android subsystem in meson, but CMake has a
+            # dedicated OHOS system name, so map it explicitly.
+            if self.minfo.is_ohos():
+                system_name = 'OHOS'
+            else:
+                system_name = SYSTEM_MAP.get(self.minfo.system, self.minfo.system)
+            defaults['CMAKE_SYSTEM_NAME'] = [system_name]
             defaults['CMAKE_SYSTEM_PROCESSOR'] = [self.minfo.cpu_family]
 
         defaults['CMAKE_SIZEOF_VOID_P'] = ['8' if self.minfo.is_64_bit else '4']
@@ -173,8 +180,23 @@ class CMakeToolchain:
             return p
 
         # Set the compiler variables
+        comp_obj = self.compilers.get('c', self.compilers.get('cpp', None))
+        if comp_obj and comp_obj.get_id() == 'msvc':
+            debug_args = comp_obj.get_debug_args(True)
+            if '/Z7' in debug_args:
+                defaults['CMAKE_MSVC_DEBUG_INFORMATION_FORMAT'] = ['Embedded']
+            elif '/Zi' in debug_args:
+                defaults['CMAKE_MSVC_DEBUG_INFORMATION_FORMAT'] = ['ProgramDatabase']
+            elif '/ZI' in debug_args:
+                defaults['CMAKE_MSVC_DEBUG_INFORMATION_FORMAT'] = ['EditAndContinue']
+
         for lang, comp_obj in self.compilers.items():
-            prefix = 'CMAKE_{}_'.format(language_map.get(lang, lang.upper()))
+            language = language_map.get(lang)
+
+            if not language:
+                continue # unsupported language
+
+            prefix = 'CMAKE_{}_'.format(language)
 
             exe_list = comp_obj.get_exelist()
             if not exe_list:
@@ -188,6 +210,8 @@ class CMakeToolchain:
             defaults[prefix + 'COMPILER'] = exe_list
             if comp_obj.get_id() == 'clang-cl':
                 defaults['CMAKE_LINKER'] = comp_obj.get_linker_exelist()
+            if lang.startswith('objc') and comp_obj.get_id().startswith('clang'):
+                defaults[f'{prefix}FLAGS'] = ['-D__STDC__=1']
 
         return defaults
 
@@ -196,6 +220,8 @@ class CMakeToolchain:
         if compiler.get_argument_syntax() == 'msvc':
             return arg.startswith('/')
         else:
+            if os.path.basename(compiler.get_exe()) == 'zig' and arg in {'ar', 'cc', 'c++', 'dlltool', 'lib', 'ranlib', 'objcopy', 'rc'}:
+                return True
             return arg.startswith('-')
 
     def update_cmake_compiler_state(self) -> None:
@@ -206,9 +232,9 @@ class CMakeToolchain:
         # Generate the CMakeLists.txt
         mlog.debug('CMake Toolchain: Calling CMake once to generate the compiler state')
         languages = list(self.compilers.keys())
-        lang_ids = [language_map.get(x, x.upper()) for x in languages]
+        lang_ids = [language_map.get(x) for x in languages if x in language_map]
         cmake_content = dedent(f'''
-            cmake_minimum_required(VERSION 3.7)
+            cmake_minimum_required(VERSION 3.10)
             project(CompInfo {' '.join(lang_ids)})
         ''')
 
@@ -228,10 +254,15 @@ class CMakeToolchain:
         cmake_args += trace.trace_args()
         cmake_args += cmake_get_generator_args(self.env)
         cmake_args += [f'-DCMAKE_TOOLCHAIN_FILE={temp_toolchain_file.as_posix()}', '.']
-        rc, _, raw_trace = self.cmakebin.call(cmake_args, build_dir=build_dir, disable_cache=True)
+        rc, raw_stdout, raw_trace = self.cmakebin.call(cmake_args, build_dir=build_dir, disable_cache=True)
 
         if rc != 0:
             mlog.warning('CMake Toolchain: Failed to determine CMake compilers state')
+            mlog.debug(f' -- return code: {rc}')
+            for line in raw_stdout.split('\n'):
+                mlog.debug(f' -- stdout: {line.rstrip()}')
+            for line in raw_trace.split('\n'):
+                mlog.debug(f' -- stderr: {line.rstrip()}')
             return
 
         # Parse output
@@ -244,5 +275,6 @@ class CMakeToolchain:
             lang_cmake = language_map.get(lang, lang.upper())
             file_name = f'CMake{lang_cmake}Compiler.cmake'
             vars = vars_by_file.setdefault(file_name, {})
+            vars.pop(f'CMAKE_{lang_cmake}_COMPILER_LOADED', None)
             vars[f'CMAKE_{lang_cmake}_COMPILER_FORCED'] = ['1']
             self.cmakestate.update(lang, vars)

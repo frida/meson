@@ -12,17 +12,20 @@ build system.
 
 #### Dependencies
 
- - [Python](https://python.org) (version 3.7 or newer)
+ - [Python](https://python.org) (version 3.10 or newer)
  - [Ninja](https://ninja-build.org) (version 1.8.2 or newer)
 
 Latest Meson version supporting previous Python versions:
+- Python 3.9: **1.11**
+- Python 3.8: **1.11**
+- Python 3.7: **1.11**
 - Python 3.6: **0.61.5**
 - Python 3.5: **0.56.2**
 - Python 3.4: **0.45.1**
 
 #### Installing from source
 
-Meson is available on [PyPi](https://pypi.python.org/pypi/meson), so
+Meson is available on [PyPI](https://pypi.python.org/pypi/meson), so
 it can be installed with `pip3 install meson`.  The exact command to
 type to install with `pip` can vary between systems, be sure to use
 the Python 3 version of `pip`.
@@ -35,7 +38,7 @@ python3 -m pip install meson
 
 For builds using Ninja, Ninja can be downloaded directly from Ninja
 [GitHub release page](https://github.com/ninja-build/ninja/releases)
-or via [PyPi](https://pypi.python.org/pypi/ninja)
+or via [PyPI](https://pypi.python.org/pypi/ninja)
 
 ```console
 python3 -m pip install ninja

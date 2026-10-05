@@ -11,7 +11,6 @@ import typing as T
 
 if T.TYPE_CHECKING:
     from ...envconfig import MachineInfo
-    from ...environment import Environment
     from ...compilers.compilers import Compiler
 else:
     # This is a bit clever, for mypy we pretend that these mixins descend from
@@ -32,7 +31,7 @@ ccomp_optimization_args: T.Dict[str, T.List[str]] = {
 
 ccomp_debug_args: T.Dict[bool, T.List[str]] = {
     False: [],
-    True: ['-O0', '-g']
+    True: ['-g']
 }
 
 # As of CompCert 20.04, these arguments should be passed to the underlying gcc linker (via -WUl,<arg>)
@@ -85,7 +84,7 @@ class CompCertCompiler(Compiler):
                 patched_args.append(arg)
         return patched_args
 
-    def thread_flags(self, env: 'Environment') -> T.List[str]:
+    def thread_flags(self) -> T.List[str]:
         return []
 
     def get_preprocess_only_args(self) -> T.List[str]:

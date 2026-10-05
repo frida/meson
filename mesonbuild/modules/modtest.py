@@ -4,8 +4,8 @@
 from __future__ import annotations
 import typing as T
 
-from . import NewExtensionModule, ModuleInfo
-from ..interpreterbase import noKwargs, noPosargs
+from . import NewExtensionModule, ModuleInfo, ModuleReturnValue
+from ..interpreterbase import TypedArgs
 
 if T.TYPE_CHECKING:
     from . import ModuleState
@@ -23,10 +23,10 @@ class TestModule(NewExtensionModule):
             'print_hello': self.print_hello,
         })
 
-    @noKwargs
-    @noPosargs
-    def print_hello(self, state: ModuleState, args: T.List[TYPE_var], kwargs: TYPE_kwargs) -> None:
+    @TypedArgs('modtest.print_hello')
+    def print_hello(self, state: ModuleState, args: T.List[TYPE_var], kwargs: TYPE_kwargs) -> ModuleReturnValue:
         print('Hello from a Meson module')
+        return ModuleReturnValue(None, [])
 
 
 def initialize(interp: Interpreter) -> TestModule:

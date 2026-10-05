@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2017 The Meson development team
-# Copyright © 2023 Intel Corporation
+# Copyright © 2023-2025 Intel Corporation
 
 from __future__ import annotations
 
 
 import abc
 import argparse
-import gzip
+import itertools
 import os
 import sys
 import shlex
@@ -21,24 +21,29 @@ import typing as T
 from dataclasses import dataclass
 from glob import glob
 from pathlib import Path
-from mesonbuild.environment import Environment, detect_ninja
-from mesonbuild.mesonlib import (MesonException, RealPathAction, get_meson_command, quiet_git,
-                                 windows_proof_rmtree, setup_vsenv, OptionKey)
+from mesonbuild.environment import Environment
+from mesonbuild.tooldetect import detect_ninja
+from mesonbuild.mesonlib import (GIT, MesonException, RealPathAction, SimpleABC, get_meson_command, quiet_git,
+                                 windows_proof_rmtree, setup_vsenv, determine_worker_count, unwrap_err)
+from .options import OptionKey
 from mesonbuild.msetup import add_arguments as msetup_argparse
 from mesonbuild.wrap import wrap
-from mesonbuild import mlog, build, coredata
+from mesonbuild import mlog, build, cmdline
 from .scripts.meson_exe import run_exe
 
 if T.TYPE_CHECKING:
     from ._typing import ImmutableListProtocol
-    from .interpreterbase.baseobjects import SubProject
-    from .mesonlib import ExecutableSerialisation
+    from .mesonlib import ExecutableSerialisation, SubProject
 
-archive_choices = ['gztar', 'xztar', 'zip']
+archive_choices = ['bztar', 'gztar', 'xztar', 'zip']
 
-archive_extension = {'gztar': '.tar.gz',
+archive_extension = {'bztar': '.tar.bz2',
+                     'gztar': '.tar.gz',
                      'xztar': '.tar.xz',
                      'zip': '.zip'}
+
+if sys.version_info >= (3, 14):
+    tarfile.TarFile.extraction_filter = staticmethod(tarfile.fully_trusted_filter)
 
 # Note: when adding arguments, please also add them to the completion
 # scripts in $MESONSRC/data/shell-completions/
@@ -48,11 +53,13 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--allow-dirty', action='store_true',
                         help='Allow even when repository contains uncommitted changes.')
     parser.add_argument('--formats', default='xztar',
-                        help='Comma separated list of archive types to create. Supports xztar (default), gztar, and zip.')
+                        help='Comma separated list of archive types to create. Supports xztar (default), bztar, gztar, and zip.')
     parser.add_argument('--include-subprojects', action='store_true',
                         help='Include source code of subprojects that have been used for the build.')
     parser.add_argument('--no-tests', action='store_true',
                         help='Do not build and test generated packages.')
+    parser.add_argument('-j', '--num-processes', default=determine_worker_count(), type=int,
+                        help='How many parallel processes to use (e.g. for compilation and testing).')
 
 
 def create_hash(fname: str) -> None:
@@ -79,14 +86,43 @@ def is_git(src_root: str) -> bool:
     Checks if meson.build file at the root source directory is tracked by git.
     It could be a subproject part of the parent project git repository.
     '''
-    return quiet_git(['ls-files', '--error-unmatch', 'meson.build'], src_root)[0]
+    if quiet_git(['ls-files', '--error-unmatch', 'meson.build'], src_root)[0]:
+        return True
+
+    if os.path.exists(os.path.join(src_root, '.git')):
+        msg = 'Source tree looks like it may be a git repo, '
+        if not GIT:
+            msg += 'but git is not installed!'
+            if 'GITLAB_CI' in os.environ:
+                msg += ' This is a gitlab bug.'
+        else:
+            msg += 'but git returned a failure. '
+            p, oe = quiet_git(['status'], src_root)
+            if 'dubious ownership' in oe:
+                # For a few years now, git has absolved itself of the responsibility to implement
+                # robust, safe software. Instead of detecting the signs of a problematic scenario,
+                # they have chosen to consider many legitimate and reasonable use cases as "dangerous",
+                # and implemented the number one threat to security worldwide: alert fatigue. Having
+                # done so, they then washed their hands of the matter and permanently tabled the
+                # notion of adding fine-grained detection. This is not just useless, it is *worse*
+                # than useless.
+                #
+                # In our case, the error is triply meaningless since we are already executing build
+                # system commands from the same directory. Either way, reject the notion that git is
+                # well designed or that its error messaging is a valid approach to the problem space.
+                msg += 'This is a bug in git itself, please set `git config --global safe.directory "*"`'
+            else:
+                msg += 'meson.build may not have been committed to git?'
+        mlog.warning(msg)
+    return False
+
 
 def is_hg(src_root: str) -> bool:
     return os.path.isdir(os.path.join(src_root, '.hg'))
 
 
 @dataclass
-class Dist(metaclass=abc.ABCMeta):
+class Dist(metaclass=SimpleABC):
     dist_name: str
     src_root: str
     bld_root: str
@@ -140,6 +176,9 @@ class GitDist(Dist):
 
     def have_dirty_index(self) -> bool:
         '''Check whether there are uncommitted changes in git'''
+        # Optimistically call update-index, and disregard its return value. It could be read-only,
+        # and only the output of diff-index matters.
+        subprocess.call(['git', '-C', self.src_root, 'update-index', '-q', '--refresh'])
         ret = subprocess.call(['git', '-C', self.src_root, 'diff-index', '--quiet', 'HEAD'])
         return ret == 1
 
@@ -219,7 +258,12 @@ class GitDist(Dist):
 class HgDist(Dist):
     def have_dirty_index(self) -> bool:
         '''Check whether there are uncommitted changes in hg'''
-        out = subprocess.check_output(['hg', '-R', self.src_root, 'summary'])
+        env = os.environ.copy()
+        env['LC_ALL'] = 'C'
+        # cpython's gettext has a bug and uses LANGUAGE to override LC_ALL,
+        # contrary to the gettext spec
+        env.pop('LANGUAGE', None)
+        out = subprocess.check_output(['hg', '-R', self.src_root, 'summary'], env=env)
         return b'commit: (clean)' not in out
 
     def create_dist(self, archives: T.List[str]) -> T.List[str]:
@@ -231,6 +275,7 @@ class HgDist(Dist):
         os.makedirs(self.dist_sub, exist_ok=True)
         tarname = os.path.join(self.dist_sub, self.dist_name + '.tar')
         xzname = tarname + '.xz'
+        bz2name = tarname + '.bz2'
         gzname = tarname + '.gz'
         zipname = os.path.join(self.dist_sub, self.dist_name + '.zip')
         # Note that -X interprets relative paths using the current working
@@ -249,7 +294,13 @@ class HgDist(Dist):
             with lzma.open(xzname, 'wb') as xf, open(tarname, 'rb') as tf:
                 shutil.copyfileobj(tf, xf)
             output_names.append(xzname)
+        if 'bztar' in archives:
+            import bz2
+            with bz2.open(bz2name, 'wb') as bf, open(tarname, 'rb') as tf:
+                shutil.copyfileobj(tf, bf)
+            output_names.append(bz2name)
         if 'gztar' in archives:
+            import gzip
             with gzip.open(gzname, 'wb') as zf, open(tarname, 'rb') as tf:
                 shutil.copyfileobj(tf, zf)
             output_names.append(gzname)
@@ -277,7 +328,7 @@ def run_dist_steps(meson_command: T.List[str], unpacked_src_dir: str, builddir: 
         return 1
     return 0
 
-def check_dist(packagename: str, meson_command: ImmutableListProtocol[str], extra_meson_args: T.List[str], bld_root: str, privdir: str) -> int:
+def check_dist(packagename: str, _meson_command: ImmutableListProtocol[str], extra_meson_args: T.List[str], bld_root: str, privdir: str, num_processes: int = 1) -> int:
     print(f'Testing distribution package {packagename}')
     unpackdir = os.path.join(privdir, 'dist-unpack')
     builddir = os.path.join(privdir, 'dist-build')
@@ -286,11 +337,13 @@ def check_dist(packagename: str, meson_command: ImmutableListProtocol[str], extr
         if os.path.exists(p):
             windows_proof_rmtree(p)
         os.mkdir(p)
-    ninja_args = detect_ninja()
+    ninja = unwrap_err(detect_ninja(), 'Ninja is required but could not be found')
+    ninja_args = ninja + [f'-j{num_processes}']
     shutil.unpack_archive(packagename, unpackdir)
     unpacked_files = glob(os.path.join(unpackdir, '*'))
     assert len(unpacked_files) == 1
     unpacked_src_dir = unpacked_files[0]
+    meson_command = _meson_command.copy()
     meson_command += ['setup']
     meson_command += create_cmdline_args(bld_root)
     meson_command += extra_meson_args
@@ -308,11 +361,11 @@ def check_dist(packagename: str, meson_command: ImmutableListProtocol[str], extr
 def create_cmdline_args(bld_root: str) -> T.List[str]:
     parser = argparse.ArgumentParser()
     msetup_argparse(parser)
-    args = T.cast('coredata.SharedCMDOptions', parser.parse_args([]))
-    coredata.parse_cmd_line_options(args)
-    coredata.read_cmd_line_file(bld_root, args)
+    args = T.cast('cmdline.SharedCMDOptions', parser.parse_args([]))
+    cmdline.parse_cmd_line_options(args)
+    cmdline.read_cmd_line_file(bld_root, args)
     args.cmd_line_options.pop(OptionKey('backend'), '')
-    return shlex.split(coredata.format_cmd_line_options(args))
+    return shlex.split(cmdline.format_cmd_line_options(args))
 
 def determine_archives_to_generate(options: argparse.Namespace) -> T.List[str]:
     result = []
@@ -329,23 +382,29 @@ def run(options: argparse.Namespace) -> int:
     if not buildfile.is_file():
         raise MesonException(f'Directory {options.wd!r} does not seem to be a Meson build directory.')
     b = build.load(options.wd)
-    need_vsenv = T.cast('bool', b.environment.coredata.get_option(OptionKey('vsenv')))
+    need_vsenv = T.cast('bool', b.environment.coredata.optstore.get_value_for(OptionKey('vsenv')))
     setup_vsenv(need_vsenv)
     src_root = b.environment.source_dir
     bld_root = b.environment.build_dir
     priv_dir = os.path.join(bld_root, 'meson-private')
 
-    dist_name = b.project_name + '-' + b.project_version
+    dist_name = b.project_name
+    if b.project_version is not None:
+        dist_name = f'{dist_name}-{b.project_version}'
 
     archives = determine_archives_to_generate(options)
 
-    subprojects = {}
+    subprojects: T.Dict[SubProject, str] = {}
     extra_meson_args = []
     if options.include_subprojects:
-        subproject_dir = os.path.join(src_root, b.subproject_dir)
-        for sub in b.subprojects.host:
-            directory = wrap.get_directory(subproject_dir, sub)
-            subprojects[sub] = os.path.join(b.subproject_dir, directory)
+        resolver = wrap.Resolver(src_root, b.subproject_dir, silent=True)
+        for sub in set(itertools.chain(b.projects.host, b.projects.build)):
+            if not sub:
+                continue
+
+            directory = resolver.get_directory(sub)
+            if directory is not None:
+                subprojects[sub] = os.path.join(b.subproject_dir, directory)
         extra_meson_args.append('-Dwrap_mode=nodownload')
 
     cls: T.Type[Dist]
@@ -363,12 +422,10 @@ def run(options: argparse.Namespace) -> int:
     project = cls(dist_name, src_root, bld_root, b.dist_scripts, subprojects, options)
     names = project.create_dist(archives)
 
-    if names is None:
-        return 1
     rc = 0
     if not options.no_tests:
         # Check only one.
-        rc = check_dist(names[0], get_meson_command(), extra_meson_args, bld_root, priv_dir)
+        rc = check_dist(names[0], get_meson_command(), extra_meson_args, bld_root, priv_dir, options.num_processes)
     if rc == 0:
         for name in names:
             create_hash(name)

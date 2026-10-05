@@ -24,12 +24,12 @@ generate_dub_file("project name", "source/folder", key: "value" ...)
 **Example**
 ```meson
 dlang = import('dlang')
-dlang.generate_dub_file(meson.project_name().to_lower(), meson.source_root(),
+dlang.generate_dub_file(meson.project_name().to_lower(), meson.project_source_root(),
                         authors: 'Meson Team',
                         description: 'Test executable',
                         copyright: 'Copyright © 2018, Meson Team',
                         license: 'MIT',
-                        sourceFiles: 'test.d',
+                        sourceFiles: ['test.d'],
                         targetType: 'executable',
                         dependencies: my_dep
 )

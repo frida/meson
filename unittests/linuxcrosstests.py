@@ -3,6 +3,7 @@
 
 import os
 import shutil
+import subprocess
 import unittest
 import platform
 
@@ -14,7 +15,9 @@ from mesonbuild.mesonlib import MesonException
 
 
 from .baseplatformtests import BasePlatformTests
-from .helpers import *
+from .helpers import (
+    skipIfNoPkgconfig, skipIfNoExecutable
+)
 
 class BaseLinuxCrossTests(BasePlatformTests):
     # Don't pass --libdir when cross-compiling. We have tests that
@@ -23,9 +26,22 @@ class BaseLinuxCrossTests(BasePlatformTests):
 
 
 def should_run_cross_arm_tests():
-    return shutil.which('armv7l-unknown-linux-gnueabihf-gcc') and not platform.machine().lower().startswith('arm')
+    if is_windows():
+        return False
 
-@unittest.skipUnless(not is_windows() and should_run_cross_arm_tests(), "requires ability to cross compile to ARM")
+    if not platform.machine().lower().startswith('arm'):
+        return False
+
+    try:
+        # Check by calling the compiler rather than just checking that
+        # the file exists.  The compiler binary could be a symlink to
+        # ccache, in which case it will appear to exist but will fail
+        # when called.
+        return subprocess.call(['armv7l-unknown-linux-gnueabihf-gcc', '--version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+    except FileNotFoundError:
+        return False
+
+@unittest.skipUnless(should_run_cross_arm_tests(), "requires ability to cross compile to ARM")
 class LinuxCrossArmTests(BaseLinuxCrossTests):
     '''
     Tests that cross-compilation to Linux/ARM works
@@ -106,7 +122,7 @@ class LinuxCrossArmTests(BaseLinuxCrossTests):
             if i['name'] == 'libdir':
                 self.assertEqual(i['value'], 'lib')
                 return
-        self.assertTrue(False, 'Option libdir not in introspect data.')
+        self.fail('Option libdir not in introspect data.')
 
     def test_cross_libdir_subproject(self):
         # Guard against a regression where calling "subproject"
@@ -117,7 +133,7 @@ class LinuxCrossArmTests(BaseLinuxCrossTests):
             if i['name'] == 'libdir':
                 self.assertEqual(i['value'], 'fuf')
                 return
-        self.assertTrue(False, 'Libdir specified on command line gets reset.')
+        self.fail('Libdir specified on command line gets reset.')
 
     def test_std_remains(self):
         # C_std defined in project options must be in effect also when cross compiling.
@@ -128,9 +144,8 @@ class LinuxCrossArmTests(BaseLinuxCrossTests):
         self.build()
 
     @skipIfNoPkgconfig
+    @skipIfNoExecutable('arm-linux-gnueabihf-pkg-config')
     def test_pkg_config_option(self):
-        if not shutil.which('arm-linux-gnueabihf-pkg-config'):
-            raise unittest.SkipTest('Cross-pkgconfig not found.')
         testdir = os.path.join(self.unit_test_dir, '57 pkg_config_path option')
         self.init(testdir, extra_args=[
             '-Dbuild.pkg_config_path=' + os.path.join(testdir, 'build_extra_path'),
@@ -152,9 +167,19 @@ class LinuxCrossArmTests(BaseLinuxCrossTests):
 
 
 def should_run_cross_mingw_tests():
-    return shutil.which('x86_64-w64-mingw32-gcc') and not (is_windows() or is_cygwin())
+    if is_windows() or is_cygwin():
+        return False
 
-@unittest.skipUnless(not is_windows() and should_run_cross_mingw_tests(), "requires ability to cross compile with MinGW")
+    try:
+        # Check by calling the compiler rather than just checking that
+        # the file exists.  The compiler binary could be a symlink to
+        # ccache, in which case it will appear to exist but will fail
+        # when called.
+        return subprocess.call(['x86_64-w64-mingw32-gcc', '--version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+    except FileNotFoundError:
+        return False
+
+@unittest.skipUnless(should_run_cross_mingw_tests(), "requires ability to cross compile with MinGW")
 class LinuxCrossMingwTests(BaseLinuxCrossTests):
     '''
     Tests that cross-compilation to Windows/MinGW works
@@ -182,7 +207,7 @@ class LinuxCrossMingwTests(BaseLinuxCrossTests):
         self.meson_cross_files = [os.path.join(testdir, 'broken-cross.txt')]
         # Force tracebacks so we can detect them properly
         env = {'MESON_FORCE_BACKTRACE': '1'}
-        error_message = "An exe_wrapper is needed but was not found. Please define one in cross file and check the command and/or add it to PATH."
+        error_message = "An exe_wrapper is needed for " + self.builddir + "/prog.exe but was not found. Please define one in cross file and check the command and/or add it to PATH."
 
         with self.assertRaises(MesonException) as cm:
             # Must run in-process or we'll get a generic CalledProcessError

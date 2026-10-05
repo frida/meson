@@ -80,8 +80,8 @@ var = foo_dep.get_variable(cmake : 'CMAKE_VAR', pkgconfig : 'pkg-config-var', co
 ```
 
 It accepts the keywords 'cmake', 'pkgconfig', 'pkgconfig_define',
-'configtool', 'internal', and 'default_value'. 'pkgconfig_define'
-works just like the 'define_variable' argument to
+'configtool', 'internal', 'system', and 'default_value'.
+'pkgconfig_define' works just like the 'define_variable' argument to
 `get_pkgconfig_variable`. When this method is invoked the keyword
 corresponding to the underlying type of the dependency will be used to
 look for a variable. If that variable cannot be found or if the caller
@@ -266,11 +266,12 @@ DC="dmd" meson setup builddir
 
 ## Config tool
 
-[CUPS](#cups), [LLVM](#llvm), [pcap](#pcap), [WxWidgets](#wxwidgets),
-[libwmf](#libwmf), [GCrypt](#libgcrypt), [GPGME](#gpgme), and GnuStep either do not provide pkg-config
-modules or additionally can be detected via a config tool
-(cups-config, llvm-config, libgcrypt-config, etc). Meson has native support for these
-tools, and they can be found like other dependencies:
+[CUPS](#cups), [LLVM](#llvm), [ObjFW](#objfw), [pcap](#pcap),
+[WxWidgets](#wxwidgets), [libwmf](#libwmf), [GCrypt](#libgcrypt),
+[GPGME](#gpgme), and GnuStep either do not provide pkg-config modules or
+additionally can be detected via a config tool (cups-config, llvm-config,
+libgcrypt-config, etc). Meson has native support for these tools, and they can
+be found like other dependencies:
 
 ```meson
 pcap_dep = dependency('pcap', version : '>=1.0')
@@ -278,6 +279,7 @@ cups_dep = dependency('cups', version : '>=1.4')
 llvm_dep = dependency('llvm', version : '>=4.0')
 libgcrypt_dep = dependency('libgcrypt', version: '>= 1.8')
 gpgme_dep = dependency('gpgme', version: '>= 1.0')
+objfw_dep = dependency('objfw', version: '>= 1.0')
 ```
 
 *Since 0.55.0* Meson won't search $PATH any more for a config tool
@@ -314,6 +316,16 @@ dep = dependency('appleframeworks', modules : 'foundation')
 ```
 
 These dependencies can never be found for non-OSX hosts.
+
+## atomic (stdatomic)
+
+*(added 1.7.0)*
+
+Provides access to the atomic operations library. This first attempts
+to look for a valid atomic external library before trying to fallback
+to what is provided by the C runtime libraries.
+
+`method` may be `auto`, `builtin` or `system`.
 
 ## Blocks
 
@@ -376,6 +388,9 @@ additional toolkit libraries that need to be explicitly linked to. If the
 CUDA Toolkit cannot be found in the default paths on your system, you can
 set the path using `CUDA_PATH` explicitly.
 
+Cuda does not honor the `prefer_static` option, and will link statically unless
+the `static` keyword argument is set to `false`.
+
 ## CUPS
 
 `method` may be `auto`, `config-tool`, `pkg-config`, `cmake` or `extraframework`.
@@ -415,6 +430,34 @@ foreach h : check_headers
 endforeach
 ```
 
+## DIA SDK
+
+*(added 1.6.0)*
+
+Microsoft's Debug Interface Access SDK (DIA SDK) is available only on Windows,
+when using msvc, clang-cl or clang compiler from Microsoft Visual Studio.
+
+The DIA SDK runtime is not statically linked to target. The default usage
+method requires the runtime DLL (msdiaXXX.dll) to be manually registered in the
+OS with `regsrv32.exe` command, so it can be loaded using `CoCreateInstance`
+Windows function.
+
+Alternatively, you can use meson to copy the DIA runtime DLL to your build
+directory, and load it dynamically using `NoRegCoCreate` function provided by
+the DIA SDK. To facilitate this, you can read DLL path from dependency's
+variable 'dll' and use fs module to copy it. Example:
+
+```meson
+dia = dependency('diasdk', required: true)
+fs = import('fs')
+fs.copyfile(dia.get_variable('dll'))
+
+conf = configuration_data()
+conf.set('msdia_dll_name', fs.name(dia_dll_name))
+```
+
+Only the major version is available (eg. version is `14` for msdia140.dll).
+
 ## dl (libdl)
 
 *(added 0.62.0)*
@@ -436,17 +479,17 @@ providing them instead.
 GCC will use OpenCoarrays if present to implement coarrays, while Intel and NAG
 use internal coarray support.
 
-## GPGME
-
-*(added 0.51.0)*
-
-`method` may be `auto`, `config-tool` or `pkg-config`.
-
 ## GL
 
 This finds the OpenGL library in a way appropriate to the platform.
 
 `method` may be `auto`, `pkg-config` or `system`.
+
+## GPGME
+
+*(added 0.51.0)*
+
+`method` may be `auto`, `config-tool` or `pkg-config`.
 
 ## GTest and GMock
 
@@ -616,8 +659,8 @@ not provide them, it will search for the standard wrapper executables,
 `mpic`, `mpicxx`, `mpic++`, `mpifort`, `mpif90`, `mpif77`. If these
 are not in your path, they can be specified by setting the standard
 environment variables `MPICC`, `MPICXX`, `MPIFC`, `MPIF90`, or
-`MPIF77`, during configuration. It will also try to use the Microsoft
-implementation on windows via the `system` method.
+`MPIF77`, during configuration. On Windows, Meson uses the `system` method and
+searches for Microsoft MPI. *Since 1.11.0* Intel MPI is also supported.
 
 `method` may be `auto`, `config-tool`, `pkg-config` or `system`.
 
@@ -637,6 +680,44 @@ language-specific, you must specify the requested language using the
 
 Meson uses pkg-config to find NetCDF.
 
+## NumPy
+
+*(added 1.4.0)*
+
+`method` may be `auto`, `pkg-config`, or `config-tool`.
+`dependency('numpy')` supports regular use of the NumPy C API, for
+`numpy>=2.0`. Use of `numpy.f2py` for binding Fortran code isn't yet supported.
+
+## ObjFW
+
+*(added 1.5.0)*
+
+Meson has native support for ObjFW, including support for ObjFW packages.
+
+In order to use ObjFW, simply create the dependency:
+
+```meson
+objfw_dep = dependency('objfw')
+```
+
+In order to also use ObjFW packages, simply specify them as modules:
+
+```meson
+objfw_dep = dependency('objfw', modules: ['SomePackage'])
+```
+
+If you need a dependency with and without packages, e.g. because your tests
+want to use ObjFWTest, but you don't want to link your application against the
+tests, simply get two dependencies and use them as appropriate:
+
+```meson
+objfw_dep = dependency('objfw', modules: ['SomePackage'])
+objfwtest_dep = dependency('objfw', modules: ['ObjFWTest'])
+```
+
+Then use `objfw_dep` for your library and only `objfwtest_dep` (not both) for
+your tests.
+
 ## OpenMP
 
 *(added 0.46.0)*
@@ -651,14 +732,6 @@ The `language` keyword may used.
 *(added 0.62.0)*
 
 `method` may be `auto`, `pkg-config`, `system` or `cmake`.
-
-## NumPy
-
-*(added 1.4.0)*
-
-`method` may be `auto`, `pkg-config`, or `config-tool`.
-`dependency('numpy')` supports regular use of the NumPy C API.
-Use of `numpy.f2py` for binding Fortran code isn't yet supported.
 
 ## pcap
 
@@ -688,53 +761,44 @@ but dependency tries `pkg-config` first.
 
 ## Qt
 
-Meson has native Qt support. Its usage is best demonstrated with an
-example.
+Meson has native support for Qt
 
 ```meson
-qt5_mod = import('qt5')
-qt5widgets = dependency('qt5', modules : 'Widgets')
-
-processed = qt5_mod.preprocess(
-  moc_headers : 'mainWindow.h',   # Only headers that need moc should be put here
-  moc_sources : 'helperFile.cpp', # must have #include"moc_helperFile.cpp"
-  ui_files    : 'mainWindow.ui',
-  qresources  : 'resources.qrc',
-)
-
-q5exe = executable('qt5test',
-  sources     : ['main.cpp',
-                 'mainWindow.cpp',
-                 processed],
-  dependencies: qt5widgets)
+qt6_dep = dependency('qt6', modules : ['Core', 'Gui', 'Widgets'])
 ```
 
-Here we have an UI file created with Qt Designer and one source and
-header file each that require preprocessing with the `moc` tool. We
-also define a resource file to be compiled with `rcc`. We just have to
-tell Meson which files are which and it will take care of invoking all
-the necessary tools in the correct order, which is done with the
-`preprocess` method of the `qt5` module. Its output is simply put in
-the list of sources for the target. The `modules` keyword of
-`dependency` works just like it does with Boost. It tells which
-subparts of Qt the program uses.
+An optional `method` keyword argument can be set: `auto` (default), `pkg-config`, `config-tool` or `qmake` (*deprecated
+since 0.58.0*; use `config-tool` instead).
 
-You can set the `main` keyword argument to `true` to use the
-`WinMain()` function provided by qtmain static library (this argument
-does nothing on platforms other than Windows).
+An optional `main` boolean keyword argument can be set to `true` to add a link
+dependency on `Qt6EntryPoint` on Windows, which is in most cases necessary to
+be able to compile `win_subsystem: 'windows'` executables.
 
-Setting the optional `private_headers` keyword to true adds the
-private header include path of the given module(s) to the compiler
-flags. (since v0.47.0)
+The `modules` keyword receives an array of Qt module names that will be required
+and linked against.
 
-**Note** using private headers in your project is a bad idea, do so at
-your own risk.
+Obtaining the list of possible is not straightforward, here is a
+non exhaustive list of possible Qt6 modules:
 
-`method` may be `auto`, `pkg-config` or `qmake`.
+* `Core`
+* `Gui`
+* `Widgets`
+* `Network`
+* `Svg`
+* `Quick`
+* `Qml`
+* `QuickWidgets`
+* `QmlIntegration`
+
+**Notes:**
+
+* In Qt's documentation, the module names are referenced with and extra `Qt` prefix,
+e.g. `QtCore` or `QtQmlIntegration`.
+* For more information on how to build a Qt application with meson, see the [Qt6 module](Qt6-module.md)
 
 ## SDL2
 
-SDL2 can be located using `pkg-confg`, the `sdl2-config` config tool,
+SDL2 can be located using `pkg-config`, the `sdl2-config` config tool,
 as an OSX framework, or `cmake`.
 
 `method` may be `auto`, `config-tool`, `extraframework`,
@@ -808,7 +872,7 @@ $ wx-config --libs std stc
 ## Zlib
 
 Zlib ships with pkg-config and cmake support, but on some operating
-systems (windows, macOs, FreeBSD, dragonflybsd, android), it is provided as
+systems (Windows, macOS, FreeBSD, DragonFly BSD, Android), it is provided as
 part of the base operating system without pkg-config support. The new
 System finder can be used on these OSes to link with the bundled
 version.

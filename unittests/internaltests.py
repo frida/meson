@@ -4,6 +4,7 @@
 from configparser import ConfigParser
 from pathlib import Path
 from unittest import mock
+import argparse
 import contextlib
 import io
 import json
@@ -13,41 +14,171 @@ import pickle
 import stat
 import subprocess
 import tempfile
+import textwrap
 import typing as T
 import unittest
 
 import mesonbuild.mlog
 import mesonbuild.depfile
 import mesonbuild.dependencies.base
+import mesonbuild.dependencies.dev
 import mesonbuild.dependencies.factory
 import mesonbuild.envconfig
 import mesonbuild.environment
+import mesonbuild.modules.cuda
 import mesonbuild.modules.gnome
+import mesonbuild.scripts.depfixer
+import mesonbuild.scripts.env2mfile
+import mesonbuild.scripts.symbolextractor
 from mesonbuild import coredata
-from mesonbuild.compilers.c import ClangCCompiler, GnuCCompiler
-from mesonbuild.compilers.cpp import VisualStudioCPPCompiler
-from mesonbuild.compilers.d import DmdDCompiler
+from mesonbuild.compilers import Compiler
+from mesonbuild.compilers.c import ClangCCompiler, GnuCCompiler, QccCCompiler, VisualStudioCCompiler
+from mesonbuild.compilers.compilers import CompileCheckMode, ManyInOneLinkerOptionStyle
+from mesonbuild.compilers.cpp import ClangCPPCompiler, GnuCPPCompiler, VisualStudioCPPCompiler, QccCPPCompiler
+from mesonbuild.compilers.objcpp import ClangObjCPPCompiler, GnuObjCPPCompiler
+from mesonbuild.compilers.d import DmdDCompiler, LLVMDCompiler
+from mesonbuild.compilers.detect import detect_c_compiler
+from mesonbuild.compilers.mixins.visualstudio import MSVCCompiler, ClangClCompiler
 from mesonbuild.linkers import linkers
-from mesonbuild.interpreterbase import typed_pos_args, InvalidArguments, ObjectHolder
-from mesonbuild.interpreterbase import typed_pos_args, InvalidArguments, typed_kwargs, ContainerTypeInfo, KwargInfo
-from mesonbuild.mesonlib import (
-    LibType, MachineChoice, PerMachine, Version, is_windows, is_osx,
-    is_cygwin, is_openbsd, search_version, MesonException, OptionKey,
-    OptionType
+from mesonbuild.interpreterbase import (
+    ObjectHolder, DefaultObject, InvalidArguments, TypedArgs, ContainerTypeInfo,
+    KwargInfo, PosArgInfo, VarArgInfo,
 )
-from mesonbuild.interpreter.type_checking import in_set_validator, NoneType
+from mesonbuild.mesonlib import (
+    FileMode, LibType, MachineChoice, PerMachine, SimpleABC, Version, is_windows, is_osx,
+    is_cygwin, is_openbsd, search_version, MesonException, EnvironmentException, python_command,
+    version_check_to_range,
+)
+from mesonbuild.options import OptionKey, UserBooleanOption
+from mesonbuild.interpreter.type_checking import (
+    STR_PARG, INT_PARG, BOOL_PARG, STR_OARG, INT_OARG, STR_VARG,
+    INSTALL_MODE_KW, in_set_validator, NoneType,
+)
 from mesonbuild.dependencies.pkgconfig import PkgConfigDependency, PkgConfigInterface, PkgConfigCLI
 from mesonbuild.programs import ExternalProgram
 import mesonbuild.modules.pkgconfig
+from mesonbuild import utils
 
+from run_tests import get_fake_env, get_fake_options
 
-from run_tests import (
-    FakeCompilerOptions, get_fake_env, get_fake_options
-)
-
-from .helpers import *
+from .helpers import IS_CI, chdir, skipIfNoPkgconfig
 
 class InternalTests(unittest.TestCase):
+
+    def test_cmake_skip_compiler_test_invalid(self):
+        properties = mesonbuild.envconfig.Properties({'cmake_skip_compiler_test': True})
+        with self.assertRaisesRegex(
+                EnvironmentException,
+                '"True" is not a valid value for cmake_skip_compiler_test'):
+            properties.get_cmake_skip_compiler_test()
+
+    def test_machine_info_is_ohos(self):
+        def machine(system: str, subsystem: str) -> mesonbuild.envconfig.MachineInfo:
+            return mesonbuild.envconfig.MachineInfo(
+                system=system, cpu_family='aarch64', cpu='aarch64',
+                endian='little', kernel='linux', subsystem=subsystem)
+
+        # OHOS is modelled as an Android subsystem.
+        ohos = machine('android', 'ohos')
+        self.assertTrue(ohos.is_ohos())
+        self.assertTrue(ohos.is_android())
+
+        # Plain Android is not OHOS.
+        self.assertFalse(machine('android', 'android').is_ohos())
+        # A non-Android system with an 'ohos' subsystem is not OHOS either.
+        self.assertFalse(machine('linux', 'ohos').is_ohos())
+
+    def test_get_env_for_paths(self):
+        machines = {
+            system: mesonbuild.envconfig.MachineInfo(
+                system=system, cpu_family='x86_64', cpu='x86_64',
+                endian='little', kernel=None, subsystem=None)
+            for system in ('linux', 'windows', 'cygwin', 'darwin')
+        }
+
+        env = get_fake_env()
+
+        # Cross-compiling to Windows from a non-Windows build machine: Wine
+        # is used to run host binaries. 'extra_paths' (PATH-only entries,
+        # e.g. an executable's own directory) must still end up in WINEPATH
+        # too, so that "wine foo.exe" can find any DLLs sitting next to it,
+        # in addition to being in PATH itself (so "foo.exe" can be run
+        # directly via wine-binfmt, and so bash completion works). Callers
+        # such as Backend.get_devenv() rely on this to be able to put
+        # Windows DLL search directories into 'extra_paths' and still have
+        # them reach WINEPATH.
+        with self.subTest('cross-compiling to windows via wine'):
+            env.machines.build = machines['linux']
+            env.machines.host = machines['windows']
+            envvars = env.get_env_for_paths({'/lib/dir'}, {'/dll/dir'}).get_env({})
+            self.assertIn('WINEPATH', envvars)
+            self.assertIn('/lib/dir', envvars['WINEPATH'])
+            self.assertIn('/dll/dir', envvars['WINEPATH'])
+            self.assertIn('PATH', envvars)
+            self.assertIn('/dll/dir', envvars['PATH'])
+            self.assertNotIn('LD_LIBRARY_PATH', envvars)
+            self.assertNotIn('DYLD_LIBRARY_PATH', envvars)
+
+        # Natively building/running on Windows (build == host == windows, so
+        # need_wine is False): there is no WINEPATH, and library_paths is
+        # merged into extra_paths so everything ends up in PATH, since
+        # Windows has no rpath equivalent.
+        with self.subTest('native windows'):
+            env.machines.build = machines['windows']
+            env.machines.host = machines['windows']
+            envvars = env.get_env_for_paths({'/lib/dir'}, {'/dll/dir'}).get_env({})
+            self.assertNotIn('WINEPATH', envvars)
+            self.assertIn('PATH', envvars)
+            self.assertIn('/lib/dir', envvars['PATH'])
+            self.assertIn('/dll/dir', envvars['PATH'])
+
+        # Cygwin behaves like Windows here (no rpath), but is a distinct
+        # 'system' from 'windows', so it needs its own check of the `or
+        # host.is_cygwin()` branch. A Cygwin host also does not trigger
+        # need_wine (Wine cannot run Cygwin binaries), even when
+        # cross-compiling from a non-Windows build machine.
+        with self.subTest('cygwin'):
+            env.machines.build = machines['linux']
+            env.machines.host = machines['cygwin']
+            envvars = env.get_env_for_paths({'/lib/dir'}, {'/dll/dir'}).get_env({})
+            self.assertNotIn('WINEPATH', envvars)
+            self.assertIn('PATH', envvars)
+            self.assertIn('/lib/dir', envvars['PATH'])
+            self.assertIn('/dll/dir', envvars['PATH'])
+
+        # On Darwin, rpath works, so library_paths and extra_paths are kept
+        # separate instead of being merged: library_paths only need
+        # DYLD_LIBRARY_PATH as a fallback and are not also added to PATH.
+        with self.subTest('darwin'):
+            env.machines.build = machines['darwin']
+            env.machines.host = machines['darwin']
+            envvars = env.get_env_for_paths({'/lib/dir'}, {'/dll/dir'}).get_env({})
+            self.assertNotIn('WINEPATH', envvars)
+            self.assertIn('DYLD_LIBRARY_PATH', envvars)
+            self.assertIn('/lib/dir', envvars['DYLD_LIBRARY_PATH'])
+            self.assertNotIn('/dll/dir', envvars['DYLD_LIBRARY_PATH'])
+            self.assertIn('PATH', envvars)
+            self.assertIn('/dll/dir', envvars['PATH'])
+            self.assertNotIn('/lib/dir', envvars['PATH'])
+
+        # On Linux (and other Unix-likes), same shape as Darwin but using
+        # LD_LIBRARY_PATH instead.
+        with self.subTest('linux'):
+            env.machines.build = machines['linux']
+            env.machines.host = machines['linux']
+            envvars = env.get_env_for_paths({'/lib/dir'}, {'/dll/dir'}).get_env({})
+            self.assertNotIn('WINEPATH', envvars)
+            self.assertIn('LD_LIBRARY_PATH', envvars)
+            self.assertIn('/lib/dir', envvars['LD_LIBRARY_PATH'])
+            self.assertNotIn('/dll/dir', envvars['LD_LIBRARY_PATH'])
+            self.assertIn('PATH', envvars)
+            self.assertIn('/dll/dir', envvars['PATH'])
+            self.assertNotIn('/lib/dir', envvars['PATH'])
+
+        # Empty inputs should produce no environment variables at all.
+        with self.subTest('empty paths'):
+            envvars = env.get_env_for_paths(set(), set()).get_env({})
+            self.assertEqual(envvars, {})
 
     def test_version_number(self):
         self.assertEqual(search_version('foobar 1.2.3'), '1.2.3')
@@ -63,6 +194,10 @@ class InternalTests(unittest.TestCase):
         self.assertEqual(search_version('2016.x'), 'unknown version')
         self.assertEqual(search_version(r'something version is \033[32;2m1.2.0\033[0m.'), '1.2.0')
 
+        self.assertEqual(search_version(r'''(FooBar LLVM-Linux 5.0.0) clang version 21.9.0
+Target: riscv64-unknown-linux-gnu
+Thread model: posix'''), '21.9.0')
+
         # Literal output of mvn
         self.assertEqual(search_version(r'''\
             \033[1mApache Maven 3.8.1 (05c21c65bdfed0f71a2f2ada8b84da59348c4c5d)\033[0m
@@ -71,6 +206,56 @@ class InternalTests(unittest.TestCase):
             Default locale: en_US, platform encoding: UTF-8
             OS name: "linux", version: "5.12.17", arch: "amd64", family: "unix"'''),
             '3.8.1')
+
+    def test_simple_abc(self):
+        from abc import abstractmethod
+
+        # The whole point is for isinstance() to stay on the C fast path
+        self.assertNotIn('__instancecheck__', vars(SimpleABC))
+        self.assertNotIn('__subclasscheck__', vars(SimpleABC))
+
+        class A(metaclass=SimpleABC):
+            @abstractmethod
+            def foo(self): ...
+
+        class B(A, metaclass=SimpleABC):
+            def foo(self):
+                return 1
+
+            @abstractmethod
+            def bar(self): ...
+
+        class C(B):
+            def foo(self):
+                return 2
+
+        class D(B):
+            def bar(self):
+                return 3
+
+        self.assertEqual(A.__abstractmethods__, frozenset({'foo'}))
+        with self.assertRaises(TypeError):
+            A()
+
+        self.assertEqual(B.__abstractmethods__, frozenset({'bar'}))
+        self.assertTrue(issubclass(B, A))
+        with self.assertRaises(TypeError):
+            B()
+
+        self.assertEqual(C.__abstractmethods__, frozenset({'bar'}))
+        self.assertTrue(issubclass(C, A))
+        self.assertTrue(issubclass(C, B))
+        with self.assertRaises(TypeError):
+            # subclass inheriting SimpleABC
+            C()
+
+        self.assertEqual(D.__abstractmethods__, frozenset())
+        self.assertTrue(issubclass(D, A))
+        self.assertTrue(issubclass(D, B))
+        self.assertTrue(issubclass(D, D))
+        self.assertIsInstance(D(), A)
+        self.assertIsInstance(D(), B)
+        self.assertIsInstance(D(), D)
 
     def test_mode_symbolic_to_bits(self):
         modefunc = mesonbuild.mesonlib.FileMode.perms_s_to_bits
@@ -108,7 +293,7 @@ class InternalTests(unittest.TestCase):
                          stat.S_IRGRP | stat.S_IXGRP)
 
     def test_compiler_args_class_none_flush(self):
-        cc = ClangCCompiler([], [], 'fake', MachineChoice.HOST, False, mock.Mock())
+        cc = ClangCCompiler([], [], 'fake', MachineChoice.HOST, get_fake_env())
         a = cc.compiler_args(['-I.'])
         #first we are checking if the tree construction deduplicates the correct -I argument
         a += ['-I..']
@@ -125,14 +310,14 @@ class InternalTests(unittest.TestCase):
         self.assertEqual(a, ['-I.', '-I./tests2/', '-I./tests/', '-I..'])
 
     def test_compiler_args_class_d(self):
-        d = DmdDCompiler([], 'fake', MachineChoice.HOST, 'info', 'arch')
+        d = DmdDCompiler([], 'fake', MachineChoice.HOST, get_fake_env(), 'arch')
         # check include order is kept when deduplicating
         a = d.compiler_args(['-Ifirst', '-Isecond', '-Ithird'])
         a += ['-Ifirst']
         self.assertEqual(a, ['-Ifirst', '-Isecond', '-Ithird'])
 
     def test_compiler_args_class_clike(self):
-        cc = ClangCCompiler([], [], 'fake', MachineChoice.HOST, False, mock.Mock())
+        cc = ClangCCompiler([], [], 'fake', MachineChoice.HOST, get_fake_env())
         # Test that empty initialization works
         a = cc.compiler_args()
         self.assertEqual(a, [])
@@ -205,74 +390,459 @@ class InternalTests(unittest.TestCase):
         l.append_direct('-lbar')
         self.assertEqual(l, ['-Lfoodir', '-lfoo', '-Lbardir', '-lbar', '-lbar'])
         # Direct-adding with absolute path deduplicates
-        l.append_direct('/libbaz.a')
-        self.assertEqual(l, ['-Lfoodir', '-lfoo', '-Lbardir', '-lbar', '-lbar', '/libbaz.a'])
+        abspath = str(Path('/libbaz.a').resolve())
+        l.append_direct(abspath)
+        self.assertEqual(l, ['-Lfoodir', '-lfoo', '-Lbardir', '-lbar', '-lbar', abspath])
         # Adding libbaz again does nothing
-        l.append_direct('/libbaz.a')
-        self.assertEqual(l, ['-Lfoodir', '-lfoo', '-Lbardir', '-lbar', '-lbar', '/libbaz.a'])
+        l.append_direct(abspath)
+        self.assertEqual(l, ['-Lfoodir', '-lfoo', '-Lbardir', '-lbar', '-lbar', abspath])
 
+
+    def test_objcpp_cpp_rtti(self) -> None:
+        # Objective-C++ shares the cpp_rtti option, so it must produce
+        # the same flags as the matching C++ compiler.
+        # https://github.com/mesonbuild/meson/issues/16189
+        key = OptionKey('cpp_rtti', machine=MachineChoice.HOST)
+        compilers = (
+            (GnuObjCPPCompiler, GnuCPPCompiler),
+            (ClangObjCPPCompiler, ClangCPPCompiler),
+        )
+        for objcpp_cls, cpp_cls in compilers:
+            for value in (True, False):
+                env = get_fake_env()
+                ref = cpp_cls([], ['c++'], 'fake', MachineChoice.HOST, env)
+                for k, o in ref.get_options().items():
+                    if k.name == 'rtti':
+                        o = UserBooleanOption('cpp_rtti', 'Enable RTTI', value)
+                    env.coredata.optstore.add_compiler_option('cpp', k, o)
+                comp = objcpp_cls([], ['c++'], 'fake', MachineChoice.HOST, env)
+                self.assertEqual(comp.form_compileropt_key('rtti'), key)
+                self.assertIn(key, comp.get_options())
+                self.assertEqual(comp.get_option_compile_args(None),
+                                 ref.get_option_compile_args(None))
 
     def test_compiler_args_class_visualstudio(self):
-        linker = linkers.MSVCDynamicLinker(MachineChoice.HOST, [])
+        env = get_fake_env()
+        linker = linkers.MSVCDynamicLinker(env, MachineChoice.HOST, [])
         # Version just needs to be > 19.0.0
-        cc = VisualStudioCPPCompiler([], [], '20.00', MachineChoice.HOST, False, mock.Mock(), 'x64', linker=linker)
+        cc = VisualStudioCPPCompiler([], [], '20.00', MachineChoice.HOST, env, 'x64', linker=linker)
 
         a = cc.compiler_args(cc.get_always_args())
-        self.assertEqual(a.to_native(copy=True), ['/nologo', '/showIncludes', '/utf-8', '/Zc:__cplusplus'])
+        self.assertEqual(a.to_native(copy=True), ['/nologo', '/utf-8', '/Zc:__cplusplus'])
 
         # Ensure /source-charset: removes /utf-8
         a.append('/source-charset:utf-8')
-        self.assertEqual(a.to_native(copy=True), ['/nologo', '/showIncludes', '/Zc:__cplusplus', '/source-charset:utf-8'])
+        self.assertEqual(a.to_native(copy=True), ['/nologo', '/Zc:__cplusplus', '/source-charset:utf-8'])
 
         # Ensure /execution-charset: removes /utf-8
         a = cc.compiler_args(cc.get_always_args() + ['/execution-charset:utf-8'])
-        self.assertEqual(a.to_native(copy=True), ['/nologo', '/showIncludes', '/Zc:__cplusplus', '/execution-charset:utf-8'])
+        self.assertEqual(a.to_native(copy=True), ['/nologo', '/Zc:__cplusplus', '/execution-charset:utf-8'])
 
         # Ensure /validate-charset- removes /utf-8
         a = cc.compiler_args(cc.get_always_args() + ['/validate-charset-'])
-        self.assertEqual(a.to_native(copy=True), ['/nologo', '/showIncludes', '/Zc:__cplusplus', '/validate-charset-'])
+        self.assertEqual(a.to_native(copy=True), ['/nologo', '/Zc:__cplusplus', '/validate-charset-'])
 
+        # /showIncludes is needed for build dependency tracking in Ninja
+        # See: https://ninja-build.org/manual.html#_deps
+        a = cc.compiler_args(cc.get_show_dep_args())
+        self.assertEqual(a.to_native(copy=True), ['/showIncludes'])
+
+
+    def test_clike_sanity_check_drops_link_only_args_when_compile_only(self):
+        # When cross-compiling without an exe wrapper, CLikeCompiler's sanity
+        # check only compiles and never links because we can't run the
+        # executable. Therefore, it doesn't make sense for link-only arguments
+        # to be added on the command line. Some compilers warn about unused
+        # command line arguments.
+        env = get_fake_env()
+        linker = linkers.MoldDynamicLinker([], env, MachineChoice.HOST, '-Wl,', [])
+        cc = ClangCCompiler([], [], '14.0.0', MachineChoice.HOST, env, linker=linker)
+        cc.is_cross = True
+
+        with mock.patch.object(env, 'has_exe_wrapper', return_value=False), \
+             mock.patch.object(cc, '_get_basic_compiler_args', return_value=([], ['-fake-cross-link-arg'])), \
+             mock.patch.object(Compiler, '_sanity_check_compile_args', return_value=([], ['-Lfake-ldflags-arg'])):
+            _, largs = cc._sanity_check_compile_args('foo.c', 'foo.exe')
+
+        self.assertEqual(largs, [])
+
+
+    def test_msvc_unix_args_to_native(self):
+        # joined
+        self.assertEqual(MSVCCompiler.unix_args_to_native(['-isystemfoo']), ['/Ifoo'])
+        self.assertEqual(MSVCCompiler.unix_args_to_native(['-idirafterfoo']), ['/Ifoo'])
+        self.assertEqual(MSVCCompiler.unix_args_to_native(['-iquotefoo']), ['/Ifoo'])
+
+        # with = separator
+        self.assertEqual(MSVCCompiler.unix_args_to_native(['-isystem=foo']), ['/Ifoo'])
+        self.assertEqual(MSVCCompiler.unix_args_to_native(['-idirafter=foo']), ['/Ifoo'])
+        self.assertEqual(MSVCCompiler.unix_args_to_native(['-iquote=foo']), ['/Ifoo'])
+
+        # as separate argument
+        self.assertEqual(MSVCCompiler.unix_args_to_native(['-isystem', 'foo']), ['/Ifoo'])
+        self.assertEqual(MSVCCompiler.unix_args_to_native(['-idirafter', 'foo']), ['/Ifoo'])
+        self.assertEqual(MSVCCompiler.unix_args_to_native(['-iquote', 'foo']), ['/Ifoo'])
+
+    def test_clangcl_unix_args_to_native(self):
+        # joined
+        self.assertEqual(ClangClCompiler.unix_args_to_native(['-isystemfoo']), ['/clang:-isystemfoo'])
+        self.assertEqual(ClangClCompiler.unix_args_to_native(['-idirafterfoo']), ['/clang:-idirafterfoo'])
+        self.assertEqual(ClangClCompiler.unix_args_to_native(['-iquotefoo']), ['/clang:-iquotefoo'])
+
+        # with = separator
+        self.assertEqual(ClangClCompiler.unix_args_to_native(['-isystem=foo']), ['/clang:-isystemfoo'])
+        self.assertEqual(ClangClCompiler.unix_args_to_native(['-idirafter=foo']), ['/clang:-idirafterfoo'])
+        self.assertEqual(ClangClCompiler.unix_args_to_native(['-iquote=foo']), ['/clang:-iquotefoo'])
+
+        # as separate argument
+        self.assertEqual(ClangClCompiler.unix_args_to_native(['-isystem', 'foo']), ['/clang:-isystemfoo'])
+        self.assertEqual(ClangClCompiler.unix_args_to_native(['-idirafter', 'foo']), ['/clang:-idirafterfoo'])
+        self.assertEqual(ClangClCompiler.unix_args_to_native(['-iquote', 'foo']), ['/clang:-iquotefoo'])
+
+    def test_d_unix_args_to_native(self):
+        env = get_fake_env()
+        linker = linkers.GnuBFDDynamicLinker([], env, MachineChoice.HOST, ManyInOneLinkerOptionStyle('-Wl,', ','), [])
+        dmd = DmdDCompiler([], 'fake', MachineChoice.HOST, env, 'arch', linker=linker)
+        ldc = LLVMDCompiler([], 'fake', MachineChoice.HOST, env, 'arch', linker=linker)
+
+        for comp in (dmd, ldc):
+            with self.subTest(compiler=comp.id):
+                self.assertEqual(
+                    comp.unix_args_to_native(['/usr/lib/libfoo.so', 'libbar.so', 'libbaz.a', 'libqux.lib']),
+                    ['-L=/usr/lib/libfoo.so', '-L=libbar.so', '-L=libbaz.a', '-L=libqux.lib']
+                )
+                self.assertEqual(
+                    comp.unix_args_to_native(['-lfoo', '-L/usr/local/lib', '-pthread', '-Wl,-rpath=/foo']),
+                    ['-L=-lfoo', '-L=-L/usr/local/lib', '-L=-rpath=/foo']
+                )
+
+    def _fake_msvc_cc(self, cflags='-DCFLAG', ldflags='/SUBSYSTEM:CONSOLE'):
+        with mock.patch.dict(os.environ, {'CFLAGS': cflags, 'LDFLAGS': ldflags}):
+            env = get_fake_env()
+        env.add_lang_args('c', VisualStudioCCompiler, MachineChoice.HOST)
+        linker = linkers.MSVCDynamicLinker(env, MachineChoice.HOST, [])
+        return VisualStudioCCompiler([], [], '20.00', MachineChoice.HOST, env, 'x64', linker=linker)
+
+    def _fake_gnu_cc(self, cflags='-DCFLAG', ldflags='-Wl,-O1',
+                     linker_cls=linkers.GnuBFDDynamicLinker):
+        with mock.patch.dict(os.environ, {'CFLAGS': cflags, 'LDFLAGS': ldflags}):
+            env = get_fake_env()
+        env.add_lang_args('c', GnuCCompiler, MachineChoice.HOST)
+        linker = linker_cls([], env, MachineChoice.HOST,
+                            ManyInOneLinkerOptionStyle('-Wl,', ','), [])
+        return GnuCCompiler([], [], 'fake', MachineChoice.HOST, env, linker=linker)
+
+    def assertAfterLink(self, args: T.List[str], flag: str) -> None:
+        '''Assert that a linker-only flag is passed exactly once, after /link.'''
+        self.assertEqual(args.count(flag), 1, f'{flag} not passed exactly once in {args}')
+        self.assertIn('/link', args)
+        self.assertLess(args.index('/link'), args.index(flag), f'{flag} passed before /link in {args}')
+
+    def test_sanity_check_args_msvc(self):
+        cc = self._fake_msvc_cc()
+        args, largs = cc._sanity_check_compile_args('t.c', 't.exe')
+        # external link args are passed once, and after /link
+        self.assertAfterLink(largs, '/SUBSYSTEM:CONSOLE')
+        self.assertNotIn('/SUBSYSTEM:CONSOLE', args)
+        # so are the linker's own always args
+        self.assertAfterLink(largs, '/release')
+        self.assertNotIn('/release', args)
+        # external compile args are passed to the compiler, not to the linker
+        self.assertNotIn('-DCFLAG', largs)
+        self.assertEqual(args.count('-DCFLAG'), 1, args)
+        # linking, so name the executable with /Fe even if it is not a .exe
+        self.assertIn('/Fet.exe', args)
+        dll_args, _ = cc._sanity_check_compile_args('t.c', 't.dll')
+        self.assertIn('/Fet.dll', dll_args)
+
+    def test_sanity_check_args_msvc_compile_only(self):
+        cc = self._fake_msvc_cc()
+        cc.is_cross = True
+        with mock.patch.object(cc.environment, 'has_exe_wrapper', lambda: False):
+            args, largs = cc._sanity_check_compile_args('t.c', 't.exe')
+        # not linking: no linker arguments at all, and the output is an object
+        self.assertEqual(largs, [])
+        self.assertNotIn('/link', args)
+        self.assertNotIn('/SUBSYSTEM:CONSOLE', args)
+        self.assertIn('/Fot.exe', args)
+        self.assertIn(cc.get_compile_only_args()[0], args)
+
+    def test_sanity_check_args_gnu(self):
+        cc = self._fake_gnu_cc()
+        args, largs = cc._sanity_check_compile_args('t.c', 't.exe')
+        # external args must reach the probe, but only once
+        self.assertEqual(args.count('-DCFLAG'), 1, args)
+        self.assertEqual((args + largs).count('-Wl,-O1'), 1, (args, largs))
+        self.assertIn('-Wl,-O1', largs)
+
+    def test_compiler_check_args_msvc(self):
+        cc = self._fake_msvc_cc()
+        args = cc.build_wrapper_args(None, None, CompileCheckMode.LINK).to_native()
+        # linker-only flags belong after /link, not on the compiler command line
+        self.assertAfterLink(args, '/release')
+        self.assertAfterLink(args, '/SUBSYSTEM:CONSOLE')
+        args = cc.build_wrapper_args(None, None, CompileCheckMode.COMPILE).to_native()
+        self.assertNotIn('/release', args)
+        self.assertNotIn('/link', args)
+
+    def test_compiler_check_args_os2(self):
+        # the linker's always args (-Zomf on OS/2) must reach link mode checks
+        cc = self._fake_gnu_cc(linker_cls=linkers.OS2OmfDynamicLinker)
+        args = cc.build_wrapper_args(None, None, CompileCheckMode.LINK)
+        self.assertEqual(list(args).count('-Zomf'), 1, args)
+        self.assertNotIn('-Zomf', cc.build_wrapper_args(None, None, CompileCheckMode.COMPILE))
+
+    def test_find_library_args_msvc(self):
+        cc = self._fake_msvc_cc()
+
+        def fake_links(code, *, extra_args=None, **kwargs):
+            args = cc.build_wrapper_args(extra_args, None, CompileCheckMode.LINK).to_native()
+            self.assertAfterLink(args, '/release')
+            return (True, False)
+
+        with mock.patch.object(cc, 'links', fake_links):
+            cc.find_library('foo', [])
 
     def test_compiler_args_class_gnuld(self):
         ## Test --start/end-group
-        linker = linkers.GnuBFDDynamicLinker([], MachineChoice.HOST, '-Wl,', [])
-        gcc = GnuCCompiler([], [], 'fake', False, MachineChoice.HOST, mock.Mock(), linker=linker)
-        ## Ensure that the fake compiler is never called by overriding the relevant function
-        gcc.get_default_include_dirs = lambda: ['/usr/include', '/usr/share/include', '/usr/local/include']
-        ## Test that 'direct' append and extend works
-        l = gcc.compiler_args(['-Lfoodir', '-lfoo'])
-        self.assertEqual(l.to_native(copy=True), ['-Lfoodir', '-lfoo'])
-        # Direct-adding a library and a libpath appends both correctly
-        l.extend_direct(['-Lbardir', '-lbar'])
-        self.assertEqual(l.to_native(copy=True), ['-Lfoodir', '-Wl,--start-group', '-lfoo', '-Lbardir', '-lbar', '-Wl,--end-group'])
-        # Direct-adding the same library again still adds it
-        l.append_direct('-lbar')
-        self.assertEqual(l.to_native(copy=True), ['-Lfoodir', '-Wl,--start-group', '-lfoo', '-Lbardir', '-lbar', '-lbar', '-Wl,--end-group'])
-        # Direct-adding with absolute path deduplicates
-        l.append_direct('/libbaz.a')
-        self.assertEqual(l.to_native(copy=True), ['-Lfoodir', '-Wl,--start-group', '-lfoo', '-Lbardir', '-lbar', '-lbar', '/libbaz.a', '-Wl,--end-group'])
-        # Adding libbaz again does nothing
-        l.append_direct('/libbaz.a')
-        self.assertEqual(l.to_native(copy=True), ['-Lfoodir', '-Wl,--start-group', '-lfoo', '-Lbardir', '-lbar', '-lbar', '/libbaz.a', '-Wl,--end-group'])
-        # Adding a non-library argument doesn't include it in the group
-        l += ['-Lfoo', '-Wl,--export-dynamic']
-        self.assertEqual(l.to_native(copy=True), ['-Lfoo', '-Lfoodir', '-Wl,--start-group', '-lfoo', '-Lbardir', '-lbar', '-lbar', '/libbaz.a', '-Wl,--end-group', '-Wl,--export-dynamic'])
-        # -Wl,-lfoo is detected as a library and gets added to the group
-        l.append('-Wl,-ldl')
-        self.assertEqual(l.to_native(copy=True), ['-Lfoo', '-Lfoodir', '-Wl,--start-group', '-lfoo', '-Lbardir', '-lbar', '-lbar', '/libbaz.a', '-Wl,--export-dynamic', '-Wl,-ldl', '-Wl,--end-group'])
+        # QccCCompiler shares GnuCCompiler's GNU-linker group/dedup handling
+        # unmodified, so it must behave identically here.
+        for cls in (GnuCCompiler, QccCCompiler):
+            with self.subTest(compiler=cls.__name__):
+                env = get_fake_env()
+                linker = linkers.GnuBFDDynamicLinker([], env, MachineChoice.HOST, ManyInOneLinkerOptionStyle('-Wl,', ','), [])
+                gcc = cls([], [], 'fake', MachineChoice.HOST, env, linker=linker)
+                ## Ensure that the fake compiler is never called by overriding the relevant function
+                gcc.get_default_include_dirs = mock.Mock(return_value=['/usr/include', '/usr/share/include', '/usr/local/include'])
+                ## Test that 'direct' append and extend works
+                l = gcc.compiler_args(['-Lfoodir', '-lfoo'])
+                self.assertEqual(l.to_native(copy=True), ['-Lfoodir', '-lfoo'])
+                # Direct-adding a library and a libpath appends both correctly
+                l.extend_direct(['-Lbardir', '-lbar'])
+                self.assertEqual(l.to_native(copy=True), ['-Lfoodir', '-Wl,--start-group', '-lfoo', '-Lbardir', '-lbar', '-Wl,--end-group'])
+                # Direct-adding the same library again still adds it
+                l.append_direct('-lbar')
+                self.assertEqual(l.to_native(copy=True), ['-Lfoodir', '-Wl,--start-group', '-lfoo', '-Lbardir', '-lbar', '-lbar', '-Wl,--end-group'])
+                # Direct-adding with absolute path deduplicates
+                abspath = str(Path('/libbaz.a').resolve())
+                l.append_direct(abspath)
+                self.assertEqual(l.to_native(copy=True), ['-Lfoodir', '-Wl,--start-group', '-lfoo', '-Lbardir', '-lbar', '-lbar', abspath, '-Wl,--end-group'])
+                # Adding libbaz again does nothing
+                l.append_direct(abspath)
+                self.assertEqual(l.to_native(copy=True), ['-Lfoodir', '-Wl,--start-group', '-lfoo', '-Lbardir', '-lbar', '-lbar', abspath, '-Wl,--end-group'])
+                # Adding a non-library argument doesn't include it in the group
+                l += ['-Lfoo', '-Wl,--export-dynamic']
+                self.assertEqual(l.to_native(copy=True), ['-Lfoo', '-Lfoodir', '-Wl,--start-group', '-lfoo', '-Lbardir', '-lbar', '-lbar', abspath, '-Wl,--end-group', '-Wl,--export-dynamic'])
+                # -Wl,-lfoo is detected as a library and gets added to the group
+                l.append('-Wl,-ldl')
+                self.assertEqual(l.to_native(copy=True), ['-Lfoo', '-Lfoodir', '-Wl,--start-group', '-lfoo', '-Lbardir', '-lbar', '-lbar', abspath, '-Wl,--export-dynamic', '-Wl,-ldl', '-Wl,--end-group'])
 
     def test_compiler_args_remove_system(self):
         ## Test --start/end-group
-        linker = linkers.GnuBFDDynamicLinker([], MachineChoice.HOST, '-Wl,', [])
-        gcc = GnuCCompiler([], [], 'fake', False, MachineChoice.HOST, mock.Mock(), linker=linker)
-        ## Ensure that the fake compiler is never called by overriding the relevant function
-        gcc.get_default_include_dirs = lambda: ['/usr/include', '/usr/share/include', '/usr/local/include']
-        ## Test that 'direct' append and extend works
-        l = gcc.compiler_args(['-Lfoodir', '-lfoo'])
-        self.assertEqual(l.to_native(copy=True), ['-Lfoodir', '-lfoo'])
-        ## Test that to_native removes all system includes
-        l += ['-isystem/usr/include', '-isystem=/usr/share/include', '-DSOMETHING_IMPORTANT=1', '-isystem', '/usr/local/include']
-        self.assertEqual(l.to_native(copy=True), ['-Lfoodir', '-lfoo', '-DSOMETHING_IMPORTANT=1'])
+        # See test_compiler_args_class_gnuld for why QccCCompiler is included
+        # here too.
+        for cls in (GnuCCompiler, QccCCompiler):
+            with self.subTest(compiler=cls.__name__):
+                env = get_fake_env()
+                linker = linkers.GnuBFDDynamicLinker([], env, MachineChoice.HOST, ManyInOneLinkerOptionStyle('-Wl,', ','), [])
+                gcc = cls([], [], 'fake', MachineChoice.HOST, env, linker=linker)
+                ## Ensure that the fake compiler is never called by overriding the relevant function
+                gcc.get_default_include_dirs = mock.Mock(return_value=['/usr/include', '/usr/share/include', '/usr/local/include'])
+                ## Test that 'direct' append and extend works
+                l = gcc.compiler_args(['-Lfoodir', '-lfoo'])
+                self.assertEqual(l.to_native(copy=True), ['-Lfoodir', '-lfoo'])
+                ## Test that to_native removes all system includes
+                l += ['-isystem/usr/include', '-isystem=/usr/share/include', '-DSOMETHING_IMPORTANT=1', '-isystem', '/usr/local/include']
+                self.assertEqual(l.to_native(copy=True), ['-Lfoodir', '-lfoo', '-DSOMETHING_IMPORTANT=1'])
+
+    def test_qnx_platform_disables_pthread_flags(self):
+        # Threading is a platform property (QNX's libc includes pthreads)
+        # handled via MachineInfo.is_qnx() - so this applies to any compiler on QNX.
+        qnx = mesonbuild.envconfig.MachineInfo(
+            system='qnx', cpu_family='x86_64', cpu='x86_64',
+            endian='little', kernel=None, subsystem=None)
+
+        for cls in (GnuCCompiler, QccCCompiler):
+            with self.subTest(compiler=cls.__name__):
+                env = get_fake_env()
+                env.machines.host = qnx
+                linker = linkers.GnuBFDDynamicLinker([], env, MachineChoice.HOST, ManyInOneLinkerOptionStyle('-Wl,', ','), [])
+                cc = cls([], [], 'fake', MachineChoice.HOST, env, linker=linker)
+
+                self.assertEqual(cc.thread_flags(), [])
+                self.assertEqual(cc.thread_link_flags(), [])
+
+        # A non-QNX target still gets the normal -pthread.
+        linux = mesonbuild.envconfig.MachineInfo(
+            system='linux', cpu_family='x86_64', cpu='x86_64',
+            endian='little', kernel='linux', subsystem=None)
+        for cls in (GnuCCompiler, QccCCompiler):
+            with self.subTest(compiler=cls.__name__):
+                env = get_fake_env()
+                env.machines.host = linux
+                linker = linkers.GnuBFDDynamicLinker([], env, MachineChoice.HOST, ManyInOneLinkerOptionStyle('-Wl,', ','), [])
+                cc = cls([], [], 'fake', MachineChoice.HOST, env, linker=linker)
+
+                self.assertEqual(cc.thread_flags(), ['-pthread'])
+                self.assertEqual(cc.thread_link_flags(), ['-pthread'])
+
+    def test_symbolextractor_dispatches_qnx_to_gnu_syms(self):
+        # QNX ships GNU binutils, so a native QNX build should use the same
+        # readelf/nm-based extraction as Linux/Hurd/Haiku, not dummy_syms()
+        # (which forces a relink every time).
+        se = mesonbuild.scripts.symbolextractor
+        with mock.patch.object(se.mesonlib, 'is_linux', return_value=False), \
+             mock.patch.object(se.mesonlib, 'is_hurd', return_value=False), \
+             mock.patch.object(se.mesonlib, 'is_haiku', return_value=False), \
+             mock.patch.object(se.mesonlib, 'is_qnx', return_value=True), \
+             mock.patch.object(se, 'gnu_syms') as mock_gnu_syms, \
+             mock.patch.object(se, 'dummy_syms') as mock_dummy_syms:
+            options = argparse.Namespace(cross_host=None, builddir='builddir',
+                                         libfilename='lib.so', impfilename='lib.imp',
+                                         outfilename='out.symbols')
+            se.gen_symbols(options)
+            mock_gnu_syms.assert_called_once_with('lib.so', 'out.symbols')
+            mock_dummy_syms.assert_not_called()
+
+    def test_jni_platform_include_dir_qnx(self):
+        # JNI's jni_md.h lives in a per-OS subdirectory of a JDK's include/
+        # dir; QNX-targeting JDKs use 'qnx', matching the lowercase-OS-name
+        # convention used for every other platform here.
+        to_dir = mesonbuild.dependencies.dev.JNISystemDependency.get_platform_include_dir
+
+        def machine(system: str) -> mesonbuild.envconfig.MachineInfo:
+            return mesonbuild.envconfig.MachineInfo(
+                system=system, cpu_family='x86_64', cpu='x86_64',
+                endian='little', kernel=None, subsystem=None)
+
+        self.assertEqual(to_dir(machine('qnx')), 'qnx')
+        self.assertEqual(to_dir(machine('linux')), 'linux')
+        self.assertIsNone(to_dir(machine('some-made-up-os')))
+
+    def test_qcc_dependency_and_coverage_args(self):
+        # qcc/q++ mixin overrides that are pure argument-list transforms and
+        # need no real compiler binary or environment plumbing to exercise.
+        for cls in (QccCCompiler, QccCPPCompiler):
+            with self.subTest(compiler=cls.__name__):
+                env = get_fake_env()
+                qcc = cls([], [], 'fake', MachineChoice.HOST, env)
+
+                # Plain '-MD'/'-MF'/'-MQ' collide with qcc's own flag meanings; see
+                # get_dependency_gen_args().
+                self.assertEqual(
+                    qcc.get_dependency_gen_args('out.o', 'out.o.d'),
+                    ['-Wc,-MQ,out.o', '-Wc,-MMD', '-Wc,-MP', '-Wc,-MF,out.o.d'])
+
+                self.assertEqual(qcc.get_coverage_args(), ['-fprofile-arcs', '-ftest-coverage'])
+                self.assertEqual(qcc.get_coverage_link_args(), ['-fprofile-arcs', '-ftest-coverage'])
+
+    def test_qcc_runtime_library_auto_link_args(self):
+        # qcc's driver doesn't auto-link the runtime for '-fopenmp',
+        # '-fprofile-generate', or '-fsanitize=<name>' like gcc's driver does.
+        for cls in (QccCCompiler, QccCPPCompiler):
+            with self.subTest(compiler=cls.__name__):
+                env = get_fake_env()
+                linker = linkers.GnuBFDDynamicLinker([], env, MachineChoice.HOST, ManyInOneLinkerOptionStyle('-Wl,', ','), [])
+                qcc = cls([], [], 'fake', MachineChoice.HOST, env, linker=linker)
+
+                self.assertEqual(qcc.openmp_link_flags(), ['-fopenmp', '-lgomp'])
+
+                self.assertEqual(qcc.get_profile_generate_args(), ['-fprofile-generate', '-fprofile-arcs'])
+
+                # A trailing forced '-lc' accompanies any linked sanitizer runtime:
+                # on SDP 8.0, libgcc_eh.a's __gthread_once needs pthread_once,
+                # which '-Wl,--as-needed' will otherwise drop from a shared
+                # library link with no other pthread-touching reference.
+                keep_libc = ['-Wl,--no-as-needed', '-lc', '-Wl,--as-needed']
+                self.assertEqual(qcc.sanitizer_link_args(None, ['address']),
+                                 ['-fsanitize=address', '-lasan'] + keep_libc)
+                self.assertEqual(qcc.sanitizer_link_args(None, ['undefined']),
+                                 ['-fsanitize=undefined', '-lubsan'] + keep_libc)
+                self.assertEqual(qcc.sanitizer_link_args(None, ['address', 'leak']),
+                                 ['-fsanitize=address,leak', '-lasan', '-llsan'] + keep_libc)
+                # No libtsan in this SDP, so 'thread' passes through unaugmented,
+                # and since no runtime was linked, '-lc' isn't forced either.
+                self.assertEqual(qcc.sanitizer_link_args(None, ['thread']), ['-fsanitize=thread'])
+                self.assertEqual(qcc.sanitizer_link_args(None, []), [])
+
+    def test_qcc_preprocess_only_args(self):
+        # Bare '-P' is silently dropped by qcc's driver; '-Wp,-P' is required.
+        for cls, suffix in ((QccCCompiler, '-xc'), (QccCPPCompiler, '-xc++')):
+            with self.subTest(compiler=cls.__name__):
+                env = get_fake_env()
+                qcc = cls([], [], 'fake', MachineChoice.HOST, env)
+
+                self.assertEqual(qcc.get_preprocess_only_args(), ['-E', '-Wp,-P'])
+                # get_preprocess_to_file_args() builds on get_preprocess_only_args().
+                self.assertEqual(qcc.get_preprocess_to_file_args(), ['-E', '-Wp,-P', suffix])
+
+    def test_qcc_unsupported_features_raise(self):
+        # qcc/q++ have no alternate-linker-selection equivalent, so Meson
+        # must refuse it instead of silently emitting a flag known not to work.
+        for cls in (QccCCompiler, QccCPPCompiler):
+            with self.subTest(compiler=cls.__name__):
+                with self.assertRaises(MesonException):
+                    cls.use_linker_args('lld', '1.0')
+
+    def test_qcc_lto_works_but_thinlto_cache_raises(self):
+        # Plain LTO uses GnuCompiler's unmodified flags and needs no
+        # override; ThinLTO's incremental-cache flag is rejected by cc1.
+        for cls in (QccCCompiler, QccCPPCompiler):
+            with self.subTest(compiler=cls.__name__):
+                env = get_fake_env()
+                qcc = cls([], [], '12.2.0', MachineChoice.HOST, env, defines={})
+
+                self.assertEqual(qcc.get_lto_compile_args(threads=0), ['-flto=auto'])
+                self.assertEqual(qcc.get_lto_compile_args(threads=4), ['-flto=4'])
+                self.assertEqual(qcc.get_lto_link_args(threads=0), ['-flto=auto'])
+
+                with self.assertRaises(EnvironmentException):
+                    qcc.get_lto_compile_args(threads=0, thinlto_cache_dir='/tmp/cache')
+                with self.assertRaises(EnvironmentException):
+                    qcc.get_thinlto_cache_args('/tmp/cache')
+
+    def test_qcc_default_include_dirs_uses_double_verbose(self):
+        # qcc/q++ print no banner for plain '-v'; '-vv' is required.
+        with mock.patch('mesonbuild.compilers.mixins.gnu.gnulike_default_include_dirs') as m:
+            m.return_value = ['/usr/include']
+            env = get_fake_env()
+            qcc = QccCCompiler([], ['qcc'], 'fake', MachineChoice.HOST, env)
+            self.assertEqual(qcc.get_default_include_dirs(), ['/usr/include'])
+            self.assertEqual(m.call_args.kwargs.get('verbosity_arg'), '-vv')
+
+    def test_qcc_sanity_check_compile_args(self):
+        # qcc rejects '-c' mixed into an already link-shaped command, so
+        # compile and link modes must stay mutually exclusive.
+
+        # Each subtest gets its own environment and compiler, so neither can
+        # see state left behind by the other.
+        def make_qcc() -> QccCCompiler:
+            env = get_fake_env()
+            linker = linkers.GnuBFDDynamicLinker([], env, MachineChoice.HOST, ManyInOneLinkerOptionStyle('-Wl,', ','), [])
+            qcc = QccCCompiler([], ['qcc'], 'fake', MachineChoice.HOST, env, linker=linker)
+            env.add_lang_args('c', QccCCompiler, MachineChoice.HOST)
+            env.coredata.process_compiler_options('c', qcc, '')
+            return qcc
+
+        # Not cross (or cross with an exe wrapper): a link-shaped command,
+        # source and output named directly, no '-c'.
+        with self.subTest('native'):
+            qcc = make_qcc()
+            self.assertFalse(qcc.is_cross)
+            args, largs = qcc._sanity_check_compile_args('sanity.c', 'sanity.exe')
+            self.assertNotIn('-c', args)
+            self.assertIn('sanity.c', args)
+            self.assertIn('sanity.exe', args)
+            self.assertEqual(largs, [])
+
+        # Cross without an exe wrapper: a compile-only command instead.
+        with self.subTest('cross without exe wrapper'):
+            qcc = make_qcc()
+            qcc.is_cross = True
+            with mock.patch.object(qcc.environment, 'has_exe_wrapper', return_value=False):
+                args, largs = qcc._sanity_check_compile_args('sanity.c', 'sanity.exe')
+            self.assertIn('-c', args)
+            self.assertIn('sanity.c', args)
 
     def test_string_templates_substitution(self):
         dictfunc = mesonbuild.mesonlib.get_filenames_templates_dict
@@ -287,6 +857,7 @@ class InternalTests(unittest.TestCase):
         outputs = []
         ret = dictfunc(inputs, outputs)
         d = {'@INPUT@': inputs, '@INPUT0@': inputs[0],
+             '@PLAINNAME0@': 'foo.c.in', '@BASENAME0@': 'foo.c',
              '@PLAINNAME@': 'foo.c.in', '@BASENAME@': 'foo.c'}
         # Check dictionary
         self.assertEqual(ret, d)
@@ -309,6 +880,7 @@ class InternalTests(unittest.TestCase):
         outputs = ['out.c']
         ret = dictfunc(inputs, outputs)
         d = {'@INPUT@': inputs, '@INPUT0@': inputs[0],
+             '@PLAINNAME0@': 'foo.c.in', '@BASENAME0@': 'foo.c',
              '@PLAINNAME@': 'foo.c.in', '@BASENAME@': 'foo.c',
              '@OUTPUT@': outputs, '@OUTPUT0@': outputs[0], '@OUTDIR@': '.'}
         # Check dictionary
@@ -316,6 +888,9 @@ class InternalTests(unittest.TestCase):
         # Check substitutions
         cmd = ['some', 'ordinary', 'strings']
         self.assertEqual(substfunc(cmd, d), cmd)
+        cmd = ['@INPUT@ @OUTPUT@']
+        self.assertEqual(substfunc(cmd, d),
+                         [f'{inputs[0]} {outputs[0]}'])
         cmd = ['@INPUT@.out', '@OUTPUT@', 'strings']
         self.assertEqual(substfunc(cmd, d),
                          [inputs[0] + '.out'] + outputs + cmd[2:])
@@ -330,6 +905,7 @@ class InternalTests(unittest.TestCase):
         outputs = ['dir/out.c']
         ret = dictfunc(inputs, outputs)
         d = {'@INPUT@': inputs, '@INPUT0@': inputs[0],
+             '@PLAINNAME0@': 'foo.c.in', '@BASENAME0@': 'foo.c',
              '@PLAINNAME@': 'foo.c.in', '@BASENAME@': 'foo.c',
              '@OUTPUT@': outputs, '@OUTPUT0@': outputs[0], '@OUTDIR@': 'dir'}
         # Check dictionary
@@ -339,7 +915,9 @@ class InternalTests(unittest.TestCase):
         inputs = ['bar/foo.c.in', 'baz/foo.c.in']
         outputs = []
         ret = dictfunc(inputs, outputs)
-        d = {'@INPUT@': inputs, '@INPUT0@': inputs[0], '@INPUT1@': inputs[1]}
+        d = {'@INPUT@': inputs, '@INPUT0@': inputs[0], '@INPUT1@': inputs[1],
+             '@PLAINNAME0@': 'foo.c.in', '@PLAINNAME1@': 'foo.c.in',
+             '@BASENAME0@': 'foo.c', '@BASENAME1@': 'foo.c'}
         # Check dictionary
         self.assertEqual(ret, d)
         # Check substitutions
@@ -376,6 +954,8 @@ class InternalTests(unittest.TestCase):
         outputs = ['dir/out.c']
         ret = dictfunc(inputs, outputs)
         d = {'@INPUT@': inputs, '@INPUT0@': inputs[0], '@INPUT1@': inputs[1],
+             '@PLAINNAME0@': 'foo.c.in', '@PLAINNAME1@': 'foo.c.in',
+             '@BASENAME0@': 'foo.c', '@BASENAME1@': 'foo.c',
              '@OUTPUT@': outputs, '@OUTPUT0@': outputs[0], '@OUTDIR@': 'dir'}
         # Check dictionary
         self.assertEqual(ret, d)
@@ -402,6 +982,8 @@ class InternalTests(unittest.TestCase):
         outputs = ['dir/out.c', 'dir/out2.c']
         ret = dictfunc(inputs, outputs)
         d = {'@INPUT@': inputs, '@INPUT0@': inputs[0], '@INPUT1@': inputs[1],
+             '@PLAINNAME0@': 'foo.c.in', '@PLAINNAME1@': 'foo.c.in',
+             '@BASENAME0@': 'foo.c', '@BASENAME1@': 'foo.c',
              '@OUTPUT@': outputs, '@OUTPUT0@': outputs[0], '@OUTPUT1@': outputs[1],
              '@OUTDIR@': 'dir'}
         # Check dictionary
@@ -521,18 +1103,18 @@ class InternalTests(unittest.TestCase):
         kwargs = {'sources': [1, [2, [3]]]}
         self.assertEqual([1, 2, 3], extract(kwargs, 'sources'))
 
-    def _test_all_naming(self, cc, env, patterns, platform):
+    def _test_all_naming(self, cc, patterns, platform):
         shr = patterns[platform]['shared']
         stc = patterns[platform]['static']
         shrstc = shr + tuple(x for x in stc if x not in shr)
         stcshr = stc + tuple(x for x in shr if x not in stc)
-        p = cc.get_library_naming(env, LibType.SHARED)
+        p = cc.get_library_naming(LibType.SHARED)
         self.assertEqual(p, shr)
-        p = cc.get_library_naming(env, LibType.STATIC)
+        p = cc.get_library_naming(LibType.STATIC)
         self.assertEqual(p, stc)
-        p = cc.get_library_naming(env, LibType.PREFER_STATIC)
+        p = cc.get_library_naming(LibType.PREFER_STATIC)
         self.assertEqual(p, stcshr)
-        p = cc.get_library_naming(env, LibType.PREFER_SHARED)
+        p = cc.get_library_naming(LibType.PREFER_SHARED)
         self.assertEqual(p, shrstc)
         # Test find library by mocking up openbsd
         if platform != 'openbsd':
@@ -541,10 +1123,14 @@ class InternalTests(unittest.TestCase):
             for i in ['libfoo.so.6.0', 'libfoo.so.5.0', 'libfoo.so.54.0', 'libfoo.so.66a.0b', 'libfoo.so.70.0.so.1',
                       'libbar.so.7.10', 'libbar.so.7.9', 'libbar.so.7.9.3']:
                 libpath = Path(tmpdir) / i
-                libpath.write_text('', encoding='utf-8')
-            found = cc._find_library_real('foo', env, [tmpdir], '', LibType.PREFER_SHARED, lib_prefix_warning=True)
+                src = libpath.with_suffix('.c')
+                with src.open('w', encoding='utf-8') as f:
+                    f.write('int meson_foobar (void) { return 0; }')
+                subprocess.check_call(['gcc', str(src), '-o', str(libpath), '-shared'])
+
+            found = cc._find_library_real('foo', [tmpdir], 'int main(void) { return 0; }', LibType.PREFER_SHARED, lib_prefix_warning=True, ignore_system_dirs=False)
             self.assertEqual(os.path.basename(found[0]), 'libfoo.so.54.0')
-            found = cc._find_library_real('bar', env, [tmpdir], '', LibType.PREFER_SHARED, lib_prefix_warning=True)
+            found = cc._find_library_real('bar', [tmpdir], 'int main(void) { return 0; }', LibType.PREFER_SHARED, lib_prefix_warning=True, ignore_system_dirs=False)
             self.assertEqual(os.path.basename(found[0]), 'libbar.so.7.10')
 
     def test_find_library_patterns(self):
@@ -571,26 +1157,110 @@ class InternalTests(unittest.TestCase):
         env = get_fake_env()
         cc = detect_c_compiler(env, MachineChoice.HOST)
         if is_osx():
-            self._test_all_naming(cc, env, patterns, 'darwin')
+            self._test_all_naming(cc, patterns, 'darwin')
         elif is_cygwin():
-            self._test_all_naming(cc, env, patterns, 'cygwin')
+            self._test_all_naming(cc, patterns, 'cygwin')
         elif is_windows():
             if cc.get_argument_syntax() == 'msvc':
-                self._test_all_naming(cc, env, patterns, 'windows-msvc')
+                self._test_all_naming(cc, patterns, 'windows-msvc')
             else:
-                self._test_all_naming(cc, env, patterns, 'windows-mingw')
+                self._test_all_naming(cc, patterns, 'windows-mingw')
         elif is_openbsd():
-            self._test_all_naming(cc, env, patterns, 'openbsd')
+            self._test_all_naming(cc, patterns, 'openbsd')
         else:
-            self._test_all_naming(cc, env, patterns, 'linux')
+            self._test_all_naming(cc, patterns, 'linux')
             env.machines.host.system = 'openbsd'
-            self._test_all_naming(cc, env, patterns, 'openbsd')
+            self._test_all_naming(cc, patterns, 'openbsd')
             env.machines.host.system = 'darwin'
-            self._test_all_naming(cc, env, patterns, 'darwin')
+            self._test_all_naming(cc, patterns, 'darwin')
             env.machines.host.system = 'cygwin'
-            self._test_all_naming(cc, env, patterns, 'cygwin')
+            self._test_all_naming(cc, patterns, 'cygwin')
             env.machines.host.system = 'windows'
-            self._test_all_naming(cc, env, patterns, 'windows-mingw')
+            self._test_all_naming(cc, patterns, 'windows-mingw')
+
+        self._test_find_library_undefined(cc)
+
+    def _test_find_library_undefined(self, cc):
+        '''
+        find_library checks if its argument both exists and can be
+        linked against, but it must tolerate underlinked static
+        libraries.
+
+        https://github.com/mesonbuild/meson/issues/15601
+        '''
+        def create_static_lib_with_undefined(name):
+            src = name.with_suffix('.c')
+            out = name.with_suffix('.o')
+            with src.open('w', encoding='utf-8') as f:
+                f.write('extern int get_cookie();')
+                f.write('int meson_foobar (void) { return get_cookie(); }')
+            # use of x86_64 is hardcoded in run_tests.py:get_fake_env()
+            if is_osx():
+                subprocess.check_call(['clang', '-c', str(src), '-o', str(out), '-arch', 'x86_64'])
+            else:
+                subprocess.check_call(['gcc', '-c', str(src), '-o', str(out)])
+            subprocess.check_call(['ar', 'csr', str(name), str(out)])
+
+        def create_static_lib_empty(name):
+            with name.open('w', encoding='utf-8') as f:
+                f.write("garbage")
+
+        # The test relies on some open-coded toolchain invocations for
+        # library creation in create_static_lib_with_undefined.
+        if is_windows() or is_cygwin():
+            return
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p1 = Path(tmpdir)
+            create_static_lib_with_undefined(p1 / 'libfoo.a')
+
+            code = 'int meson_foobar (void); int main(void) { return meson_foobar(); }'
+
+            # Check that we always tolerate undefined references in a static
+            # library regardless of the library type.
+            for type in (LibType.STATIC, LibType.PREFER_STATIC, LibType.PREFER_SHARED):
+                found = cc._find_library_real('foo', [tmpdir],
+                                              code,
+                                              type, lib_prefix_warning=True, ignore_system_dirs=False)
+                self.assertEqual(os.path.basename(found[0]), 'libfoo.a')
+
+            # Check that we reject broken static libraries unless we were
+            # told to only find a static library.
+            create_static_lib_empty(p1 / 'libbar.a')
+
+            # We have a broken static library *and* we indicated we want a static
+            # library, so we don't perform a link test.
+            found = cc._find_library_real('bar', [tmpdir],
+                                          code,
+                                          LibType.STATIC, lib_prefix_warning=True, ignore_system_dirs=False)
+            self.assertEqual(os.path.basename(found[0]), 'libbar.a')
+
+            # We have a broken static library we're testing against but we only said
+            # we'd prefer static, not that it must be static: the heuristic
+            # says it likely isn't a special toolchain library, so we perform a
+            # link test.
+            found = cc._find_library_real('bar', [tmpdir],
+                                          code,
+                                          LibType.PREFER_STATIC, lib_prefix_warning=True, ignore_system_dirs=False)
+            self.assertIsNone(found, 'Unexpectedly found a library with PREFER_STATIC, link test expected to reject it')
+
+            # We have a broken static library we're testing against but we only said
+            # we'd prefer shared, not that it must be shared: the heuristic
+            # says it likely isn't a special toolchain library, so we perform a
+            # link test.
+            found = cc._find_library_real('bar', [tmpdir],
+                                          code,
+                                          LibType.PREFER_SHARED, lib_prefix_warning=True, ignore_system_dirs=False)
+            self.assertIsNone(found, 'Unexpectedly found a library with PREFER_SHARED, link test expected to reject it')
+
+            # We asked for a shared library and we only got a broken
+            # static one. We only tolerate them being broken if people
+            # explicitly ask for it w/ static: true, so we perform a link
+            # test.
+            found = cc._find_library_real('bar', [tmpdir],
+                                          code,
+                                          LibType.SHARED, lib_prefix_warning=True, ignore_system_dirs=False)
+            self.assertIsNone(found, 'Unexpectedly found a library with SHARED')
 
     @skipIfNoPkgconfig
     def test_pkgconfig_parse_libs(self):
@@ -600,23 +1270,26 @@ class InternalTests(unittest.TestCase):
         https://github.com/mesonbuild/meson/issues/3951
         '''
         def create_static_lib(name):
-            if not is_osx():
-                name.open('w', encoding='utf-8').close()
-                return
             src = name.with_suffix('.c')
             out = name.with_suffix('.o')
             with src.open('w', encoding='utf-8') as f:
                 f.write('int meson_foobar (void) { return 0; }')
             # use of x86_64 is hardcoded in run_tests.py:get_fake_env()
-            subprocess.check_call(['clang', '-c', str(src), '-o', str(out), '-arch', 'x86_64'])
+            if is_osx():
+                subprocess.check_call(['clang', '-c', str(src), '-o', str(out), '-arch', 'x86_64'])
+            else:
+                subprocess.check_call(['gcc', '-c', str(src), '-o', str(out)])
             subprocess.check_call(['ar', 'csr', str(name), str(out)])
 
+        # The test relies on some open-coded toolchain invocations for
+        # library creation in create_static_lib.
+        if is_windows() or is_cygwin():
+            return
+
         with tempfile.TemporaryDirectory() as tmpdir:
-            pkgbin = ExternalProgram('pkg-config', command=['pkg-config'], silent=True)
             env = get_fake_env()
             compiler = detect_c_compiler(env, MachineChoice.HOST)
             env.coredata.compilers.host = {'c': compiler}
-            env.coredata.options[OptionKey('link_args', lang='c')] = FakeCompilerOptions()
             p1 = Path(tmpdir) / '1'
             p2 = Path(tmpdir) / '2'
             p1.mkdir()
@@ -646,7 +1319,7 @@ class InternalTests(unittest.TestCase):
 
             with mock.patch.object(PkgConfigInterface, 'instance') as instance_method:
                 instance_method.return_value = FakeInstance(env, MachineChoice.HOST, silent=True)
-                kwargs = {'required': True, 'silent': True}
+                kwargs = {'required': True, 'silent': True, 'native': MachineChoice.HOST}
                 foo_dep = PkgConfigDependency('foo', env, kwargs)
                 self.assertEqual(foo_dep.get_link_args(),
                                  [(p1 / 'libfoo.a').as_posix(), (p2 / 'libbar.a').as_posix()])
@@ -660,6 +1333,37 @@ class InternalTests(unittest.TestCase):
                     for link_arg in link_args:
                         for lib in ('pthread', 'm', 'c', 'dl', 'rt'):
                             self.assertNotIn(f'lib{lib}.a', link_arg, msg=link_args)
+
+    def test_program_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script_path = Path(tmpdir) / 'script.py'
+            script_path.write_text('import sys\nprint(sys.argv[1])\n', encoding='utf-8')
+            script_path.chmod(0o755)
+
+            inputs: list[tuple[str, str | None]] = [
+                ('',  None),
+                ('1',  None),
+                ('1.2.4',  '1.2.4'),
+                ('1 1.2.4',  '1.2.4'),
+                ('foo version 1.2.4',  '1.2.4'),
+                ('foo 1.2.4.',  '1.2.4'),
+                ('foo 1.2.4',  '1.2.4'),
+                ('foo 1.2.4 bar',  '1.2.4'),
+                ('foo 10.0.0',  '10.0.0'),
+                ('50 5.4.0',  '5.4.0'),
+                ('This is perl 5, version 40, subversion 0 (v5.40.0)',  '5.40.0'),
+                ('git version 2.48.0.rc1',  '2.48.0'),
+            ]
+
+            for output, expected in inputs:
+                prog = ExternalProgram('script', command=python_command + [str(script_path), output], silent=True)
+
+                with self.subTest(output=output, expected=expected):
+                    if expected is None:
+                        with self.assertRaisesRegex(MesonException, 'Could not find a version number'):
+                            prog.get_version()
+                    else:
+                        self.assertEqual(prog.get_version(), expected)
 
     def test_version_compare(self):
         comparefunc = mesonbuild.mesonlib.version_compare_many
@@ -781,29 +1485,6 @@ class InternalTests(unittest.TestCase):
                 for o, name in [(operator.lt, 'lt'), (operator.le, 'le'), (operator.eq, 'eq')]:
                     self.assertFalse(o(ver_a, ver_b), f'{ver_a} {name} {ver_b}')
 
-    def test_msvc_toolset_version(self):
-        '''
-        Ensure that the toolset version returns the correct value for this MSVC
-        '''
-        env = get_fake_env()
-        cc = detect_c_compiler(env, MachineChoice.HOST)
-        if cc.get_argument_syntax() != 'msvc':
-            raise unittest.SkipTest('Test only applies to MSVC-like compilers')
-        toolset_ver = cc.get_toolset_version()
-        self.assertIsNotNone(toolset_ver)
-        # Visual Studio 2015 and older versions do not define VCToolsVersion
-        # TODO: ICL doesn't set this in the VSC2015 profile either
-        if cc.id == 'msvc' and int(''.join(cc.version.split('.')[0:2])) < 1910:
-            return
-        if 'VCToolsVersion' in os.environ:
-            vctools_ver = os.environ['VCToolsVersion']
-        else:
-            self.assertIn('VCINSTALLDIR', os.environ)
-            # See https://devblogs.microsoft.com/cppblog/finding-the-visual-c-compiler-tools-in-visual-studio-2017/
-            vctools_ver = (Path(os.environ['VCINSTALLDIR']) / 'Auxiliary' / 'Build' / 'Microsoft.VCToolsVersion.default.txt').read_text(encoding='utf-8')
-        self.assertTrue(vctools_ver.startswith(toolset_ver),
-                        msg=f'{vctools_ver!r} does not start with {toolset_ver!r}')
-
     def test_split_args(self):
         split_args = mesonbuild.mesonlib.split_args
         join_args = mesonbuild.mesonlib.join_args
@@ -917,7 +1598,8 @@ class InternalTests(unittest.TestCase):
                 (['foo.o \\', 'foo.h: bar'], 'foo.h', set({'bar'})),
                 (['foo.o \\', 'foo.h: bar'], 'foo.o', set({'bar'})),
                 # \\ handling
-                (['foo: Program\\ F\\iles\\\\X'], 'foo', set({'Program Files\\X'})),
+                (['foo: Program\\ F\\iles\\\\X'], 'foo',
+                 set({'Program Files/X' if os.path.sep == '\\' else r'Program Files\X'})),
                 # $ handling
                 (['f$o.o: c/b'], 'f$o.o', set({'c/b'})),
                 (['f$$o.o: c/b'], 'f$o.o', set({'c/b'})),
@@ -926,6 +1608,17 @@ class InternalTests(unittest.TestCase):
                 (['a: b', 'b: a'], 'b', set({'a', 'b'})),
         ]:
             d = mesonbuild.depfile.DepFile(f)
+            deps = d.get_all_dependencies(target)
+            self.assertEqual(sorted(deps), sorted(expdeps))
+
+    def test_depfile_join_paths(self):
+        for (f, target, expdeps) in [
+                # relative paths
+                (['meson/foo.o  : foo.c'], 'meson/foo.o', set({'/path/to/src/foo.c'})),
+                # absolute paths
+                (['meson/foo.o  : /usr/include/foo.h'], 'meson/foo.o', set({'/usr/include/foo.h'})),
+        ]:
+            d = mesonbuild.depfile.DepFile(f, '/path/to/src')
             deps = d.get_all_dependencies(target)
             self.assertEqual(sorted(deps), sorted(expdeps))
 
@@ -989,14 +1682,14 @@ class InternalTests(unittest.TestCase):
                     'test_dep',
                     methods=[b.DependencyMethods.PKGCONFIG, b.DependencyMethods.CMAKE]
                 )
-                actual = [m() for m in f(env, MachineChoice.HOST, {'required': False})]
+                actual = [m() for m in f(env, {'required': False, 'native': MachineChoice.HOST})]
                 self.assertListEqual([m.type_name for m in actual], ['pkgconfig', 'cmake'])
 
                 f = F.DependencyFactory(
                     'test_dep',
                     methods=[b.DependencyMethods.CMAKE, b.DependencyMethods.PKGCONFIG]
                 )
-                actual = [m() for m in f(env, MachineChoice.HOST, {'required': False})]
+                actual = [m() for m in f(env, {'required': False, 'native': MachineChoice.HOST})]
                 self.assertListEqual([m.type_name for m in actual], ['cmake', 'pkgconfig'])
 
     def test_validate_json(self) -> None:
@@ -1009,7 +1702,7 @@ class InternalTests(unittest.TestCase):
                 from jsonschema import validate, ValidationError as JsonSchemaFailure
                 fast = False
             except:
-                if is_ci():
+                if IS_CI:
                     raise
                 raise unittest.SkipTest('neither Python fastjsonschema nor jsonschema module not found.')
 
@@ -1035,39 +1728,43 @@ class InternalTests(unittest.TestCase):
         self.assertFalse(errors)
 
     def test_typed_pos_args_types(self) -> None:
-        @typed_pos_args('foo', str, int, bool)
+        @TypedArgs('foo', pos_types=[STR_PARG, INT_PARG, BOOL_PARG])
         def _(obj, node, args: T.Tuple[str, int, bool], kwargs) -> None:
             self.assertIsInstance(args, tuple)
             self.assertIsInstance(args[0], str)
             self.assertIsInstance(args[1], int)
             self.assertIsInstance(args[2], bool)
 
-        _(None, mock.Mock(), ['string', 1, False], None)
+        _(None, mock.Mock(), ['string', 1, False], {})
 
     def test_typed_pos_args_types_invalid(self) -> None:
-        @typed_pos_args('foo', str, int, bool)
+        @TypedArgs('foo', pos_types=[STR_PARG, INT_PARG, BOOL_PARG])
         def _(obj, node, args: T.Tuple[str, int, bool], kwargs) -> None:
-            self.assertTrue(False)  # should not be reachable
+            self.fail('Should not be reachable')
 
         with self.assertRaises(InvalidArguments) as cm:
-            _(None, mock.Mock(), ['string', 1.0, False], None)
-        self.assertEqual(str(cm.exception), 'foo argument 2 was of type "float" but should have been "int"')
+            _(None, mock.Mock(), ['string', 1.0, False], {})
+        self.assertEqual(str(cm.exception), '"foo" positional argument "2" was of type "float" but should have been "int"')
 
     def test_typed_pos_args_types_wrong_number(self) -> None:
-        @typed_pos_args('foo', str, int, bool)
+        @TypedArgs('foo', pos_types=[STR_PARG, INT_PARG, BOOL_PARG])
         def _(obj, node, args: T.Tuple[str, int, bool], kwargs) -> None:
-            self.assertTrue(False)  # should not be reachable
+            self.fail('Should not be reachable')
 
         with self.assertRaises(InvalidArguments) as cm:
-            _(None, mock.Mock(), ['string', 1], None)
-        self.assertEqual(str(cm.exception), 'foo takes exactly 3 arguments, but got 2.')
+            _(None, mock.Mock(), ['string', 1], {})
+        self.assertEqual(str(cm.exception), '"foo" takes exactly 3 arguments, but got 2.')
 
         with self.assertRaises(InvalidArguments) as cm:
-            _(None, mock.Mock(), ['string', 1, True, True], None)
-        self.assertEqual(str(cm.exception), 'foo takes exactly 3 arguments, but got 4.')
+            _(None, mock.Mock(), ['string', 1, True, True], {})
+        self.assertEqual(str(cm.exception), '"foo" takes exactly 3 arguments, but got 4.')
 
     def test_typed_pos_args_varargs(self) -> None:
-        @typed_pos_args('foo', str, varargs=str)
+        @TypedArgs(
+            'foo',
+            pos_types=[STR_PARG],
+            var_types=STR_VARG,
+        )
         def _(obj, node, args: T.Tuple[str, T.List[str]], kwargs) -> None:
             self.assertIsInstance(args, tuple)
             self.assertIsInstance(args[0], str)
@@ -1075,38 +1772,54 @@ class InternalTests(unittest.TestCase):
             self.assertIsInstance(args[1][0], str)
             self.assertIsInstance(args[1][1], str)
 
-        _(None, mock.Mock(), ['string', 'var', 'args'], None)
+        _(None, mock.Mock(), ['string', 'var', 'args'], {})
 
     def test_typed_pos_args_varargs_not_given(self) -> None:
-        @typed_pos_args('foo', str, varargs=str)
+        @TypedArgs(
+            'foo',
+            pos_types=[STR_PARG],
+            var_types=STR_VARG,
+        )
         def _(obj, node, args: T.Tuple[str, T.List[str]], kwargs) -> None:
             self.assertIsInstance(args, tuple)
             self.assertIsInstance(args[0], str)
             self.assertIsInstance(args[1], list)
             self.assertEqual(args[1], [])
 
-        _(None, mock.Mock(), ['string'], None)
+        _(None, mock.Mock(), ['string'], {})
 
     def test_typed_pos_args_varargs_invalid(self) -> None:
-        @typed_pos_args('foo', str, varargs=str)
+        @TypedArgs(
+            'foo',
+            pos_types=[STR_PARG],
+            var_types=STR_VARG,
+        )
         def _(obj, node, args: T.Tuple[str, T.List[str]], kwargs) -> None:
-            self.assertTrue(False)  # should not be reachable
+            self.fail('Should not be reachable')
 
         with self.assertRaises(InvalidArguments) as cm:
-            _(None, mock.Mock(), ['string', 'var', 'args', 0], None)
-        self.assertEqual(str(cm.exception), 'foo argument 4 was of type "int" but should have been "str"')
+            _(None, mock.Mock(), ['string', 'var', 'args', 0], {})
+        self.assertEqual(str(cm.exception), '"foo" positional argument "4" was of type "int" but should have been "str"')
 
     def test_typed_pos_args_varargs_invalid_multiple_types(self) -> None:
-        @typed_pos_args('foo', str, varargs=(str, list))
+        @TypedArgs(
+            'foo',
+            pos_types=[STR_PARG],
+            var_types=VarArgInfo((str, list)),
+        )
         def _(obj, node, args: T.Tuple[str, T.List[str]], kwargs) -> None:
-            self.assertTrue(False)  # should not be reachable
+            self.fail('Should not be reachable')
 
         with self.assertRaises(InvalidArguments) as cm:
-            _(None, mock.Mock(), ['string', 'var', 'args', 0], None)
-        self.assertEqual(str(cm.exception), 'foo argument 4 was of type "int" but should have been one of: "str", "list"')
+            _(None, mock.Mock(), ['string', 'var', 'args', 0], {})
+        self.assertEqual(str(cm.exception), '"foo" positional argument "4" was of type "int" but should have been one of: "str", "list"')
 
     def test_typed_pos_args_max_varargs(self) -> None:
-        @typed_pos_args('foo', str, varargs=str, max_varargs=5)
+        @TypedArgs(
+            'foo',
+            pos_types=[STR_PARG],
+            var_types=STR_VARG.evolve(max_args=5),
+        )
         def _(obj, node, args: T.Tuple[str, T.List[str]], kwargs) -> None:
             self.assertIsInstance(args, tuple)
             self.assertIsInstance(args[0], str)
@@ -1114,95 +1827,135 @@ class InternalTests(unittest.TestCase):
             self.assertIsInstance(args[1][0], str)
             self.assertIsInstance(args[1][1], str)
 
-        _(None, mock.Mock(), ['string', 'var', 'args'], None)
+        _(None, mock.Mock(), ['string', 'var', 'args'], {})
 
     def test_typed_pos_args_max_varargs_exceeded(self) -> None:
-        @typed_pos_args('foo', str, varargs=str, max_varargs=1)
+        @TypedArgs(
+            'foo',
+            pos_types=[STR_PARG],
+            var_types=STR_VARG.evolve(max_args=1),
+        )
         def _(obj, node, args: T.Tuple[str, T.Tuple[str, ...]], kwargs) -> None:
-            self.assertTrue(False)  # should not be reachable
+            self.fail('Should not be reachable')
 
         with self.assertRaises(InvalidArguments) as cm:
-            _(None, mock.Mock(), ['string', 'var', 'args'], None)
-        self.assertEqual(str(cm.exception), 'foo takes between 1 and 2 arguments, but got 3.')
+            _(None, mock.Mock(), ['string', 'var', 'args'], {})
+        self.assertEqual(str(cm.exception), '"foo" takes between 1 and 2 arguments, but got 3.')
 
     def test_typed_pos_args_min_varargs(self) -> None:
-        @typed_pos_args('foo', varargs=str, max_varargs=2, min_varargs=1)
+        @TypedArgs(
+            'foo',
+            var_types=STR_VARG.evolve(max_args=2, min_args=1),
+        )
         def _(obj, node, args: T.Tuple[str, T.List[str]], kwargs) -> None:
             self.assertIsInstance(args, tuple)
             self.assertIsInstance(args[0], list)
             self.assertIsInstance(args[0][0], str)
             self.assertIsInstance(args[0][1], str)
 
-        _(None, mock.Mock(), ['string', 'var'], None)
+        _(None, mock.Mock(), ['string', 'var'], {})
 
     def test_typed_pos_args_min_varargs_not_met(self) -> None:
-        @typed_pos_args('foo', str, varargs=str, min_varargs=1)
+        @TypedArgs(
+            'foo',
+            pos_types=[STR_PARG],
+            var_types=STR_VARG.evolve(min_args=1),
+        )
         def _(obj, node, args: T.Tuple[str, T.List[str]], kwargs) -> None:
-            self.assertTrue(False)  # should not be reachable
+            self.fail('Should not be reachable')
 
         with self.assertRaises(InvalidArguments) as cm:
-            _(None, mock.Mock(), ['string'], None)
-        self.assertEqual(str(cm.exception), 'foo takes at least 2 arguments, but got 1.')
+            _(None, mock.Mock(), ['string'], {})
+        self.assertEqual(str(cm.exception), '"foo" takes at least 2 arguments, but got 1.')
 
     def test_typed_pos_args_min_and_max_varargs_exceeded(self) -> None:
-        @typed_pos_args('foo', str, varargs=str, min_varargs=1, max_varargs=2)
+        @TypedArgs(
+            'foo',
+            pos_types=[STR_PARG],
+            var_types=STR_VARG.evolve(min_args=1, max_args=2),
+        )
         def _(obj, node, args: T.Tuple[str, T.Tuple[str, ...]], kwargs) -> None:
-            self.assertTrue(False)  # should not be reachable
+            self.fail('Should not be reachable')
 
         with self.assertRaises(InvalidArguments) as cm:
-            _(None, mock.Mock(), ['string', 'var', 'args', 'bar'], None)
-        self.assertEqual(str(cm.exception), 'foo takes between 2 and 3 arguments, but got 4.')
+            _(None, mock.Mock(), ['string', 'var', 'args', 'bar'], {})
+        self.assertEqual(str(cm.exception), '"foo" takes between 2 and 3 arguments, but got 4.')
 
     def test_typed_pos_args_min_and_max_varargs_not_met(self) -> None:
-        @typed_pos_args('foo', str, varargs=str, min_varargs=1, max_varargs=2)
+        @TypedArgs(
+            'foo',
+            pos_types=[STR_PARG],
+            var_types=STR_VARG.evolve(min_args=1, max_args=2),
+        )
         def _(obj, node, args: T.Tuple[str, T.Tuple[str, ...]], kwargs) -> None:
-            self.assertTrue(False)  # should not be reachable
+            self.fail('Should not be reachable')
 
         with self.assertRaises(InvalidArguments) as cm:
-            _(None, mock.Mock(), ['string'], None)
-        self.assertEqual(str(cm.exception), 'foo takes between 2 and 3 arguments, but got 1.')
+            _(None, mock.Mock(), ['string'], {})
+        self.assertEqual(str(cm.exception), '"foo" takes between 2 and 3 arguments, but got 1.')
 
     def test_typed_pos_args_variadic_and_optional(self) -> None:
-        @typed_pos_args('foo', str, optargs=[str], varargs=str, min_varargs=0)
+        @TypedArgs(
+            'foo',
+            pos_types=[STR_PARG],
+            opt_types=[STR_OARG],
+            var_types=STR_VARG.evolve(min_args=0),
+        )
         def _(obj, node, args: T.Tuple[str, T.List[str]], kwargs) -> None:
-            self.assertTrue(False)  # should not be reachable
+            self.fail('Should not be reachable')
 
         with self.assertRaises(AssertionError) as cm:
-            _(None, mock.Mock(), ['string'], None)
+            _(None, mock.Mock(), ['string'], {})
         self.assertEqual(
             str(cm.exception),
-            'varargs and optargs not supported together as this would be ambiguous')
+            'Cannot use optional arguments and variadic arguments together due to ambiguity')
 
     def test_typed_pos_args_min_optargs_not_met(self) -> None:
-        @typed_pos_args('foo', str, str, optargs=[str])
+        @TypedArgs(
+            'foo',
+            pos_types=[STR_PARG, STR_PARG],
+            opt_types=[STR_OARG],
+        )
         def _(obj, node, args: T.Tuple[str, T.Optional[str]], kwargs) -> None:
-            self.assertTrue(False)  # should not be reachable
+            self.fail('Should not be reachable')
 
         with self.assertRaises(InvalidArguments) as cm:
-            _(None, mock.Mock(), ['string'], None)
-        self.assertEqual(str(cm.exception), 'foo takes at least 2 arguments, but got 1.')
+            _(None, mock.Mock(), ['string'], {})
+        self.assertEqual(str(cm.exception), '"foo" takes at least 2 arguments, but got 1.')
 
     def test_typed_pos_args_min_optargs_max_exceeded(self) -> None:
-        @typed_pos_args('foo', str, optargs=[str])
+        @TypedArgs(
+            'foo',
+            pos_types=[STR_PARG],
+            opt_types=[STR_OARG],
+        )
         def _(obj, node, args: T.Tuple[str, T.Optional[str]], kwargs) -> None:
-            self.assertTrue(False)  # should not be reachable
+            self.fail('Should not be reachable')
 
         with self.assertRaises(InvalidArguments) as cm:
-            _(None, mock.Mock(), ['string', '1', '2'], None)
-        self.assertEqual(str(cm.exception), 'foo takes at most 2 arguments, but got 3.')
+            _(None, mock.Mock(), ['string', '1', '2'], {})
+        self.assertEqual(str(cm.exception), '"foo" takes at most 2 arguments, but got 3.')
 
     def test_typed_pos_args_optargs_not_given(self) -> None:
-        @typed_pos_args('foo', str, optargs=[str])
+        @TypedArgs(
+            'foo',
+            pos_types=[STR_PARG],
+            opt_types=[STR_OARG],
+        )
         def _(obj, node, args: T.Tuple[str, T.Optional[str]], kwargs) -> None:
             self.assertEqual(len(args), 2)
             self.assertIsInstance(args[0], str)
             self.assertEqual(args[0], 'string')
             self.assertIsNone(args[1])
 
-        _(None, mock.Mock(), ['string'], None)
+        _(None, mock.Mock(), ['string'], {})
 
     def test_typed_pos_args_optargs_some_given(self) -> None:
-        @typed_pos_args('foo', str, optargs=[str, int])
+        @TypedArgs(
+            'foo',
+            pos_types=[STR_PARG],
+            opt_types=[STR_OARG, INT_OARG],
+        )
         def _(obj, node, args: T.Tuple[str, T.Optional[str], T.Optional[int]], kwargs) -> None:
             self.assertEqual(len(args), 3)
             self.assertIsInstance(args[0], str)
@@ -1211,22 +1964,339 @@ class InternalTests(unittest.TestCase):
             self.assertEqual(args[1], '1')
             self.assertIsNone(args[2])
 
-        _(None, mock.Mock(), ['string', '1'], None)
+        _(None, mock.Mock(), ['string', '1'], {})
 
     def test_typed_pos_args_optargs_all_given(self) -> None:
-        @typed_pos_args('foo', str, optargs=[str])
+        @TypedArgs(
+            'foo',
+            pos_types=[STR_PARG],
+            opt_types=[STR_OARG],
+        )
         def _(obj, node, args: T.Tuple[str, T.Optional[str]], kwargs) -> None:
             self.assertEqual(len(args), 2)
             self.assertIsInstance(args[0], str)
             self.assertEqual(args[0], 'string')
             self.assertIsInstance(args[1], str)
 
-        _(None, mock.Mock(), ['string', '1'], None)
+        _(None, mock.Mock(), ['string', '1'], {})
+
+    def test_typed_pos_args_since(self) -> None:
+        @TypedArgs(
+            'testfunc',
+            pos_types=[
+                STR_PARG.evolve(
+                    since='1.0',
+                    since_message='It\'s awesome, use it',
+                    deprecated='2.0',
+                    deprecated_message='It\'s terrible, don\'t use it'),
+            ],
+        )
+        def _(obj, node, args: tuple[str], kwargs: dict) -> None:
+            self.assertIsInstance(args[0], str)
+            self.assertEqual(args[0], 'foo')
+
+        with self.subTest('use before available'), \
+                mock.patch('sys.stdout', io.StringIO()) as out, \
+                mock.patch('mesonbuild.mesonlib.project_meson_versions', {'': version_check_to_range(['>=0.1'])}):
+            # With Meson 0.1 it should trigger the "introduced" warning but not the "deprecated" warning
+            _(None, mock.Mock(subproject=''), ['foo'], {})
+            self.assertRegex(out.getvalue(), r'WARNING:.*introduced.*positional argument "\d" in testfunc. It\'s awesome, use it')
+            self.assertNotRegex(out.getvalue(), r'WARNING:.*deprecated.*argument "\d" in testfunc. It\'s terrible, don\'t use it')
+
+        with self.subTest('no warnings should be triggered'), \
+                mock.patch('sys.stdout', io.StringIO()) as out, \
+                mock.patch('mesonbuild.mesonlib.project_meson_versions', {'': version_check_to_range(['>=1.5'])}):
+            # With Meson 1.5 it shouldn't trigger any warning
+            _(None, mock.Mock(subproject=''), ['foo'], {})
+            self.assertNotRegex(out.getvalue(), r'WARNING:.*')
+
+        with self.subTest('use after deprecated'), \
+                mock.patch('sys.stdout', io.StringIO()) as out, \
+                mock.patch('mesonbuild.mesonlib.project_meson_versions', {'': version_check_to_range(['>=2.0'])}):
+            # With Meson 2.0 it should trigger the "deprecated" warning but not the "introduced" warning
+            _(None, mock.Mock(subproject=''), ['foo'], {})
+            self.assertRegex(out.getvalue(), r'WARNING:.*deprecated.*positional argument "\d" in testfunc. It\'s terrible, don\'t use it')
+            self.assertNotRegex(out.getvalue(), r'WARNING:.*introduced.*positional argument "\d" in testfunc. It\'s awesome, use it')
+
+    def test_typed_pos_args_optional_since(self) -> None:
+        @TypedArgs(
+            'testfunc',
+            opt_types=[
+                STR_OARG.evolve(
+                    default='foo',
+                    optional_since='1.0',
+                    optional_since_message='Woo!',
+                )
+            ],
+        )
+        def _(obj, node, args: tuple[str], kwargs: dict) -> None:
+            self.assertIsInstance(args[0], str)
+            self.assertEqual(args[0], 'foo')
+
+        with self.subTest('use before available'), \
+                mock.patch('sys.stdout', io.StringIO()) as out, \
+                mock.patch('mesonbuild.mesonlib.project_meson_versions', {'': version_check_to_range(['>=0.1'])}):
+            # With Meson 0.1 it should trigger the "introduced" warning but not the "deprecated" warning
+            _(None, mock.Mock(subproject=''), [], {})
+            self.assertIn('WARNING: Project targets \'>= 0.1\' but uses feature introduced in \'1.0\': positional argument "0" in testfunc as optional. Woo!',
+                          out.getvalue())
+
+        with self.subTest('no warnings should be triggered'), \
+                mock.patch('sys.stdout', io.StringIO()) as out, \
+                mock.patch('mesonbuild.mesonlib.project_meson_versions', {'': version_check_to_range(['>=1.5'])}):
+            # With Meson 1.5 it shouldn't trigger any warning
+            _(None, mock.Mock(subproject=''), [], {})
+            self.assertNotRegex(out.getvalue(), r'WARNING:.*')
+
+        with self.subTest('use after deprecated'), \
+                mock.patch('sys.stdout', io.StringIO()) as out, \
+                mock.patch('mesonbuild.mesonlib.project_meson_versions', {'': version_check_to_range(['>=2.0'])}):
+            # With Meson 2.0 it should trigger the "deprecated" warning but not the "introduced" warning
+            _(None, mock.Mock(subproject=''), [], {})
+            self.assertNotIn('WARNING: Project targets \'>= 0.1\' but uses feature introduced in \'1.0\': positional argument "0" in testfunc as optional. Woo!',
+                             out.getvalue())
+
+    def test_typed_pos_args_container(self) -> None:
+        @TypedArgs(
+            'testfunc',
+            pos_types=[PosArgInfo(ContainerTypeInfo(list, str))],
+        )
+        def _(obj, node, args: T.Tuple[list[str]], kwargs: dict) -> None:
+            self.assertEqual(args[0], ['str'])
+
+        with self.subTest('valid'):
+            _(None, mock.Mock(), [['str']], {})
+
+        with self.subTest('invalid'):
+            with self.assertRaises(InvalidArguments) as cm:
+                _(None, mock.Mock(), [0], {})
+            self.assertEqual(str(cm.exception), '"testfunc" positional argument "1" was of type "int" but should have been "array[str]"')
+
+    def test_typed_pos_args_contained(self) -> None:
+        @TypedArgs(
+            'testfunc',
+            pos_types=[PosArgInfo(ContainerTypeInfo(dict, str))],
+        )
+        def _(obj, node, args: T.Tuple, kwargs: T.Dict[str, T.Dict[str, str]]) -> None:
+            self.assertEqual(args[0], {'key': 'value'})
+
+        with self.subTest('valid'):
+            _(None, mock.Mock(), [{'key': 'value'}], {})
+
+        with self.subTest('invalid'):
+            with self.assertRaises(InvalidArguments) as cm:
+                _(None, mock.Mock(), [{'key': 0}], {})
+            self.assertEqual(str(cm.exception), '"testfunc" positional argument "1" was of type "dict[int]" but should have been "dict[str]"')
+
+    def test_typed_pos_args_validator(self) -> None:
+        @TypedArgs(
+            'testfunc',
+            pos_types=[
+                STR_PARG.evolve(validator=lambda x: 'invalid!' if x != 'foo' else None)
+            ]
+        )
+        def _(obj, node, args: T.Tuple[str], kwargs: dict) -> None:
+            pass
+
+        # Should be valid
+        _(None, mock.Mock(), ['foo'], {})
+
+        with self.assertRaises(MesonException) as cm:
+            _(None, mock.Mock(), ['bar'], {})
+        self.assertEqual(str(cm.exception), "\"testfunc\" positional argument \"1\" invalid!")
+
+    def test_typed_pos_args_convertor(self) -> None:
+        @TypedArgs(
+            'testfunc',
+            pos_types=[
+                BOOL_PARG.evolve(convertor=lambda n: MachineChoice.BUILD if n else MachineChoice.HOST)
+            ],
+        )
+        def _(obj, node, args: T.Tuple[MachineChoice], kwargs: dict) -> None:
+            assert isinstance(args[0], MachineChoice)
+
+        _(None, mock.Mock(), [True], {})
+
+    @mock.patch('mesonbuild.mesonlib.project_meson_versions', {'': version_check_to_range(['>=1.0'])})
+    def test_typed_pos_args_since_values(self) -> None:
+        @TypedArgs(
+            'testfunc',
+            pos_types=[
+                PosArgInfo(ContainerTypeInfo(list, str), listify=True, deprecated_values={'foo': '0.9'}, since_values={'bar': '1.1'}),
+            ]
+        )
+        def _(obj, node, args: T.Tuple[str], kwargs: dict) -> None:
+            pass
+
+        with self.subTest('deprecated array string value'), mock.patch('sys.stdout', io.StringIO()) as out:
+            _(None, mock.Mock(subproject=''), [['foo']], {})
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*deprecated since '0.9': "testfunc" positional argument "1" value "foo".*""")
+
+        with self.subTest('new array string value'), mock.patch('sys.stdout', io.StringIO()) as out:
+            _(None, mock.Mock(subproject=''), [['bar']], {})
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*introduced in '1.1': "testfunc" positional argument "1" value "bar".*""")
+
+        with self.subTest('deprecated array string value'), mock.patch('sys.stdout', io.StringIO()) as out:
+            _(None, mock.Mock(subproject=''), ['foo'], {})
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*deprecated since '0.9': "testfunc" positional argument "1" value "foo".*""")
+
+        with self.subTest('new array string value'), mock.patch('sys.stdout', io.StringIO()) as out:
+            _(None, mock.Mock(subproject=''), ['bar'], {})
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*introduced in '1.1': "testfunc" positional argument "1" value "bar".*""")
+
+        @TypedArgs(
+            'testfunc',
+            pos_types=[
+                PosArgInfo(ContainerTypeInfo(dict, str), deprecated_values={'foo': '0.9', 'foo2': ('0.9', 'don\'t use it')}, since_values={'bar': '1.1', 'bar2': ('1.1', 'use this')}),
+            ]
+        )
+        def _(obj, node, args: T.Tuple[str], kwargs: dict) -> None:
+            pass
+
+        with self.subTest('deprecated dict string value'), mock.patch('sys.stdout', io.StringIO()) as out:
+            _(None, mock.Mock(subproject=''), [{'foo': 'a'}], {})
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*deprecated since '0.9': "testfunc" positional argument "1" value "foo".*""")
+
+        with self.subTest('deprecated dict string value with msg'), mock.patch('sys.stdout', io.StringIO()) as out:
+            _(None, mock.Mock(subproject=''), [{'foo2': 'a'}], {})
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*deprecated since '0.9': "testfunc" positional argument "1" value "foo2" in dict keys. don't use it.*""")
+
+        with self.subTest('new dict string value'), mock.patch('sys.stdout', io.StringIO()) as out:
+            _(None, mock.Mock(subproject=''), [{'bar': 'a'}], {})
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*introduced in '1.1': "testfunc" positional argument "1" value "bar".*""")
+
+        with self.subTest('new dict string value with msg'), mock.patch('sys.stdout', io.StringIO()) as out:
+            _(None, mock.Mock(subproject=''), [{'bar2': 'a'}], {})
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*introduced in '1.1': "testfunc" positional argument "1" value "bar2" in dict keys. use this.*""")
+
+        @TypedArgs(
+            'testfunc',
+            pos_types=[
+                PosArgInfo(
+                    (str, int, ContainerTypeInfo(list, str), ContainerTypeInfo(dict, str), ContainerTypeInfo(list, int)),
+                    since_values={str: '1.1', ContainerTypeInfo(list, str): '1.2', ContainerTypeInfo(dict, str): '1.3'},
+                    deprecated_values={int: '0.8', ContainerTypeInfo(list, int): '0.9'},
+                ),
+            ]
+        )
+        def _(obj, node, args: T.Tuple[str], kwargs: dict) -> None:
+            pass
+
+        with self.subTest('new string type'), mock.patch('sys.stdout', io.StringIO()) as out:
+            _(None, mock.Mock(subproject=''), ['foo'], {})
+            self.assertRegex(out.getvalue(), r"""WARNING: Project targets '>= 1.0'.*introduced in '1.1': "testfunc" positional argument "1" of type "str".*""")
+
+        with self.subTest('new array of string type'), mock.patch('sys.stdout', io.StringIO()) as out:
+            _(None, mock.Mock(subproject=''), [['foo']], {})
+            self.assertRegex(out.getvalue(), r"""WARNING: Project targets '>= 1.0'.*introduced in '1.2': "testfunc" positional argument "1" of type "array\[str\]".*""")
+
+        with self.subTest('new dict of string type'), mock.patch('sys.stdout', io.StringIO()) as out:
+            _(None, mock.Mock(subproject=''), [{'plop': 'foo'}], {})
+            self.assertRegex(out.getvalue(), r"""WARNING: Project targets '>= 1.0'.*introduced in '1.3': "testfunc" positional argument "1" of type "dict\[str\]".*""")
+
+        with self.subTest('deprecated int value'), mock.patch('sys.stdout', io.StringIO()) as out:
+            _(None, mock.Mock(subproject=''), [1], {})
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*deprecated since '0.8': "testfunc" positional argument "1" of type "int".*""")
+
+        with self.subTest('deprecated array int value'), mock.patch('sys.stdout', io.StringIO()) as out:
+            _(None, mock.Mock(subproject=''), [[1]], {})
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*deprecated since '0.9': "testfunc" positional argument "1" of type "array\[int\]".*""")
+
+        @TypedArgs(
+            'testfunc',
+            pos_types=[
+                PosArgInfo(
+                    (ContainerTypeInfo(list, (str, int))),
+                    listify=True,
+                    since_values={ContainerTypeInfo(list, str): '1.1', ContainerTypeInfo(list, int): '1.2'},
+                ),
+            ]
+        )
+        def _(obj, node, args: T.Tuple[str], kwargs: dict) -> None:
+            pass
+
+        with self.subTest('new list[str] value'), mock.patch('sys.stdout', io.StringIO()) as out:
+            _(None, mock.Mock(subproject=''), [['foo', 42]], {})
+            self.assertRegex(out.getvalue(), r"""WARNING: Project targets '>= 1.0'.*introduced in '1.1': "testfunc" positional argument "1" of type "array\[str\]".*""")
+            self.assertRegex(out.getvalue(), r"""WARNING: Project targets '>= 1.0'.*introduced in '1.2': "testfunc" positional argument "1" of type "array\[int\]".*""")
+
+        @TypedArgs(
+            'testfunc',
+            pos_types=[
+                PosArgInfo((bool, str, NoneType), deprecated_values={False: '0.9'}),
+            ]
+        )
+        def _(obj, node, args: T.Tuple[str], kwargs: dict) -> None:
+            pass
+
+        with self.subTest('non string union'), mock.patch('sys.stdout', io.StringIO()) as out:
+            _(None, mock.Mock(subproject=''), [False], {})
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*deprecated since '0.9': "testfunc" positional argument "1" value "False".*""")
+
+        @TypedArgs(
+            'testfunc',
+            pos_types=[
+                PosArgInfo(
+                    (str, type(None)),
+                    validator=in_set_validator({'clean', 'build', 'rebuild', 'deprecated', 'since'}),
+                    deprecated_values={'deprecated': '1.0'},
+                    since_values={'since': '1.1'},
+                ),
+            ]
+        )
+        def _(obj, node, args: T.Tuple[str], kwargs: dict) -> None:
+            pass
+
+        with self.subTest('deprecated string union'), mock.patch('sys.stdout', io.StringIO()) as out:
+            _(None, mock.Mock(subproject=''), ['deprecated'], {})
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*deprecated since '1.0': "testfunc" positional argument "1" value "deprecated".*""")
+
+        with self.subTest('new string union'), mock.patch('sys.stdout', io.StringIO()) as out:
+            _(None, mock.Mock(subproject=''), ['since'], {})
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*introduced in '1.1': "testfunc" positional argument "1" value "since".*""")
+
+        @TypedArgs(
+            'testfunc',
+            pos_types=[
+                PosArgInfo(
+                    (ContainerTypeInfo(list, str), ContainerTypeInfo(dict, str)),
+                    since_values={list: '1.9'},
+                ),
+            ]
+        )
+        def _(obj, node, args: T.Tuple[str], kwargs: dict) -> None:
+            pass
+
+        with self.subTest('new container'), mock.patch('sys.stdout', io.StringIO()) as out:
+            _(None, mock.Mock(subproject=''), [['a=b']], {})
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*introduced in '1.9': "testfunc" positional argument "1" of type "list".*""")
+
+    def test_typed_pos_args_default(self) -> None:
+        @TypedArgs(
+            'testfunc',
+            opt_types=[STR_OARG.evolve(default='foo')],
+        )
+        def _(obj, node, args: T.Tuple[str], kwargs: dict) -> None:
+            self.assertEqual(len(args), 1)
+            self.assertIsInstance(args[0], str)
+            self.assertEqual(args[0], 'foo')
+
+        with self.subTest('default object before available'), \
+                mock.patch('sys.stdout', io.StringIO()) as out, \
+                mock.patch('mesonbuild.mesonlib.project_meson_versions', {'': version_check_to_range(['>=1.0'])}):
+            _(None, mock.Mock(subproject=''), [DefaultObject()], {})
+            self.assertRegex(out.getvalue(), r'WARNING: Project targets \'>= 1.0\' but uses feature introduced in \'1.13.0\': default\(\) object for optional')
+
+        with self.subTest('default object after available'), \
+                mock.patch('sys.stdout', io.StringIO()) as out, \
+                mock.patch('mesonbuild.mesonlib.project_meson_versions', {'': version_check_to_range(['>=1.13'])}):
+            _(None, mock.Mock(subproject=''), [DefaultObject()], {})
+            self.assertNotRegex(out.getvalue(), r'WARNING: Project targets \'>= 1.0\' but uses feature introduced in \'1.13.0\': default\(\) object for optional')
 
     def test_typed_kwarg_basic(self) -> None:
-        @typed_kwargs(
+        @TypedArgs(
             'testfunc',
-            KwargInfo('input', str, default='')
+            kw_types=[KwargInfo('input', str, default='')],
         )
         def _(obj, node, args: T.Tuple, kwargs: T.Dict[str, str]) -> None:
             self.assertIsInstance(kwargs['input'], str)
@@ -1235,21 +2305,21 @@ class InternalTests(unittest.TestCase):
         _(None, mock.Mock(), [], {'input': 'foo'})
 
     def test_typed_kwarg_missing_required(self) -> None:
-        @typed_kwargs(
+        @TypedArgs(
             'testfunc',
-            KwargInfo('input', str, required=True),
+            kw_types=[KwargInfo('input', str, required=True)],
         )
         def _(obj, node, args: T.Tuple, kwargs: T.Dict[str, str]) -> None:
-            self.assertTrue(False)  # should be unreachable
+            self.fail('Should not be reachable')
 
         with self.assertRaises(InvalidArguments) as cm:
             _(None, mock.Mock(), [], {})
-        self.assertEqual(str(cm.exception), 'testfunc is missing required keyword argument "input"')
+        self.assertEqual(str(cm.exception), '"testfunc" is missing required keyword argument "input"')
 
     def test_typed_kwarg_missing_optional(self) -> None:
-        @typed_kwargs(
+        @TypedArgs(
             'testfunc',
-            KwargInfo('input', (str, type(None))),
+            kw_types=[KwargInfo('input', (str, type(None)))],
         )
         def _(obj, node, args: T.Tuple, kwargs: T.Dict[str, T.Optional[str]]) -> None:
             self.assertIsNone(kwargs['input'])
@@ -1257,9 +2327,9 @@ class InternalTests(unittest.TestCase):
         _(None, mock.Mock(), [], {})
 
     def test_typed_kwarg_default(self) -> None:
-        @typed_kwargs(
+        @TypedArgs(
             'testfunc',
-            KwargInfo('input', str, default='default'),
+            kw_types=[KwargInfo('input', str, default='default')],
         )
         def _(obj, node, args: T.Tuple, kwargs: T.Dict[str, str]) -> None:
             self.assertEqual(kwargs['input'], 'default')
@@ -1267,9 +2337,9 @@ class InternalTests(unittest.TestCase):
         _(None, mock.Mock(), [], {})
 
     def test_typed_kwarg_container_valid(self) -> None:
-        @typed_kwargs(
+        @TypedArgs(
             'testfunc',
-            KwargInfo('input', ContainerTypeInfo(list, str), default=[], required=True),
+            kw_types=[KwargInfo('input', ContainerTypeInfo(list, str), default=[], required=True)],
         )
         def _(obj, node, args: T.Tuple, kwargs: T.Dict[str, T.List[str]]) -> None:
             self.assertEqual(kwargs['input'], ['str'])
@@ -1277,33 +2347,33 @@ class InternalTests(unittest.TestCase):
         _(None, mock.Mock(), [], {'input': ['str']})
 
     def test_typed_kwarg_container_invalid(self) -> None:
-        @typed_kwargs(
+        @TypedArgs(
             'testfunc',
-            KwargInfo('input', ContainerTypeInfo(list, str), required=True),
+            kw_types=[KwargInfo('input', ContainerTypeInfo(list, str), required=True)],
         )
         def _(obj, node, args: T.Tuple, kwargs: T.Dict[str, T.List[str]]) -> None:
-            self.assertTrue(False)  # should be unreachable
+            self.fail('Should not be reachable')
 
         with self.assertRaises(InvalidArguments) as cm:
             _(None, mock.Mock(), [], {'input': {}})
-        self.assertEqual(str(cm.exception), "testfunc keyword argument 'input' was of type dict[] but should have been array[str]")
+        self.assertEqual(str(cm.exception), '"testfunc" keyword argument "input" was of type "dict[]" but should have been "array[str]"')
 
     def test_typed_kwarg_contained_invalid(self) -> None:
-        @typed_kwargs(
+        @TypedArgs(
             'testfunc',
-            KwargInfo('input', ContainerTypeInfo(dict, str), required=True),
+            kw_types=[KwargInfo('input', ContainerTypeInfo(dict, str), required=True)],
         )
         def _(obj, node, args: T.Tuple, kwargs: T.Dict[str, T.Dict[str, str]]) -> None:
-            self.assertTrue(False)  # should be unreachable
+            self.fail('Should not be reachable')
 
         with self.assertRaises(InvalidArguments) as cm:
             _(None, mock.Mock(), [], {'input': {'key': 1, 'bar': 2}})
-        self.assertEqual(str(cm.exception), "testfunc keyword argument 'input' was of type dict[int] but should have been dict[str]")
+        self.assertEqual(str(cm.exception), '"testfunc" keyword argument "input" was of type "dict[int]" but should have been "dict[str]"')
 
     def test_typed_kwarg_container_listify(self) -> None:
-        @typed_kwargs(
+        @TypedArgs(
             'testfunc',
-            KwargInfo('input', ContainerTypeInfo(list, str), default=[], listify=True),
+            kw_types=[KwargInfo('input', ContainerTypeInfo(list, str), default=[], listify=True)],
         )
         def _(obj, node, args: T.Tuple, kwargs: T.Dict[str, T.List[str]]) -> None:
             self.assertEqual(kwargs['input'], ['str'])
@@ -1312,9 +2382,9 @@ class InternalTests(unittest.TestCase):
 
     def test_typed_kwarg_container_default_copy(self) -> None:
         default: T.List[str] = []
-        @typed_kwargs(
+        @TypedArgs(
             'testfunc',
-            KwargInfo('input', ContainerTypeInfo(list, str), listify=True, default=default),
+            kw_types=[KwargInfo('input', ContainerTypeInfo(list, str), listify=True, default=default)],
         )
         def _(obj, node, args: T.Tuple, kwargs: T.Dict[str, T.List[str]]) -> None:
             self.assertIsNot(kwargs['input'], default)
@@ -1322,9 +2392,9 @@ class InternalTests(unittest.TestCase):
         _(None, mock.Mock(), [], {})
 
     def test_typed_kwarg_container_pairs(self) -> None:
-        @typed_kwargs(
+        @TypedArgs(
             'testfunc',
-            KwargInfo('input', ContainerTypeInfo(list, str, pairs=True), listify=True),
+            kw_types=[KwargInfo('input', ContainerTypeInfo(list, str, pairs=True), listify=True)],
         )
         def _(obj, node, args: T.Tuple, kwargs: T.Dict[str, T.List[str]]) -> None:
             self.assertEqual(kwargs['input'], ['a', 'b'])
@@ -1333,13 +2403,15 @@ class InternalTests(unittest.TestCase):
 
         with self.assertRaises(MesonException) as cm:
             _(None, mock.Mock(), [], {'input': ['a']})
-        self.assertEqual(str(cm.exception), "testfunc keyword argument 'input' was of type array[str] but should have been array[str] that has even size")
+        self.assertEqual(str(cm.exception), '"testfunc" keyword argument "input" was of type "array[str]" but should have been "array[str]" that has even size')
 
     def test_typed_kwarg_since(self) -> None:
-        @typed_kwargs(
+        @TypedArgs(
             'testfunc',
-            KwargInfo('input', str, since='1.0', since_message='Its awesome, use it',
-                      deprecated='2.0', deprecated_message='Its terrible, dont use it')
+            kw_types=[
+                KwargInfo('input', str, since='1.0', since_message='It\'s awesome, use it',
+                          deprecated='2.0', deprecated_message='It\'s terrible, don\'t use it')
+            ]
         )
         def _(obj, node, args: T.Tuple, kwargs: T.Dict[str, str]) -> None:
             self.assertIsInstance(kwargs['input'], str)
@@ -1347,158 +2419,182 @@ class InternalTests(unittest.TestCase):
 
         with self.subTest('use before available'), \
                 mock.patch('sys.stdout', io.StringIO()) as out, \
-                mock.patch('mesonbuild.mesonlib.project_meson_versions', {'': '0.1'}):
+                mock.patch('mesonbuild.mesonlib.project_meson_versions', {'': version_check_to_range(['>=0.1'])}):
             # With Meson 0.1 it should trigger the "introduced" warning but not the "deprecated" warning
             _(None, mock.Mock(subproject=''), [], {'input': 'foo'})
-            self.assertRegex(out.getvalue(), r'WARNING:.*introduced.*input arg in testfunc. Its awesome, use it')
-            self.assertNotRegex(out.getvalue(), r'WARNING:.*deprecated.*input arg in testfunc. Its terrible, dont use it')
+            self.assertRegex(out.getvalue(), r'WARNING:.*introduced.*input arg in testfunc. It\'s awesome, use it')
+            self.assertNotRegex(out.getvalue(), r'WARNING:.*deprecated.*input arg in testfunc. It\'s terrible, don\'t use it')
 
         with self.subTest('no warnings should be triggered'), \
                 mock.patch('sys.stdout', io.StringIO()) as out, \
-                mock.patch('mesonbuild.mesonlib.project_meson_versions', {'': '1.5'}):
+                mock.patch('mesonbuild.mesonlib.project_meson_versions', {'': version_check_to_range(['>=1.5'])}):
             # With Meson 1.5 it shouldn't trigger any warning
             _(None, mock.Mock(subproject=''), [], {'input': 'foo'})
             self.assertNotRegex(out.getvalue(), r'WARNING:.*')
 
         with self.subTest('use after deprecated'), \
                 mock.patch('sys.stdout', io.StringIO()) as out, \
-                mock.patch('mesonbuild.mesonlib.project_meson_versions', {'': '2.0'}):
+                mock.patch('mesonbuild.mesonlib.project_meson_versions', {'': version_check_to_range(['>=2.0'])}):
             # With Meson 2.0 it should trigger the "deprecated" warning but not the "introduced" warning
             _(None, mock.Mock(subproject=''), [], {'input': 'foo'})
-            self.assertRegex(out.getvalue(), r'WARNING:.*deprecated.*input arg in testfunc. Its terrible, dont use it')
-            self.assertNotRegex(out.getvalue(), r'WARNING:.*introduced.*input arg in testfunc. Its awesome, use it')
+            self.assertRegex(out.getvalue(), r'WARNING:.*deprecated.*input arg in testfunc. It\'s terrible, don\'t use it')
+            self.assertNotRegex(out.getvalue(), r'WARNING:.*introduced.*input arg in testfunc. It\'s awesome, use it')
 
     def test_typed_kwarg_validator(self) -> None:
-        @typed_kwargs(
+        @TypedArgs(
             'testfunc',
-            KwargInfo('input', str, default='', validator=lambda x: 'invalid!' if x != 'foo' else None)
+            kw_types=[KwargInfo('input', str, default='', validator=lambda x: 'invalid!' if x != 'foo' else None)]
         )
         def _(obj, node, args: T.Tuple, kwargs: T.Dict[str, str]) -> None:
             pass
 
         # Should be valid
-        _(None, mock.Mock(), tuple(), dict(input='foo'))
+        _(None, mock.Mock(), [], dict(input='foo'))
 
         with self.assertRaises(MesonException) as cm:
-            _(None, mock.Mock(), tuple(), dict(input='bar'))
-        self.assertEqual(str(cm.exception), "testfunc keyword argument \"input\" invalid!")
+            _(None, mock.Mock(), [], dict(input='bar'))
+        self.assertEqual(str(cm.exception), "\"testfunc\" keyword argument \"input\" invalid!")
 
     def test_typed_kwarg_convertor(self) -> None:
-        @typed_kwargs(
+        @TypedArgs(
             'testfunc',
-            KwargInfo('native', bool, default=False, convertor=lambda n: MachineChoice.BUILD if n else MachineChoice.HOST)
+            kw_types=[KwargInfo('native', bool, default=False, convertor=lambda n: MachineChoice.BUILD if n else MachineChoice.HOST)]
         )
         def _(obj, node, args: T.Tuple, kwargs: T.Dict[str, MachineChoice]) -> None:
             assert isinstance(kwargs['native'], MachineChoice)
 
-        _(None, mock.Mock(), tuple(), dict(native=True))
+        _(None, mock.Mock(), [], dict(native=True))
 
-    @mock.patch('mesonbuild.mesonlib.project_meson_versions', {'': '1.0'})
+    @mock.patch('mesonbuild.mesonlib.project_meson_versions', {'': version_check_to_range(['>=1.0'])})
     def test_typed_kwarg_since_values(self) -> None:
-        @typed_kwargs(
+        @TypedArgs(
             'testfunc',
-            KwargInfo('input', ContainerTypeInfo(list, str), listify=True, default=[], deprecated_values={'foo': '0.9'}, since_values={'bar': '1.1'}),
-            KwargInfo('output', ContainerTypeInfo(dict, str), default={}, deprecated_values={'foo': '0.9', 'foo2': ('0.9', 'dont use it')}, since_values={'bar': '1.1', 'bar2': ('1.1', 'use this')}),
-            KwargInfo('install_dir', (bool, str, NoneType), deprecated_values={False: '0.9'}),
-            KwargInfo(
-                'mode',
-                (str, type(None)),
-                validator=in_set_validator({'clean', 'build', 'rebuild', 'deprecated', 'since'}),
-                deprecated_values={'deprecated': '1.0'},
-                since_values={'since': '1.1'}),
-            KwargInfo('dict', (ContainerTypeInfo(list, str), ContainerTypeInfo(dict, str)), default={},
-                      since_values={list: '1.9'}),
-            KwargInfo('new_dict', (ContainerTypeInfo(list, str), ContainerTypeInfo(dict, str)), default={},
-                      since_values={dict: '1.1'}),
-            KwargInfo('foo', (str, int, ContainerTypeInfo(list, str), ContainerTypeInfo(dict, str), ContainerTypeInfo(list, int)), default={},
-                      since_values={str: '1.1', ContainerTypeInfo(list, str): '1.2', ContainerTypeInfo(dict, str): '1.3'},
-                      deprecated_values={int: '0.8', ContainerTypeInfo(list, int): '0.9'}),
-            KwargInfo('tuple', (ContainerTypeInfo(list, (str, int))), default=[], listify=True,
-                      since_values={ContainerTypeInfo(list, str): '1.1', ContainerTypeInfo(list, int): '1.2'}),
+            kw_types=[
+                KwargInfo('input', ContainerTypeInfo(list, str), listify=True, default=[], deprecated_values={'foo': '0.9'}, since_values={'bar': '1.1'}),
+                KwargInfo('output', ContainerTypeInfo(dict, str), default={}, deprecated_values={'foo': '0.9', 'foo2': ('0.9', 'don\'t use it')}, since_values={'bar': '1.1', 'bar2': ('1.1', 'use this')}),
+                KwargInfo('install_dir', (bool, str, NoneType), deprecated_values={False: '0.9'}),
+                KwargInfo(
+                    'mode',
+                    (str, type(None)),
+                    validator=in_set_validator({'clean', 'build', 'rebuild', 'deprecated', 'since'}),
+                    deprecated_values={'deprecated': '1.0'},
+                    since_values={'since': '1.1'}),
+                KwargInfo(
+                    'dict', (ContainerTypeInfo(list, str), ContainerTypeInfo(dict, str)), default={},
+                    since_values={list: '1.9'}),
+                KwargInfo(
+                    'new_dict', (ContainerTypeInfo(list, str), ContainerTypeInfo(dict, str)), default={},
+                    since_values={dict: '1.1'}),
+                KwargInfo(
+                    'foo', (str, int, ContainerTypeInfo(list, str), ContainerTypeInfo(dict, str), ContainerTypeInfo(list, int)), default={},
+                    since_values={str: '1.1', ContainerTypeInfo(list, str): '1.2', ContainerTypeInfo(dict, str): '1.3'},
+                    deprecated_values={int: '0.8', ContainerTypeInfo(list, int): '0.9'}),
+                KwargInfo(
+                    'tuple', (ContainerTypeInfo(list, (str, int))), default=[], listify=True,
+                    since_values={ContainerTypeInfo(list, str): '1.1', ContainerTypeInfo(list, int): '1.2'}),
+                KwargInfo(
+                    'types_tuple_since',
+                    (bool, int, str, NoneType),
+                    since_values={(bool, int): '1.5'},
+                ),
+                KwargInfo(
+                    'types_tuple_deprecated',
+                    (bool, int, str, NoneType),
+                    deprecated_values={(bool, int): '0.9'},
+                ),
+            ],
         )
         def _(obj, node, args: T.Tuple, kwargs: T.Dict[str, str]) -> None:
             pass
 
         with self.subTest('deprecated array string value'), mock.patch('sys.stdout', io.StringIO()) as out:
             _(None, mock.Mock(subproject=''), [], {'input': ['foo']})
-            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '1.0'.*deprecated since '0.9': "testfunc" keyword argument "input" value "foo".*""")
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*deprecated since '0.9': "testfunc" keyword argument "input" value "foo".*""")
 
         with self.subTest('new array string value'), mock.patch('sys.stdout', io.StringIO()) as out:
             _(None, mock.Mock(subproject=''), [], {'input': ['bar']})
-            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '1.0'.*introduced in '1.1': "testfunc" keyword argument "input" value "bar".*""")
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*introduced in '1.1': "testfunc" keyword argument "input" value "bar".*""")
 
         with self.subTest('deprecated dict string value'), mock.patch('sys.stdout', io.StringIO()) as out:
             _(None, mock.Mock(subproject=''), [], {'output': {'foo': 'a'}})
-            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '1.0'.*deprecated since '0.9': "testfunc" keyword argument "output" value "foo".*""")
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*deprecated since '0.9': "testfunc" keyword argument "output" value "foo".*""")
 
         with self.subTest('deprecated dict string value with msg'), mock.patch('sys.stdout', io.StringIO()) as out:
             _(None, mock.Mock(subproject=''), [], {'output': {'foo2': 'a'}})
-            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '1.0'.*deprecated since '0.9': "testfunc" keyword argument "output" value "foo2" in dict keys. dont use it.*""")
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*deprecated since '0.9': "testfunc" keyword argument "output" value "foo2" in dict keys. don't use it.*""")
 
         with self.subTest('new dict string value'), mock.patch('sys.stdout', io.StringIO()) as out:
             _(None, mock.Mock(subproject=''), [], {'output': {'bar': 'b'}})
-            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '1.0'.*introduced in '1.1': "testfunc" keyword argument "output" value "bar".*""")
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*introduced in '1.1': "testfunc" keyword argument "output" value "bar".*""")
 
         with self.subTest('new dict string value with msg'), mock.patch('sys.stdout', io.StringIO()) as out:
             _(None, mock.Mock(subproject=''), [], {'output': {'bar2': 'a'}})
-            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '1.0'.*introduced in '1.1': "testfunc" keyword argument "output" value "bar2" in dict keys. use this.*""")
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*introduced in '1.1': "testfunc" keyword argument "output" value "bar2" in dict keys. use this.*""")
 
         with self.subTest('new string type'), mock.patch('sys.stdout', io.StringIO()) as out:
             _(None, mock.Mock(subproject=''), [], {'foo': 'foo'})
-            self.assertRegex(out.getvalue(), r"""WARNING: Project targets '1.0'.*introduced in '1.1': "testfunc" keyword argument "foo" of type str.*""")
+            self.assertRegex(out.getvalue(), r"""WARNING: Project targets '>= 1.0'.*introduced in '1.1': "testfunc" keyword argument "foo" of type "str".*""")
 
         with self.subTest('new array of string type'), mock.patch('sys.stdout', io.StringIO()) as out:
             _(None, mock.Mock(subproject=''), [], {'foo': ['foo']})
-            self.assertRegex(out.getvalue(), r"""WARNING: Project targets '1.0'.*introduced in '1.2': "testfunc" keyword argument "foo" of type array\[str\].*""")
+            self.assertRegex(out.getvalue(), r"""WARNING: Project targets '>= 1.0'.*introduced in '1.2': "testfunc" keyword argument "foo" of type "array\[str\]".*""")
 
         with self.subTest('new dict of string type'), mock.patch('sys.stdout', io.StringIO()) as out:
             _(None, mock.Mock(subproject=''), [], {'foo': {'plop': 'foo'}})
-            self.assertRegex(out.getvalue(), r"""WARNING: Project targets '1.0'.*introduced in '1.3': "testfunc" keyword argument "foo" of type dict\[str\].*""")
+            self.assertRegex(out.getvalue(), r"""WARNING: Project targets '>= 1.0'.*introduced in '1.3': "testfunc" keyword argument "foo" of type "dict\[str\]".*""")
 
         with self.subTest('deprecated int value'), mock.patch('sys.stdout', io.StringIO()) as out:
             _(None, mock.Mock(subproject=''), [], {'foo': 1})
-            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '1.0'.*deprecated since '0.8': "testfunc" keyword argument "foo" of type int.*""")
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*deprecated since '0.8': "testfunc" keyword argument "foo" of type "int".*""")
 
         with self.subTest('deprecated array int value'), mock.patch('sys.stdout', io.StringIO()) as out:
             _(None, mock.Mock(subproject=''), [], {'foo': [1]})
-            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '1.0'.*deprecated since '0.9': "testfunc" keyword argument "foo" of type array\[int\].*""")
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*deprecated since '0.9': "testfunc" keyword argument "foo" of type "array\[int\]".*""")
 
         with self.subTest('new list[str] value'), mock.patch('sys.stdout', io.StringIO()) as out:
             _(None, mock.Mock(subproject=''), [], {'tuple': ['foo', 42]})
-            self.assertRegex(out.getvalue(), r"""WARNING: Project targets '1.0'.*introduced in '1.1': "testfunc" keyword argument "tuple" of type array\[str\].*""")
-            self.assertRegex(out.getvalue(), r"""WARNING: Project targets '1.0'.*introduced in '1.2': "testfunc" keyword argument "tuple" of type array\[int\].*""")
+            self.assertRegex(out.getvalue(), r"""WARNING: Project targets '>= 1.0'.*introduced in '1.1': "testfunc" keyword argument "tuple" of type "array\[str\]".*""")
+            self.assertRegex(out.getvalue(), r"""WARNING: Project targets '>= 1.0'.*introduced in '1.2': "testfunc" keyword argument "tuple" of type "array\[int\]".*""")
 
         with self.subTest('deprecated array string value'), mock.patch('sys.stdout', io.StringIO()) as out:
             _(None, mock.Mock(subproject=''), [], {'input': 'foo'})
-            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '1.0'.*deprecated since '0.9': "testfunc" keyword argument "input" value "foo".*""")
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*deprecated since '0.9': "testfunc" keyword argument "input" value "foo".*""")
 
         with self.subTest('new array string value'), mock.patch('sys.stdout', io.StringIO()) as out:
             _(None, mock.Mock(subproject=''), [], {'input': 'bar'})
-            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '1.0'.*introduced in '1.1': "testfunc" keyword argument "input" value "bar".*""")
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*introduced in '1.1': "testfunc" keyword argument "input" value "bar".*""")
 
         with self.subTest('non string union'), mock.patch('sys.stdout', io.StringIO()) as out:
             _(None, mock.Mock(subproject=''), [], {'install_dir': False})
-            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '1.0'.*deprecated since '0.9': "testfunc" keyword argument "install_dir" value "False".*""")
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*deprecated since '0.9': "testfunc" keyword argument "install_dir" value "False".*""")
 
         with self.subTest('deprecated string union'), mock.patch('sys.stdout', io.StringIO()) as out:
             _(None, mock.Mock(subproject=''), [], {'mode': 'deprecated'})
-            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '1.0'.*deprecated since '1.0': "testfunc" keyword argument "mode" value "deprecated".*""")
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*deprecated since '1.0': "testfunc" keyword argument "mode" value "deprecated".*""")
 
         with self.subTest('new string union'), mock.patch('sys.stdout', io.StringIO()) as out:
             _(None, mock.Mock(subproject=''), [], {'mode': 'since'})
-            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '1.0'.*introduced in '1.1': "testfunc" keyword argument "mode" value "since".*""")
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*introduced in '1.1': "testfunc" keyword argument "mode" value "since".*""")
 
         with self.subTest('new container'), mock.patch('sys.stdout', io.StringIO()) as out:
             _(None, mock.Mock(subproject=''), [], {'dict': ['a=b']})
-            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '1.0'.*introduced in '1.9': "testfunc" keyword argument "dict" of type list.*""")
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*introduced in '1.9': "testfunc" keyword argument "dict" of type "list".*""")
 
         with self.subTest('new container set to default'), mock.patch('sys.stdout', io.StringIO()) as out:
             _(None, mock.Mock(subproject=''), [], {'new_dict': {}})
-            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '1.0'.*introduced in '1.1': "testfunc" keyword argument "new_dict" of type dict.*""")
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*introduced in '1.1': "testfunc" keyword argument "new_dict" of type "dict".*""")
 
         with self.subTest('new container default'), mock.patch('sys.stdout', io.StringIO()) as out:
             _(None, mock.Mock(subproject=''), [], {})
-            self.assertNotRegex(out.getvalue(), r"""WARNING:.Project targets '1.0'.*introduced in '1.1': "testfunc" keyword argument "new_dict" of type dict.*""")
+            self.assertNotRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*introduced in '1.1': "testfunc" keyword argument "new_dict" of type "dict".*""")
+
+        with self.subTest('types tuple since'), mock.patch('sys.stdout', io.StringIO()) as out:
+            _(None, mock.Mock(subproject=''), [], {'types_tuple_since': False})
+            self.assertRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*introduced in '1.5': "testfunc" keyword argument "types_tuple_since" of type "bool".*""")
+
+        with self.subTest('types tuple deprecated'), mock.patch('sys.stdout', io.StringIO()) as out:
+            _(None, mock.Mock(subproject=''), [], {'types_tuple_deprecated': False})
+            self.assertNotRegex(out.getvalue(), r"""WARNING:.Project targets '>= 1.0'.*introduced in '0.9': "testfunc" keyword argument "types_tuple_deprecated" of type "bool".*""")
 
     def test_typed_kwarg_evolve(self) -> None:
         k = KwargInfo('foo', str, required=True, default='foo')
@@ -1513,11 +2609,13 @@ class InternalTests(unittest.TestCase):
         self.assertEqual(v.default, 'bar')
 
     def test_typed_kwarg_default_type(self) -> None:
-        @typed_kwargs(
+        @TypedArgs(
             'testfunc',
-            KwargInfo('no_default', (str, ContainerTypeInfo(list, str), NoneType)),
-            KwargInfo('str_default', (str, ContainerTypeInfo(list, str)), default=''),
-            KwargInfo('list_default', (str, ContainerTypeInfo(list, str)), default=['']),
+            kw_types=[
+                KwargInfo('no_default', (str, ContainerTypeInfo(list, str), NoneType)),
+                KwargInfo('str_default', (str, ContainerTypeInfo(list, str)), default=''),
+                KwargInfo('list_default', (str, ContainerTypeInfo(list, str)), default=['']),
+            ]
         )
         def _(obj, node, args: T.Tuple, kwargs: T.Dict[str, str]) -> None:
             self.assertEqual(kwargs['no_default'], None)
@@ -1526,24 +2624,53 @@ class InternalTests(unittest.TestCase):
         _(None, mock.Mock(), [], {})
 
     def test_typed_kwarg_invalid_default_type(self) -> None:
-        @typed_kwargs(
+        @TypedArgs(
             'testfunc',
-            KwargInfo('invalid_default', (str, ContainerTypeInfo(list, str), NoneType), default=42),
+            kw_types=[KwargInfo('invalid_default', (str, ContainerTypeInfo(list, str), NoneType), default=42)],
         )
         def _(obj, node, args: T.Tuple, kwargs: T.Dict[str, str]) -> None:
             pass
         self.assertRaises(AssertionError, _, None, mock.Mock(), [], {})
 
     def test_typed_kwarg_container_in_tuple(self) -> None:
-        @typed_kwargs(
+        @TypedArgs(
             'testfunc',
-            KwargInfo('input', (str, ContainerTypeInfo(list, str))),
+            pos_types=[PosArgInfo(object)],
+            kw_types=[KwargInfo('input', (str, ContainerTypeInfo(list, str)))],
         )
         def _(obj, node, args: T.Tuple, kwargs: T.Dict[str, str]) -> None:
             self.assertEqual(kwargs['input'], args[0])
         _(None, mock.Mock(), [''], {'input': ''})
         _(None, mock.Mock(), [['']], {'input': ['']})
         self.assertRaises(InvalidArguments, _, None, mock.Mock(), [], {'input': 42})
+
+    def test_install_mode_kwarg(self) -> None:
+        @TypedArgs('testfunc', kw_types=[INSTALL_MODE_KW])
+        def _(obj, node, args: T.Tuple, kwargs: T.Dict[str, FileMode]) -> FileMode:
+            return kwargs['install_mode']
+
+        # False means "use the default" and must not be passed on as uid/gid 0.
+        mode = _(None, mock.Mock(), [], {'install_mode': ['rw-rw-r--', False, 'mygroup']})
+        self.assertEqual(mode.perms_s, 'rw-rw-r--')
+        self.assertIsNone(mode.owner)
+        self.assertEqual(mode.group, 'mygroup')
+
+        mode = _(None, mock.Mock(), [], {'install_mode': [False, 'myuser', False]})
+        self.assertIsNone(mode.perms_s)
+        self.assertEqual(mode.owner, 'myuser')
+        self.assertIsNone(mode.group)
+
+        mode = _(None, mock.Mock(), [], {'install_mode': ['rw-rw-r--', 0, 0]})
+        self.assertEqual(mode.owner, 0)
+        self.assertEqual(mode.group, 0)
+
+        # 1 == True, but it is a valid uid/gid.
+        mode = _(None, mock.Mock(), [], {'install_mode': ['rw-rw-r--', 1, 1]})
+        self.assertEqual(mode.owner, 1)
+        self.assertEqual(mode.group, 1)
+
+        with self.assertRaises(InvalidArguments):
+            _(None, mock.Mock(), [], {'install_mode': ['rw-rw-r--', True]})
 
     def test_detect_cpu_family(self) -> None:
         """Test the various cpu families that we detect and normalize.
@@ -1557,9 +2684,9 @@ class InternalTests(unittest.TestCase):
             """Mock all of the ways we could get the trial at once."""
             mocked = mock.Mock(return_value=value)
 
-            with mock.patch('mesonbuild.environment.detect_windows_arch', mocked), \
-                    mock.patch('mesonbuild.environment.platform.processor', mocked), \
-                    mock.patch('mesonbuild.environment.platform.machine', mocked):
+            with mock.patch('mesonbuild.envconfig.detect_windows_arch', mocked), \
+                    mock.patch('mesonbuild.envconfig.platform.processor', mocked), \
+                    mock.patch('mesonbuild.envconfig.platform.machine', mocked):
                 yield
 
         cases = [
@@ -1590,28 +2717,28 @@ class InternalTests(unittest.TestCase):
             ('aarch64_be', 'aarch64'),
         ]
 
-        cc = ClangCCompiler([], [], 'fake', MachineChoice.HOST, False, mock.Mock())
+        cc = ClangCCompiler([], [], 'fake', MachineChoice.HOST, get_fake_env())
 
-        with mock.patch('mesonbuild.environment.any_compiler_has_define', mock.Mock(return_value=False)):
+        with mock.patch('mesonbuild.envconfig.any_compiler_has_define', mock.Mock(return_value=False)):
             for test, expected in cases:
                 with self.subTest(test, has_define=False), mock_trial(test):
-                    actual = mesonbuild.environment.detect_cpu_family({'c': cc})
+                    actual = mesonbuild.envconfig.detect_cpu_family({'c': cc})
                     self.assertEqual(actual, expected)
 
-        with mock.patch('mesonbuild.environment.any_compiler_has_define', mock.Mock(return_value=True)):
+        with mock.patch('mesonbuild.envconfig.any_compiler_has_define', mock.Mock(return_value=True)):
             for test, expected in [('x86_64', 'x86'), ('aarch64', 'arm'), ('ppc', 'ppc64'), ('mips64', 'mips64')]:
                 with self.subTest(test, has_define=True), mock_trial(test):
-                    actual = mesonbuild.environment.detect_cpu_family({'c': cc})
+                    actual = mesonbuild.envconfig.detect_cpu_family({'c': cc})
                     self.assertEqual(actual, expected)
 
         # machine_info_can_run calls detect_cpu_family with no compilers at all
         with mock.patch(
-            'mesonbuild.environment.any_compiler_has_define',
+            'mesonbuild.envconfig.any_compiler_has_define',
             mock.Mock(side_effect=AssertionError('Should not be called')),
         ):
             for test, expected in [('mips64', 'mips64')]:
                 with self.subTest(test, has_compiler=False), mock_trial(test):
-                    actual = mesonbuild.environment.detect_cpu_family({})
+                    actual = mesonbuild.envconfig.detect_cpu_family({})
                     self.assertEqual(actual, expected)
 
     def test_detect_cpu(self) -> None:
@@ -1621,9 +2748,9 @@ class InternalTests(unittest.TestCase):
             """Mock all of the ways we could get the trial at once."""
             mocked = mock.Mock(return_value=value)
 
-            with mock.patch('mesonbuild.environment.detect_windows_arch', mocked), \
-                    mock.patch('mesonbuild.environment.platform.processor', mocked), \
-                    mock.patch('mesonbuild.environment.platform.machine', mocked):
+            with mock.patch('mesonbuild.envconfig.detect_windows_arch', mocked), \
+                    mock.patch('mesonbuild.envconfig.platform.processor', mocked), \
+                    mock.patch('mesonbuild.envconfig.platform.machine', mocked):
                 yield
 
         cases = [
@@ -1639,27 +2766,27 @@ class InternalTests(unittest.TestCase):
             ('aarch64_be', 'aarch64'),
         ]
 
-        cc = ClangCCompiler([], [], 'fake', MachineChoice.HOST, False, mock.Mock())
+        cc = ClangCCompiler([], [], 'fake', MachineChoice.HOST, get_fake_env())
 
-        with mock.patch('mesonbuild.environment.any_compiler_has_define', mock.Mock(return_value=False)):
+        with mock.patch('mesonbuild.envconfig.any_compiler_has_define', mock.Mock(return_value=False)):
             for test, expected in cases:
                 with self.subTest(test, has_define=False), mock_trial(test):
-                    actual = mesonbuild.environment.detect_cpu({'c': cc})
+                    actual = mesonbuild.envconfig.detect_cpu({'c': cc})
                     self.assertEqual(actual, expected)
 
-        with mock.patch('mesonbuild.environment.any_compiler_has_define', mock.Mock(return_value=True)):
+        with mock.patch('mesonbuild.envconfig.any_compiler_has_define', mock.Mock(return_value=True)):
             for test, expected in [('x86_64', 'i686'), ('aarch64', 'arm'), ('ppc', 'ppc64'), ('mips64', 'mips64')]:
                 with self.subTest(test, has_define=True), mock_trial(test):
-                    actual = mesonbuild.environment.detect_cpu({'c': cc})
+                    actual = mesonbuild.envconfig.detect_cpu({'c': cc})
                     self.assertEqual(actual, expected)
 
         with mock.patch(
-            'mesonbuild.environment.any_compiler_has_define',
+            'mesonbuild.envconfig.any_compiler_has_define',
             mock.Mock(side_effect=AssertionError('Should not be called')),
         ):
             for test, expected in [('mips64', 'mips64')]:
                 with self.subTest(test, has_compiler=False), mock_trial(test):
-                    actual = mesonbuild.environment.detect_cpu({})
+                    actual = mesonbuild.envconfig.detect_cpu({})
                     self.assertEqual(actual, expected)
 
     @mock.patch('mesonbuild.interpreter.Interpreter.load_root_meson_file', mock.Mock(return_value=None))
@@ -1690,18 +2817,508 @@ class InternalTests(unittest.TestCase):
 
     def test_option_key_from_string(self) -> None:
         cases = [
-            ('c_args', OptionKey('args', lang='c', _type=OptionType.COMPILER)),
-            ('build.cpp_args', OptionKey('args', machine=MachineChoice.BUILD, lang='cpp', _type=OptionType.COMPILER)),
-            ('prefix', OptionKey('prefix', _type=OptionType.BUILTIN)),
-            ('made_up', OptionKey('made_up', _type=OptionType.PROJECT)),
+            ('c_args', OptionKey('c_args')),
+            ('build.cpp_args', OptionKey('cpp_args', machine=MachineChoice.BUILD)),
+            ('prefix', OptionKey('prefix')),
+            ('made_up', OptionKey('made_up')),
 
             # TODO: the from_String method should be splitting the prefix off of
             # these, as we have the type already, but it doesn't. For now have a
             # test so that we don't change the behavior un-intentionally
-            ('b_lto', OptionKey('b_lto', _type=OptionType.BASE)),
-            ('backend_startup_project', OptionKey('backend_startup_project', _type=OptionType.BACKEND)),
+            ('b_lto', OptionKey('b_lto')),
+            ('backend_startup_project', OptionKey('backend_startup_project')),
         ]
 
         for raw, expected in cases:
             with self.subTest(raw):
                 self.assertEqual(OptionKey.from_string(raw), expected)
+
+    def test_env2mfile_deb(self) -> None:
+        MachineInfo = mesonbuild.scripts.env2mfile.MachineInfo
+        to_machine_info = mesonbuild.scripts.env2mfile.dpkg_architecture_to_machine_info
+
+        # For testing purposes, behave as though all cross-programs
+        # exist in /usr/bin
+        def locate_path(program: str) -> T.List[str]:
+            if os.path.isabs(program):
+                return [program]
+            return ['/usr/bin/' + program]
+
+        def expected_compilers(
+            gnu_tuple: str,
+            gcc_suffix: str = '',
+        ) -> T.Dict[str, T.List[str]]:
+            return {
+                'c': [f'/usr/bin/{gnu_tuple}-gcc{gcc_suffix}'],
+                'cpp': [f'/usr/bin/{gnu_tuple}-g++{gcc_suffix}'],
+                'objc': [f'/usr/bin/{gnu_tuple}-gobjc{gcc_suffix}'],
+                'objcpp': [f'/usr/bin/{gnu_tuple}-gobjc++{gcc_suffix}'],
+                'vala': [f'/usr/bin/{gnu_tuple}-valac'],
+            }
+
+        def expected_binaries(gnu_tuple: str) -> T.Dict[str, T.List[str]]:
+            return {
+                'ar': [f'/usr/bin/{gnu_tuple}-ar'],
+                'strip': [f'/usr/bin/{gnu_tuple}-strip'],
+                'objcopy': [f'/usr/bin/{gnu_tuple}-objcopy'],
+                'ld': [f'/usr/bin/{gnu_tuple}-ld'],
+                'cmake': ['/usr/bin/cmake'],
+                'pkg-config': [f'/usr/bin/{gnu_tuple}-pkg-config'],
+                'cups-config': ['/usr/bin/cups-config'],
+                'exe_wrapper': [f'/usr/bin/{gnu_tuple}-cross-exe-wrapper'],
+                'g-ir-annotation-tool': [f'/usr/bin/{gnu_tuple}-g-ir-annotation-tool'],
+                'g-ir-compiler': [f'/usr/bin/{gnu_tuple}-g-ir-compiler'],
+                'g-ir-doc-tool': [f'/usr/bin/{gnu_tuple}-g-ir-doc-tool'],
+                'g-ir-generate': [f'/usr/bin/{gnu_tuple}-g-ir-generate'],
+                'g-ir-inspect': [f'/usr/bin/{gnu_tuple}-g-ir-inspect'],
+                'g-ir-scanner': [f'/usr/bin/{gnu_tuple}-g-ir-scanner'],
+                'vapigen': [f'/usr/bin/{gnu_tuple}-vapigen'],
+            }
+
+        for title, dpkg_arch, gccsuffix, env, expected in [
+            (
+                # s390x is an example of the common case where the
+                # Meson CPU name, the GNU CPU name, the dpkg architecture
+                # name and uname -m all agree.
+                # (alpha, m68k, ppc64, riscv64, sh4, sparc64 are similar)
+                's390x-linux-gnu',
+                # Output of `dpkg-architecture -a...`, filtered to
+                # only the DEB_HOST_ parts because that's all we use
+                textwrap.dedent(
+                    '''
+                    DEB_HOST_ARCH=s390x
+                    DEB_HOST_ARCH_ABI=base
+                    DEB_HOST_ARCH_BITS=64
+                    DEB_HOST_ARCH_CPU=s390x
+                    DEB_HOST_ARCH_ENDIAN=big
+                    DEB_HOST_ARCH_LIBC=gnu
+                    DEB_HOST_ARCH_OS=linux
+                    DEB_HOST_GNU_CPU=s390x
+                    DEB_HOST_GNU_SYSTEM=linux-gnu
+                    DEB_HOST_GNU_TYPE=s390x-linux-gnu
+                    DEB_HOST_MULTIARCH=s390x-linux-gnu
+                    '''
+                ),
+                '',
+                {'PATH': '/usr/bin'},
+                MachineInfo(
+                    compilers=expected_compilers('s390x-linux-gnu'),
+                    binaries=expected_binaries('s390x-linux-gnu'),
+                    properties={},
+                    compile_args={},
+                    link_args={},
+                    cmake={
+                        'CMAKE_C_COMPILER': ['/usr/bin/s390x-linux-gnu-gcc'],
+                        'CMAKE_CXX_COMPILER': ['/usr/bin/s390x-linux-gnu-g++'],
+                        'CMAKE_SYSTEM_NAME': 'Linux',
+                        'CMAKE_SYSTEM_PROCESSOR': 's390x',
+                    },
+                    system='linux',
+                    subsystem='linux',
+                    kernel='linux',
+                    cpu='s390x',
+                    cpu_family='s390x',
+                    endian='big',
+                ),
+            ),
+            # Debian amd64 vs. GNU, Meson, etc. x86_64.
+            # arm64/aarch64, hppa/parisc, i386/i686/x86, loong64/loongarch64,
+            # powerpc/ppc are similar.
+            (
+                'x86_64-linux-gnu',
+                textwrap.dedent(
+                    '''
+                    DEB_HOST_ARCH=amd64
+                    DEB_HOST_ARCH_ABI=base
+                    DEB_HOST_ARCH_BITS=64
+                    DEB_HOST_ARCH_CPU=amd64
+                    DEB_HOST_ARCH_ENDIAN=little
+                    DEB_HOST_ARCH_LIBC=gnu
+                    DEB_HOST_ARCH_OS=linux
+                    DEB_HOST_GNU_CPU=x86_64
+                    DEB_HOST_GNU_SYSTEM=linux-gnu
+                    DEB_HOST_GNU_TYPE=x86_64-linux-gnu
+                    DEB_HOST_MULTIARCH=x86_64-linux-gnu
+                    '''
+                ),
+                '',
+                {'PATH': '/usr/bin'},
+                MachineInfo(
+                    compilers=expected_compilers('x86_64-linux-gnu'),
+                    binaries=expected_binaries('x86_64-linux-gnu'),
+                    properties={},
+                    compile_args={},
+                    link_args={},
+                    cmake={
+                        'CMAKE_C_COMPILER': ['/usr/bin/x86_64-linux-gnu-gcc'],
+                        'CMAKE_CXX_COMPILER': ['/usr/bin/x86_64-linux-gnu-g++'],
+                        'CMAKE_SYSTEM_NAME': 'Linux',
+                        'CMAKE_SYSTEM_PROCESSOR': 'x86_64',
+                    },
+                    system='linux',
+                    subsystem='linux',
+                    kernel='linux',
+                    cpu='x86_64',
+                    cpu_family='x86_64',
+                    endian='little',
+                ),
+            ),
+            (
+                'arm-linux-gnueabihf with non-default gcc and environment',
+                textwrap.dedent(
+                    '''
+                    DEB_HOST_ARCH=armhf
+                    DEB_HOST_ARCH_ABI=eabihf
+                    DEB_HOST_ARCH_BITS=32
+                    DEB_HOST_ARCH_CPU=arm
+                    DEB_HOST_ARCH_ENDIAN=little
+                    DEB_HOST_ARCH_LIBC=gnu
+                    DEB_HOST_ARCH_OS=linux
+                    DEB_HOST_GNU_CPU=arm
+                    DEB_HOST_GNU_SYSTEM=linux-gnueabihf
+                    DEB_HOST_GNU_TYPE=arm-linux-gnueabihf
+                    DEB_HOST_MULTIARCH=arm-linux-gnueabihf
+                    '''
+                ),
+                '-12',
+                {
+                    'PATH': '/usr/bin',
+                    'CPPFLAGS': '-DNDEBUG',
+                    'CFLAGS': '-std=c99',
+                    'CXXFLAGS': '-std=c++11',
+                    'OBJCFLAGS': '-fobjc-exceptions',
+                    'OBJCXXFLAGS': '-fobjc-nilcheck',
+                    'LDFLAGS': '-Wl,-O1',
+                },
+                MachineInfo(
+                    compilers=expected_compilers('arm-linux-gnueabihf', '-12'),
+                    binaries=expected_binaries('arm-linux-gnueabihf'),
+                    properties={},
+                    compile_args={
+                        'c': ['-DNDEBUG', '-std=c99'],
+                        'cpp': ['-DNDEBUG', '-std=c++11'],
+                        'objc': ['-DNDEBUG', '-fobjc-exceptions'],
+                        'objcpp': ['-DNDEBUG', '-fobjc-nilcheck'],
+                    },
+                    link_args={
+                        'c': ['-std=c99', '-Wl,-O1'],
+                        'cpp': ['-std=c++11', '-Wl,-O1'],
+                        'objc': ['-fobjc-exceptions', '-Wl,-O1'],
+                        'objcpp': ['-fobjc-nilcheck', '-Wl,-O1'],
+                    },
+                    cmake={
+                        'CMAKE_C_COMPILER': ['/usr/bin/arm-linux-gnueabihf-gcc-12'],
+                        'CMAKE_CXX_COMPILER': ['/usr/bin/arm-linux-gnueabihf-g++-12'],
+                        'CMAKE_SYSTEM_NAME': 'Linux',
+                        'CMAKE_SYSTEM_PROCESSOR': 'armv7l',
+                    },
+                    system='linux',
+                    subsystem='linux',
+                    kernel='linux',
+                    # In a native build this would often be armv8l
+                    # (the version of the running CPU) but the architecture
+                    # baseline in Debian is officially ARMv7
+                    cpu='arm7hlf',
+                    cpu_family='arm',
+                    endian='little',
+                ),
+            ),
+            (
+                'special cases for i386 (i686, x86) and Hurd',
+                textwrap.dedent(
+                    '''
+                    DEB_HOST_ARCH=hurd-i386
+                    DEB_HOST_ARCH_ABI=base
+                    DEB_HOST_ARCH_BITS=32
+                    DEB_HOST_ARCH_CPU=i386
+                    DEB_HOST_ARCH_ENDIAN=little
+                    DEB_HOST_ARCH_LIBC=gnu
+                    DEB_HOST_ARCH_OS=hurd
+                    DEB_HOST_GNU_CPU=i686
+                    DEB_HOST_GNU_SYSTEM=gnu
+                    DEB_HOST_GNU_TYPE=i686-gnu
+                    DEB_HOST_MULTIARCH=i386-gnu
+                    '''
+                ),
+                '',
+                {'PATH': '/usr/bin'},
+                MachineInfo(
+                    compilers=expected_compilers('i686-gnu'),
+                    binaries=expected_binaries('i686-gnu'),
+                    properties={},
+                    compile_args={},
+                    link_args={},
+                    cmake={
+                        'CMAKE_C_COMPILER': ['/usr/bin/i686-gnu-gcc'],
+                        'CMAKE_CXX_COMPILER': ['/usr/bin/i686-gnu-g++'],
+                        'CMAKE_SYSTEM_NAME': 'GNU',
+                        'CMAKE_SYSTEM_PROCESSOR': 'i686',
+                    },
+                    system='gnu',
+                    subsystem='gnu',
+                    kernel='gnu',
+                    cpu='i686',
+                    cpu_family='x86',
+                    endian='little',
+                ),
+            ),
+            (
+                'special cases for amd64 (x86_64) and kFreeBSD',
+                textwrap.dedent(
+                    '''
+                    DEB_HOST_ARCH=kfreebsd-amd64
+                    DEB_HOST_ARCH_ABI=base
+                    DEB_HOST_ARCH_BITS=64
+                    DEB_HOST_ARCH_CPU=x86_amd64
+                    DEB_HOST_ARCH_ENDIAN=little
+                    DEB_HOST_ARCH_LIBC=gnu
+                    DEB_HOST_ARCH_OS=kfreebsd
+                    DEB_HOST_GNU_CPU=x86_64
+                    DEB_HOST_GNU_SYSTEM=kfreebsd-gnu
+                    DEB_HOST_GNU_TYPE=x86_64-kfreebsd-gnu
+                    DEB_HOST_MULTIARCH=x86_64-kfreebsd-gnu
+                    '''
+                ),
+                '',
+                {'PATH': '/usr/bin'},
+                MachineInfo(
+                    compilers=expected_compilers('x86_64-kfreebsd-gnu'),
+                    binaries=expected_binaries('x86_64-kfreebsd-gnu'),
+                    properties={},
+                    compile_args={},
+                    link_args={},
+                    cmake={
+                        'CMAKE_C_COMPILER': ['/usr/bin/x86_64-kfreebsd-gnu-gcc'],
+                        'CMAKE_CXX_COMPILER': ['/usr/bin/x86_64-kfreebsd-gnu-g++'],
+                        'CMAKE_SYSTEM_NAME': 'kFreeBSD',
+                        'CMAKE_SYSTEM_PROCESSOR': 'x86_64',
+                    },
+                    system='kfreebsd',
+                    subsystem='kfreebsd',
+                    kernel='freebsd',
+                    cpu='x86_64',
+                    cpu_family='x86_64',
+                    endian='little',
+                ),
+            ),
+            (
+                'special case for mips64el',
+                textwrap.dedent(
+                    '''
+                    DEB_HOST_ARCH=mips64el
+                    DEB_HOST_ARCH_ABI=abi64
+                    DEB_HOST_ARCH_BITS=64
+                    DEB_HOST_ARCH_CPU=mips64el
+                    DEB_HOST_ARCH_ENDIAN=little
+                    DEB_HOST_ARCH_LIBC=gnu
+                    DEB_HOST_ARCH_OS=linux
+                    DEB_HOST_GNU_CPU=mips64el
+                    DEB_HOST_GNU_SYSTEM=linux-gnuabi64
+                    DEB_HOST_GNU_TYPE=mips64el-linux-gnuabi64
+                    DEB_HOST_MULTIARCH=mips64el-linux-gnuabi64
+                    '''
+                ),
+                '',
+                {'PATH': '/usr/bin'},
+                MachineInfo(
+                    compilers=expected_compilers('mips64el-linux-gnuabi64'),
+                    binaries=expected_binaries('mips64el-linux-gnuabi64'),
+                    properties={},
+                    compile_args={},
+                    link_args={},
+                    cmake={
+                        'CMAKE_C_COMPILER': ['/usr/bin/mips64el-linux-gnuabi64-gcc'],
+                        'CMAKE_CXX_COMPILER': ['/usr/bin/mips64el-linux-gnuabi64-g++'],
+                        'CMAKE_SYSTEM_NAME': 'Linux',
+                        'CMAKE_SYSTEM_PROCESSOR': 'mips64',
+                    },
+                    system='linux',
+                    subsystem='linux',
+                    kernel='linux',
+                    cpu='mips64',
+                    cpu_family='mips64',
+                    endian='little',
+                ),
+            ),
+            (
+                'special case for ppc64el',
+                textwrap.dedent(
+                    '''
+                    DEB_HOST_ARCH=ppc64el
+                    DEB_HOST_ARCH_ABI=base
+                    DEB_HOST_ARCH_BITS=64
+                    DEB_HOST_ARCH_CPU=ppc64el
+                    DEB_HOST_ARCH_ENDIAN=little
+                    DEB_HOST_ARCH_LIBC=gnu
+                    DEB_HOST_ARCH_OS=linux
+                    DEB_HOST_GNU_CPU=powerpc64le
+                    DEB_HOST_GNU_SYSTEM=linux-gnu
+                    DEB_HOST_GNU_TYPE=powerpc64le-linux-gnu
+                    DEB_HOST_MULTIARCH=powerpc64le-linux-gnu
+                    '''
+                ),
+                '',
+                {'PATH': '/usr/bin'},
+                MachineInfo(
+                    compilers=expected_compilers('powerpc64le-linux-gnu'),
+                    binaries=expected_binaries('powerpc64le-linux-gnu'),
+                    properties={},
+                    compile_args={},
+                    link_args={},
+                    cmake={
+                        'CMAKE_C_COMPILER': ['/usr/bin/powerpc64le-linux-gnu-gcc'],
+                        'CMAKE_CXX_COMPILER': ['/usr/bin/powerpc64le-linux-gnu-g++'],
+                        'CMAKE_SYSTEM_NAME': 'Linux',
+                        'CMAKE_SYSTEM_PROCESSOR': 'ppc64le',
+                    },
+                    system='linux',
+                    subsystem='linux',
+                    kernel='linux',
+                    # TODO: Currently ppc64, but native builds have ppc64le
+                    # https://github.com/mesonbuild/meson/issues/13741
+                    cpu='TODO',
+                    cpu_family='ppc64',
+                    endian='little',
+                ),
+            ),
+        ]:
+            with self.subTest(title), \
+                    unittest.mock.patch.dict('os.environ', env, clear=True), \
+                    unittest.mock.patch('mesonbuild.scripts.env2mfile.locate_path') as mock_locate_path:
+                mock_locate_path.side_effect = locate_path
+                options = argparse.Namespace()
+                options.gccsuffix = gccsuffix
+                actual = to_machine_info(dpkg_arch, options)
+
+                if expected.system == 'TODO':
+                    print(f'TODO: {title}: system() -> {actual.system}')
+                else:
+                    self.assertEqual(actual.system, expected.system)
+
+                if expected.subsystem == 'TODO':
+                    print(f'TODO: {title}: subsystem() -> {actual.subsystem}')
+                else:
+                    self.assertEqual(actual.subsystem, expected.subsystem)
+
+                if expected.kernel == 'TODO':
+                    print(f'TODO: {title}: kernel() -> {actual.kernel}')
+                else:
+                    self.assertEqual(actual.kernel, expected.kernel)
+
+                if expected.cpu == 'TODO':
+                    print(f'TODO: {title}: cpu() -> {actual.cpu}')
+                else:
+                    self.assertEqual(actual.cpu, expected.cpu)
+
+                self.assertEqual(actual.cpu_family, expected.cpu_family)
+                self.assertEqual(actual.endian, expected.endian)
+
+                self.assertEqual(actual.compilers, expected.compilers)
+                self.assertEqual(actual.binaries, expected.binaries)
+                self.assertEqual(actual.properties, expected.properties)
+                self.assertEqual(actual.compile_args, expected.compile_args)
+                self.assertEqual(actual.link_args, expected.link_args)
+                self.assertEqual(actual.cmake, expected.cmake)
+
+    def test_cuda_module_nvcc_arch_flags(self):
+        def flags(cuda_version, arch_list, detected=None):
+            # swallow the mlog warnings emitted for filtered-out archs
+            with contextlib.redirect_stdout(io.StringIO()):
+                return mesonbuild.modules.cuda.CudaModule._nvcc_arch_flags(cuda_version, arch_list, detected or [])
+
+        # (cuda_version, arch_list, detected, expected gencode flags, expected readable names)
+        cases = [
+            # baseline; also asserted in "test cases/cuda/3 cudamodule/meson.build"
+            ('11.1', '8.6', None, ['-gencode', 'arch=compute_86,code=sm_86'], ['sm_86']),
+            # toolkit too old for the arch -> filtered out with a warning
+            ('11.0', '8.6', None, [], []),
+            # family names only expand to members inside the support window
+            ('11.0', 'Ampere', None, ['-gencode', 'arch=compute_80,code=sm_80'], ['sm_80']),
+            # 'X.Y(Z.W)+PTX' embeds the PTX of the virtual arch, not the real one
+            ('11.1', '8.6(8.0)+PTX', None, ['-gencode', 'arch=compute_80,code=sm_86', '-gencode', 'arch=compute_80,code=compute_80'], ['sm_86', 'compute_80']),
+            # a detected GPU newer than the toolkit saturates to the max common arch + PTX
+            ('10.2', 'Auto', ['8.0'], ['-gencode', 'arch=compute_75,code=sm_75', '-gencode', 'arch=compute_75,code=compute_75'], ['sm_75', 'compute_75']),
+            # sm_21 has no compute_21: both the family and the numeric spelling must fall back to compute_20
+            ('8.0', 'Fermi', None, ['-gencode', 'arch=compute_20,code=sm_20', '-gencode', 'arch=compute_20,code=sm_21'], ['sm_20', 'sm_21']),
+            ('8.0', '2.1', None, ['-gencode', 'arch=compute_20,code=sm_21'], ['sm_21']),
+            # PTX fallbacks go at the end, not interleaved by virtual arch
+            ('12.9', '5.0+PTX;8.6', None, ['-gencode', 'arch=compute_50,code=sm_50', '-gencode', 'arch=compute_86,code=sm_86', '-gencode', 'arch=compute_50,code=compute_50'], ['sm_50', 'sm_86', 'compute_50']),
+            # numeric (not lexicographic) ordering: 10.x < 12.x
+            ('12.9', 'Blackwell', None, ['-gencode', 'arch=compute_100,code=sm_100', '-gencode', 'arch=compute_103,code=sm_103', '-gencode', 'arch=compute_120,code=sm_120', '-gencode', 'arch=compute_121,code=sm_121'], ['sm_100', 'sm_103', 'sm_120', 'sm_121']),
+            ('12.9', 'Thor;Hopper(A)', None, ['-gencode', 'arch=compute_90a,code=sm_90a', '-gencode', 'arch=compute_101,code=sm_101'], ['sm_90a', 'sm_101']),
+            # different code under different CUDA versions
+            ('12.9', 'Thor', None, ['-gencode', 'arch=compute_101,code=sm_101'], ['sm_101']),
+            ('13.0', 'Thor', None, ['-gencode', 'arch=compute_110,code=sm_110'], ['sm_110']),
+            # family-specific virtual arch pairs forward within its family
+            ('12.9', '10.3(10.0f)', None, ['-gencode', 'arch=compute_100f,code=sm_103'], ['sm_103']),
+            # architecture-specific archs self-pair
+            ('12.0', '9.0a', None, ['-gencode', 'arch=compute_90a,code=sm_90a'], ['sm_90a']),
+            # an 'a' code arch may be built from its own plain virtual arch
+            ('12.9', '10.0a(10.0)', None, ['-gencode', 'arch=compute_100,code=sm_100a'], ['sm_100a']),
+        ]
+        for cuda_version, arch_list, detected, expected_flags, expected_readable in cases:
+            with self.subTest(cuda_version=cuda_version, arch_list=arch_list, detected=detected):
+                actual_flags, actual_readable = flags(cuda_version, arch_list, detected)
+                self.assertEqual(actual_flags, expected_flags)
+                self.assertEqual(actual_readable, expected_readable)
+
+    def test_cuda_module_nvcc_arch_flags_invalid(self):
+        def flags(cuda_version, arch_list):
+            with contextlib.redirect_stdout(io.StringIO()):
+                return mesonbuild.modules.cuda.CudaModule._nvcc_arch_flags(cuda_version, arch_list, [])
+
+        # (cuda_version, arch_list, expected error message pattern)
+        cases = [
+            # 'a' archs have no forward compatibility, so embedding their PTX is meaningless
+            ('12.0', '9.0a+PTX', 'mutually exclusive'),
+            ('12.0', 'Hopper(A)+PTX', 'mutually exclusive'),
+            # an 'a' virtual arch can only emit code for exactly itself
+            ('12.9', '10.0(10.0a)', 'architecture-specific'),
+            # there is no compute_21; the error points at the correct virtual arch
+            ('8.0', '2.1(2.1)', r'use 2\.0 instead'),
+            # 'f' virtual archs only pair within their own family generation:
+            # not Thor (carved out of the 10.x family), not other majors, not backwards
+            ('12.9', '10.1(10.0f)', 'family-specific'),
+            ('12.9', '12.0(10.0f)', 'family-specific'),
+            ('12.9', '10.0(10.3f)', 'family-specific'),
+            # an 'f' code arch requires a same-generation virtual arch
+            ('12.9', '10.0f(9.0)', 'same-generation'),
+            # nvcc: "The same GPU code (`sm_121`) generated for non family-specific
+            # and family-specific GPU arch"
+            ('12.9', '12.1f;12.1', r'same GPU code sm_121'),
+            # ... also when the plain arch comes from a named set expansion
+            ('12.9', 'Blackwell;12.1f', r'same GPU code sm_121'),
+            # unknown archs
+            ('12.9', '99.9', 'Unknown CUDA'),
+            ('12.9', '8.6(99.9)', 'Unknown CUDA Virtual'),
+            ('12.9', 'NotAnArch', 'Unknown CUDA Architecture Name'),
+        ]
+        for cuda_version, arch_list, message in cases:
+            with self.subTest(cuda_version=cuda_version, arch_list=arch_list):
+                with self.assertRaisesRegex(InvalidArguments, message):
+                    flags(cuda_version, arch_list)
+
+    def test_depfixer_skips_install_name_tool_on_non_darwin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fname = os.path.join(tmpdir, 'libfoo.so')
+            with open(fname, 'wb') as f:
+                f.write(b'not an elf file')
+            with mock.patch('mesonbuild.scripts.depfixer.INSTALL_NAME_TOOL', True), \
+                 mock.patch('mesonbuild.scripts.depfixer.fix_darwin') as mock_fix_darwin:
+                mesonbuild.scripts.depfixer.fix_rpath(
+                    fname, set(), '', '', {}, system='linux', verbose=False)
+                mock_fix_darwin.assert_not_called()
+
+    def test_is_lib_filename(self) -> None:
+        from mesonbuild.utils.universal import is_lib_filename
+
+        self.assertTrue(is_lib_filename('libfoo.so'))
+        self.assertTrue(is_lib_filename('libfoo.so.1.2.3'))
+        self.assertTrue(is_lib_filename('libfoo.dylib'))
+        self.assertTrue(is_lib_filename('libfoo.a'))
+        self.assertTrue(is_lib_filename('foo.dll'))
+        self.assertTrue(is_lib_filename('foo.lib'))
+
+        self.assertFalse(is_lib_filename('libfoo.so.txt'))
+        self.assertFalse(is_lib_filename('foo.c'))
+        self.assertFalse(is_lib_filename('foo.exe'))

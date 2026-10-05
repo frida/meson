@@ -8,14 +8,17 @@ import os
 from pathlib import Path
 import shutil
 import unittest
+import typing as T
 
 from mesonbuild.ast import IntrospectionInterpreter, AstIDGenerator
 from mesonbuild.ast.printer import RawPrinter
-from mesonbuild.mesonlib import windows_proof_rmtree
+from mesonbuild.mesonlib import windows_proof_rmtree, is_windows, is_linux
+
 from .baseplatformtests import BasePlatformTests
+from .helpers import skip_if_not_language
 
 class RewriterTests(BasePlatformTests):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.maxDiff = None
 
@@ -24,27 +27,39 @@ class RewriterTests(BasePlatformTests):
             windows_proof_rmtree(self.builddir)
         shutil.copytree(os.path.join(self.rewrite_test_dir, dirname), self.builddir)
 
-    def rewrite_raw(self, directory, args):
+    def rewrite_raw(self, directory: str, args: T.Sequence[str]) -> T.Dict:
         if isinstance(args, str):
             args = [args]
         command = self.rewrite_command + ['--verbose', '--skip', '--sourcedir', directory] + args
-        p = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        p = subprocess.run(command, capture_output=True, encoding='utf-8', text=True, timeout=60)
         print('STDOUT:')
         print(p.stdout)
         print('STDERR:')
         print(p.stderr)
         if p.returncode != 0:
-            if 'MESON_SKIP_TEST' in p.stdout:
+            if 'MESON_SKIP_TEST' in p.stderr:
                 raise unittest.SkipTest('Project requested skipping.')
-            raise subprocess.CalledProcessError(p.returncode, command, output=p.stdout)
-        if not p.stderr:
+            raise subprocess.CalledProcessError(p.returncode, command, output=p.stderr)
+        if not p.stdout:
             return {}
-        return json.loads(p.stderr)
+        return json.loads(p.stdout)
 
-    def rewrite(self, directory, args):
+    def rewrite(self, directory: str, args: T.Sequence[str]) -> T.Dict:
         if isinstance(args, str):
             args = [args]
         return self.rewrite_raw(directory, ['command'] + args)
+
+    # The rewriter sorts the sources alphabetically, but this is very unstable
+    # and buggy, so we do not test it.
+    def assertEqualIgnoreOrder(self, a, b):
+        def deepsort(x):
+            if isinstance(x, list):
+                return sorted(deepsort(el) for el in x)
+            elif isinstance(x, dict):
+                return {k: deepsort(v) for k,v in x.items()}
+            else:
+                return x
+        self.assertDictEqual(deepsort(a), deepsort(b))
 
     def test_target_source_list(self):
         self.prime('1 basic')
@@ -61,32 +76,40 @@ class RewriterTests(BasePlatformTests):
                 'trivialprog7@exe': {'name': 'trivialprog7', 'sources': ['fileB.cpp', 'fileC.cpp', 'main.cpp', 'fileA.cpp'], 'extra_files': []},
                 'trivialprog8@exe': {'name': 'trivialprog8', 'sources': ['main.cpp', 'fileA.cpp'], 'extra_files': []},
                 'trivialprog9@exe': {'name': 'trivialprog9', 'sources': ['main.cpp', 'fileA.cpp'], 'extra_files': []},
+                'trivialprog10@exe': {'name': 'trivialprog10', 'sources': ['main.cpp', 'fileA.cpp', 'fileB.cpp'], 'extra_files': []},
+                'trivialprog11@exe': {'name': 'trivialprog11', 'sources': ['main.cpp', 'fileA.cpp'], 'extra_files': []},
+                'trivialprog12@exe': {'name': 'trivialprog12', 'sources': ['main.cpp', 'fileA.cpp'], 'extra_files': []},
+                'rightName@exe': {'name': 'rightName', 'sources': ['main.cpp'], 'extra_files': []},
             }
         }
-        self.assertDictEqual(out, expected)
+        self.assertEqualIgnoreOrder(out, expected)
 
     def test_target_add_sources(self):
         self.prime('1 basic')
         out = self.rewrite(self.builddir, os.path.join(self.builddir, 'addSrc.json'))
         expected = {
             'target': {
-                'trivialprog0@exe': {'name': 'trivialprog0', 'sources': ['a1.cpp', 'a2.cpp', 'a6.cpp', 'fileA.cpp', 'main.cpp', 'a7.cpp', 'fileB.cpp', 'fileC.cpp'], 'extra_files': []},
-                'trivialprog1@exe': {'name': 'trivialprog1', 'sources': ['a1.cpp', 'a2.cpp', 'a6.cpp', 'fileA.cpp', 'main.cpp'], 'extra_files': []},
-                'trivialprog2@exe': {'name': 'trivialprog2', 'sources': ['a7.cpp', 'fileB.cpp', 'fileC.cpp'], 'extra_files': []},
+                'trivialprog0@exe': {'name': 'trivialprog0', 'sources': ['main.cpp', 'fileA.cpp', 'fileB.cpp', 'fileC.cpp'], 'extra_files': []},
+                'trivialprog1@exe': {'name': 'trivialprog1', 'sources': ['main.cpp', 'fileA.cpp', 'a1.cpp', 'a2.cpp'], 'extra_files': []},
+                'trivialprog2@exe': {'name': 'trivialprog2', 'sources': ['fileB.cpp', 'fileC.cpp', 'a7.cpp'], 'extra_files': []},
                 'trivialprog3@exe': {'name': 'trivialprog3', 'sources': ['a5.cpp', 'fileA.cpp', 'main.cpp'], 'extra_files': []},
-                'trivialprog4@exe': {'name': 'trivialprog4', 'sources': ['a5.cpp', 'main.cpp', 'fileA.cpp'], 'extra_files': []},
-                'trivialprog5@exe': {'name': 'trivialprog5', 'sources': ['a3.cpp', 'main.cpp', 'a7.cpp', 'fileB.cpp', 'fileC.cpp'], 'extra_files': []},
+                'trivialprog4@exe': {'name': 'trivialprog4', 'sources': ['main.cpp', 'a5.cpp', 'fileA.cpp'], 'extra_files': []},
+                'trivialprog5@exe': {'name': 'trivialprog5', 'sources': ['fileB.cpp', 'fileC.cpp', 'a3.cpp', 'main.cpp'], 'extra_files': []},
                 'trivialprog6@exe': {'name': 'trivialprog6', 'sources': ['main.cpp', 'fileA.cpp', 'a4.cpp'], 'extra_files': []},
-                'trivialprog7@exe': {'name': 'trivialprog7', 'sources': ['fileB.cpp', 'fileC.cpp', 'a1.cpp', 'a2.cpp', 'a6.cpp', 'fileA.cpp', 'main.cpp'], 'extra_files': []},
-                'trivialprog8@exe': {'name': 'trivialprog8', 'sources': ['a1.cpp', 'a2.cpp', 'a6.cpp', 'fileA.cpp', 'main.cpp'], 'extra_files': []},
-                'trivialprog9@exe': {'name': 'trivialprog9', 'sources': ['a1.cpp', 'a2.cpp', 'a6.cpp', 'fileA.cpp', 'main.cpp'], 'extra_files': []},
+                'trivialprog7@exe': {'name': 'trivialprog7', 'sources': ['fileB.cpp', 'fileC.cpp', 'fileA.cpp', 'main.cpp'], 'extra_files': []},
+                'trivialprog8@exe': {'name': 'trivialprog8', 'sources': ['main.cpp', 'fileA.cpp'], 'extra_files': []},
+                'trivialprog9@exe': {'name': 'trivialprog9', 'sources': ['main.cpp', 'fileA.cpp', 'a1.cpp', 'a6.cpp' ], 'extra_files': []},
+                'trivialprog10@exe': {'name': 'trivialprog10', 'sources': ['main.cpp', 'fileA.cpp', 'fileB.cpp', 'a1.cpp'], 'extra_files': []},
+                'trivialprog11@exe': {'name': 'trivialprog11', 'sources': ['a1.cpp', 'fileA.cpp', 'main.cpp'], 'extra_files': []},
+                'trivialprog12@exe': {'name': 'trivialprog12', 'sources': ['a1.cpp', 'fileA.cpp', 'fileB.cpp', 'main.cpp'], 'extra_files': []},
+                'rightName@exe': {'name': 'rightName', 'sources': ['main.cpp'], 'extra_files': []},
             }
         }
-        self.assertDictEqual(out, expected)
+        self.assertEqualIgnoreOrder(out, expected)
 
         # Check the written file
         out = self.rewrite(self.builddir, os.path.join(self.builddir, 'info.json'))
-        self.assertDictEqual(out, expected)
+        self.assertEqualIgnoreOrder(out, expected)
 
     def test_target_add_sources_abs(self):
         self.prime('1 basic')
@@ -95,7 +118,7 @@ class RewriterTests(BasePlatformTests):
         inf = json.dumps([{"type": "target", "target": "trivialprog1", "operation": "info"}])
         self.rewrite(self.builddir, add)
         out = self.rewrite(self.builddir, inf)
-        expected = {'target': {'trivialprog1@exe': {'name': 'trivialprog1', 'sources': ['a1.cpp', 'a2.cpp', 'a6.cpp', 'fileA.cpp', 'main.cpp'], 'extra_files': []}}}
+        expected = {'target': {'trivialprog1@exe': {'name': 'trivialprog1', 'sources': ['main.cpp', 'fileA.cpp', 'a1.cpp', 'a2.cpp', 'a6.cpp'], 'extra_files': []}}}
         self.assertDictEqual(out, expected)
 
     def test_target_remove_sources(self):
@@ -103,28 +126,32 @@ class RewriterTests(BasePlatformTests):
         out = self.rewrite(self.builddir, os.path.join(self.builddir, 'rmSrc.json'))
         expected = {
             'target': {
-                'trivialprog0@exe': {'name': 'trivialprog0', 'sources': ['main.cpp', 'fileC.cpp'], 'extra_files': []},
-                'trivialprog1@exe': {'name': 'trivialprog1', 'sources': ['main.cpp'], 'extra_files': []},
-                'trivialprog2@exe': {'name': 'trivialprog2', 'sources': ['fileC.cpp'], 'extra_files': []},
+                'trivialprog0@exe': {'name': 'trivialprog0', 'sources': ['main.cpp', 'fileA.cpp', 'fileB.cpp', 'fileC.cpp'], 'extra_files': []},
+                'trivialprog1@exe': {'name': 'trivialprog1', 'sources': ['main.cpp', 'fileA.cpp'], 'extra_files': []},
+                'trivialprog2@exe': {'name': 'trivialprog2', 'sources': ['fileB.cpp', 'fileC.cpp'], 'extra_files': []},
                 'trivialprog3@exe': {'name': 'trivialprog3', 'sources': ['main.cpp'], 'extra_files': []},
                 'trivialprog4@exe': {'name': 'trivialprog4', 'sources': ['main.cpp'], 'extra_files': []},
-                'trivialprog5@exe': {'name': 'trivialprog5', 'sources': ['main.cpp', 'fileC.cpp'], 'extra_files': []},
+                'trivialprog5@exe': {'name': 'trivialprog5', 'sources': ['fileB.cpp', 'fileC.cpp'], 'extra_files': []},
                 'trivialprog6@exe': {'name': 'trivialprog6', 'sources': ['main.cpp'], 'extra_files': []},
-                'trivialprog7@exe': {'name': 'trivialprog7', 'sources': ['fileC.cpp', 'main.cpp'], 'extra_files': []},
-                'trivialprog8@exe': {'name': 'trivialprog8', 'sources': ['main.cpp'], 'extra_files': []},
-                'trivialprog9@exe': {'name': 'trivialprog9', 'sources': ['main.cpp'], 'extra_files': []},
+                'trivialprog7@exe': {'name': 'trivialprog7', 'sources': ['fileC.cpp', 'main.cpp', 'fileA.cpp'], 'extra_files': []},
+                'trivialprog8@exe': {'name': 'trivialprog8', 'sources': ['main.cpp', 'fileA.cpp'], 'extra_files': []},
+                'trivialprog9@exe': {'name': 'trivialprog9', 'sources': ['main.cpp', 'fileA.cpp'], 'extra_files': []},
+                'trivialprog10@exe': {'name': 'trivialprog10', 'sources': ['main.cpp'], 'extra_files': []},
+                'trivialprog11@exe': {'name': 'trivialprog11', 'sources': ['main.cpp'], 'extra_files': []},
+                'trivialprog12@exe': {'name': 'trivialprog12', 'sources': ['main.cpp', 'fileA.cpp'], 'extra_files': []},
+                'rightName@exe': {'name': 'rightName', 'sources': ['main.cpp'], 'extra_files': []},
             }
         }
-        self.assertDictEqual(out, expected)
+        self.assertEqualIgnoreOrder(out, expected)
 
         # Check the written file
         out = self.rewrite(self.builddir, os.path.join(self.builddir, 'info.json'))
-        self.assertDictEqual(out, expected)
+        self.assertEqualIgnoreOrder(out, expected)
 
     def test_target_subdir(self):
         self.prime('2 subdirs')
         out = self.rewrite(self.builddir, os.path.join(self.builddir, 'addSrc.json'))
-        expected = {'name': 'something', 'sources': ['first.c', 'second.c', 'third.c'], 'extra_files': []}
+        expected = {'name': 'something', 'sources': ['third.c', f'sub2{os.path.sep}first.c', f'sub2{os.path.sep}second.c'], 'extra_files': []}
         self.assertDictEqual(list(out['target'].values())[0], expected)
 
         # Check the written file
@@ -145,9 +172,12 @@ class RewriterTests(BasePlatformTests):
                 'trivialprog6@exe': {'name': 'trivialprog6', 'sources': ['main.cpp', 'fileA.cpp'], 'extra_files': []},
                 'trivialprog7@exe': {'name': 'trivialprog7', 'sources': ['fileB.cpp', 'fileC.cpp', 'main.cpp', 'fileA.cpp'], 'extra_files': []},
                 'trivialprog8@exe': {'name': 'trivialprog8', 'sources': ['main.cpp', 'fileA.cpp'], 'extra_files': []},
+                'trivialprog10@exe': {'name': 'trivialprog10', 'sources': ['main.cpp', 'fileA.cpp', 'fileB.cpp'], 'extra_files': []},
+                'trivialprog11@exe': {'name': 'trivialprog11', 'sources': ['main.cpp', 'fileA.cpp'], 'extra_files': []},
+                'trivialprog12@exe': {'name': 'trivialprog12', 'sources': ['main.cpp', 'fileA.cpp'], 'extra_files': []},
             }
         }
-        self.assertDictEqual(out, expected)
+        self.assertEqualIgnoreOrder(out, expected)
 
     def test_target_add(self):
         self.prime('1 basic')
@@ -166,10 +196,14 @@ class RewriterTests(BasePlatformTests):
                 'trivialprog7@exe': {'name': 'trivialprog7', 'sources': ['fileB.cpp', 'fileC.cpp', 'main.cpp', 'fileA.cpp'], 'extra_files': []},
                 'trivialprog8@exe': {'name': 'trivialprog8', 'sources': ['main.cpp', 'fileA.cpp'], 'extra_files': []},
                 'trivialprog9@exe': {'name': 'trivialprog9', 'sources': ['main.cpp', 'fileA.cpp'], 'extra_files': []},
-                'trivialprog10@sha': {'name': 'trivialprog10', 'sources': ['new1.cpp', 'new2.cpp'], 'extra_files': []},
+                'trivialprog10@exe': {'name': 'trivialprog10', 'sources': ['main.cpp', 'fileA.cpp', 'fileB.cpp'], 'extra_files': []},
+                'trivialprog11@exe': {'name': 'trivialprog11', 'sources': ['main.cpp', 'fileA.cpp'], 'extra_files': []},
+                'trivialprog12@exe': {'name': 'trivialprog12', 'sources': ['main.cpp', 'fileA.cpp'], 'extra_files': []},
+                'trivialprog13@sha': {'name': 'trivialprog13', 'sources': ['new1.cpp', 'new2.cpp'], 'extra_files': []},
+                'rightName@exe': {'name': 'rightName', 'sources': ['main.cpp'], 'extra_files': []},
             }
         }
-        self.assertDictEqual(out, expected)
+        self.assertEqualIgnoreOrder(out, expected)
 
     def test_target_remove_subdir(self):
         self.prime('2 subdirs')
@@ -181,7 +215,7 @@ class RewriterTests(BasePlatformTests):
         self.prime('2 subdirs')
         self.rewrite(self.builddir, os.path.join(self.builddir, 'addTgt.json'))
         out = self.rewrite(self.builddir, os.path.join(self.builddir, 'info.json'))
-        expected = {'name': 'something', 'sources': ['first.c', 'second.c'], 'extra_files': []}
+        expected = {'name': 'something', 'sources': [f'sub2{os.path.sep}first.c', f'sub2{os.path.sep}second.c'], 'extra_files': []}
         self.assertDictEqual(out['target']['94b671c@@something@exe'], expected)
 
     def test_target_source_sorting(self):
@@ -228,16 +262,23 @@ class RewriterTests(BasePlatformTests):
                 }
             }
         }
+        for k1, v1 in expected.items():
+            for k2, v2 in v1.items():
+                for k3, v3 in v2.items():
+                    if isinstance(v3, list):
+                        for i in range(len(v3)):
+                            v3[i] = v3[i].replace('/', os.path.sep)
         self.assertDictEqual(out, expected)
 
     def test_target_same_name_skip(self):
         self.prime('4 same name targets')
         out = self.rewrite(self.builddir, os.path.join(self.builddir, 'addSrc.json'))
         out = self.rewrite(self.builddir, os.path.join(self.builddir, 'info.json'))
-        expected = {'name': 'myExe', 'sources': ['main.cpp'], 'extra_files': []}
+        expected1 = {'name': 'myExe', 'sources': ['main.cpp'], 'extra_files': []}
+        expected2 = {'name': 'myExe', 'sources': [f'sub1{os.path.sep}main.cpp'], 'extra_files': []}
         self.assertEqual(len(out['target']), 2)
-        for val in out['target'].values():
-            self.assertDictEqual(expected, val)
+        self.assertDictEqual(expected1, out['target']['myExe@exe'])
+        self.assertDictEqual(expected2, out['target']['9a11041@@myExe@exe'])
 
     def test_kwargs_info(self):
         self.prime('3 kwargs')
@@ -251,13 +292,30 @@ class RewriterTests(BasePlatformTests):
         }
         self.assertDictEqual(out, expected)
 
+    def test_kwargs_info_dict(self):
+        self.prime('8 kwargs dict')
+        out = self.rewrite(self.builddir, os.path.join(self.builddir, 'info.json'))
+        expected = {
+            'kwargs': {
+                'project#/': {
+                    'default_options': {'c_std': 'c11', 'cpp_std': 'c++17'},
+                    'version': '0.0.1'
+                },
+                'dependency#dep1': {
+                    'default_options': {'foo': 'bar'},
+                    'required': False
+                }
+            }
+        }
+        self.assertDictEqual(out, expected)
+
     def test_kwargs_set(self):
         self.prime('3 kwargs')
         self.rewrite(self.builddir, os.path.join(self.builddir, 'set.json'))
         out = self.rewrite(self.builddir, os.path.join(self.builddir, 'info.json'))
         expected = {
             'kwargs': {
-                'project#/': {'version': '0.0.2', 'meson_version': '0.50.0', 'license': ['GPL', 'MIT']},
+                'project#/': {'version': '0.0.2', 'meson_version': '0.50.0', 'license': ['GPL', 'MIT'], 'license_files': ['GPL.txt', 'MIT.txt']},
                 'target#tgt1': {'build_by_default': False, 'build_rpath': '/usr/local', 'dependencies': 'dep1'},
                 'dependency#dep1': {'required': True, 'method': 'cmake'}
             }
@@ -270,7 +328,7 @@ class RewriterTests(BasePlatformTests):
         out = self.rewrite(self.builddir, os.path.join(self.builddir, 'info.json'))
         expected = {
             'kwargs': {
-                'project#/': {'version': '0.0.1', 'license': ['GPL', 'MIT', 'BSD', 'Boost']},
+                'project#/': {'version': '0.0.1', 'license': ['GPL', 'MIT', 'BSD', 'Boost'], 'license_files': 'GPL.txt'},
                 'target#tgt1': {'build_by_default': True},
                 'dependency#dep1': {'required': False}
             }
@@ -347,48 +405,78 @@ class RewriterTests(BasePlatformTests):
         out = self.rewrite(self.builddir, os.path.join(self.builddir, 'addExtraFiles.json'))
         expected = {
             'target': {
-                'trivialprog0@exe': {'name': 'trivialprog0', 'sources': ['main.cpp'], 'extra_files': ['a1.hpp', 'a2.hpp', 'a6.hpp', 'fileA.hpp', 'main.hpp', 'a7.hpp', 'fileB.hpp', 'fileC.hpp']},
-                'trivialprog1@exe': {'name': 'trivialprog1', 'sources': ['main.cpp'], 'extra_files': ['a1.hpp', 'a2.hpp', 'a6.hpp', 'fileA.hpp', 'main.hpp']},
+                'trivialprog0@exe': {'name': 'trivialprog0', 'sources': ['main.cpp'], 'extra_files': ['fileA.hpp', 'main.hpp', 'fileB.hpp', 'fileC.hpp']},
+                'trivialprog1@exe': {'name': 'trivialprog1', 'sources': ['main.cpp'], 'extra_files': ['a1.hpp', 'a2.hpp', 'fileA.hpp', 'main.hpp']},
                 'trivialprog2@exe': {'name': 'trivialprog2', 'sources': ['main.cpp'], 'extra_files': ['a7.hpp', 'fileB.hpp', 'fileC.hpp']},
                 'trivialprog3@exe': {'name': 'trivialprog3', 'sources': ['main.cpp'], 'extra_files': ['a5.hpp', 'fileA.hpp', 'main.hpp']},
                 'trivialprog4@exe': {'name': 'trivialprog4', 'sources': ['main.cpp'], 'extra_files': ['a5.hpp', 'main.hpp', 'fileA.hpp']},
-                'trivialprog5@exe': {'name': 'trivialprog5', 'sources': ['main.cpp'], 'extra_files': ['a3.hpp', 'main.hpp', 'a7.hpp', 'fileB.hpp', 'fileC.hpp']},
-                'trivialprog6@exe': {'name': 'trivialprog6', 'sources': ['main.cpp'], 'extra_files': ['a1.hpp', 'a2.hpp', 'a6.hpp', 'fileA.hpp', 'main.hpp']},
-                'trivialprog7@exe': {'name': 'trivialprog7', 'sources': ['main.cpp'], 'extra_files': ['a1.hpp', 'a2.hpp', 'a6.hpp', 'fileA.hpp', 'main.hpp']},
+                'trivialprog5@exe': {'name': 'trivialprog5', 'sources': ['main.cpp'], 'extra_files': ['a3.hpp', 'main.hpp', 'fileB.hpp', 'fileC.hpp']},
+                'trivialprog6@exe': {'name': 'trivialprog6', 'sources': ['main.cpp'], 'extra_files': ['fileA.hpp', 'main.hpp']},
+                'trivialprog7@exe': {'name': 'trivialprog7', 'sources': ['main.cpp'], 'extra_files': ['a1.hpp', 'a6.hpp', 'fileA.hpp', 'main.hpp']},
                 'trivialprog8@exe': {'name': 'trivialprog8', 'sources': ['main.cpp'], 'extra_files': ['a2.hpp', 'a7.hpp']},
                 'trivialprog9@exe': {'name': 'trivialprog9', 'sources': ['main.cpp'], 'extra_files': ['a8.hpp', 'a9.hpp']},
                 'trivialprog10@exe': {'name': 'trivialprog10', 'sources': ['main.cpp'], 'extra_files': ['a1.hpp', 'a4.hpp']},
             }
         }
-        self.assertDictEqual(out, expected)
+        self.assertEqualIgnoreOrder(out, expected)
 
         # Check the written file
         out = self.rewrite(self.builddir, os.path.join(self.builddir, 'info.json'))
-        self.assertDictEqual(out, expected)
+        self.assertEqualIgnoreOrder(out, expected)
 
     def test_target_remove_extra_files(self):
         self.prime('6 extra_files')
         out = self.rewrite(self.builddir, os.path.join(self.builddir, 'rmExtraFiles.json'))
         expected = {
             'target': {
-                'trivialprog0@exe': {'name': 'trivialprog0', 'sources': ['main.cpp'], 'extra_files': ['main.hpp', 'fileC.hpp']},
-                'trivialprog1@exe': {'name': 'trivialprog1', 'sources': ['main.cpp'], 'extra_files': ['main.hpp']},
-                'trivialprog2@exe': {'name': 'trivialprog2', 'sources': ['main.cpp'], 'extra_files': ['fileC.hpp']},
+                'trivialprog0@exe': {'name': 'trivialprog0', 'sources': ['main.cpp'], 'extra_files': ['main.hpp', 'fileA.hpp', 'fileB.hpp', 'fileC.hpp']},
+                'trivialprog1@exe': {'name': 'trivialprog1', 'sources': ['main.cpp'], 'extra_files': ['main.hpp', 'fileA.hpp']},
+                'trivialprog2@exe': {'name': 'trivialprog2', 'sources': ['main.cpp'], 'extra_files': ['fileB.hpp', 'fileC.hpp']},
                 'trivialprog3@exe': {'name': 'trivialprog3', 'sources': ['main.cpp'], 'extra_files': ['main.hpp']},
                 'trivialprog4@exe': {'name': 'trivialprog4', 'sources': ['main.cpp'], 'extra_files': ['main.hpp']},
-                'trivialprog5@exe': {'name': 'trivialprog5', 'sources': ['main.cpp'], 'extra_files': ['main.hpp', 'fileC.hpp']},
-                'trivialprog6@exe': {'name': 'trivialprog6', 'sources': ['main.cpp'], 'extra_files': ['main.hpp']},
-                'trivialprog7@exe': {'name': 'trivialprog7', 'sources': ['main.cpp'], 'extra_files': ['main.hpp']},
+                'trivialprog5@exe': {'name': 'trivialprog5', 'sources': ['main.cpp'], 'extra_files': ['fileB.hpp', 'fileC.hpp', 'main.hpp']},
+                'trivialprog6@exe': {'name': 'trivialprog6', 'sources': ['main.cpp'], 'extra_files': ['main.hpp', 'fileA.hpp']},
+                'trivialprog7@exe': {'name': 'trivialprog7', 'sources': ['main.cpp'], 'extra_files': ['main.hpp', 'fileA.hpp']},
                 'trivialprog8@exe': {'name': 'trivialprog8', 'sources': ['main.cpp'], 'extra_files': []},
                 'trivialprog9@exe': {'name': 'trivialprog9', 'sources': ['main.cpp'], 'extra_files': []},
                 'trivialprog10@exe': {'name': 'trivialprog10', 'sources': ['main.cpp'], 'extra_files': []},
             }
         }
-        self.assertDictEqual(out, expected)
+        self.assertEqualIgnoreOrder(out, expected)
 
         # Check the written file
         out = self.rewrite(self.builddir, os.path.join(self.builddir, 'info.json'))
-        self.assertDictEqual(out, expected)
+        self.assertEqualIgnoreOrder(out, expected)
+
+    def test_duplicate_globals(self):
+        self.prime('10 duplicate globals')
+        out = self.rewrite(self.builddir, os.path.join(self.builddir, 'info.json'))
+        expected = {
+            'kwargs': {
+                'project#/': {'license': 'MIT'}
+            }
+        }
+        self.assertEqualIgnoreOrder(out, expected)
+
+    def test_tricky_dataflow(self):
+        self.prime('9 tricky dataflow')
+        out = self.rewrite(self.builddir, os.path.join(self.builddir, 'addSrc.json'))
+        expected = {
+            'target': {
+                'tgt1@sha': {'name': 'tgt1', 'sources': ['foo.c', 'new.c'], 'extra_files': []},
+                'tgt2@exe': {'name': 'tgt2', 'sources': ['new.c', 'unknown'], 'extra_files': []},
+                'tgt3@exe': {'name': 'tgt3', 'sources': ['foo.c', 'new.c'], 'extra_files': []},
+                'tgt4@exe': {'name': 'tgt4', 'sources': ['unknown'], 'extra_files': []},
+                'tgt5@exe': {'name': 'tgt5', 'sources': ['unknown', 'new.c'], 'extra_files': []},
+                'tgt6@exe': {'name': 'tgt6', 'sources': ['unknown', 'new.c'], 'extra_files': []},
+                'tgt7@exe': {'name': 'tgt7', 'sources': ['unknown', 'unknown'], 'extra_files': []},
+            }
+        }
+        self.assertEqualIgnoreOrder(out, expected)
+
+        # Check the written file
+        out = self.rewrite(self.builddir, os.path.join(self.builddir, 'info.json'))
+        self.assertEqualIgnoreOrder(out, expected)
 
     def test_raw_printer_is_idempotent(self):
         test_path = Path(self.unit_test_dir, '120 rewrite')
@@ -407,3 +495,44 @@ class RewriterTests(BasePlatformTests):
         # Do it line per line because it is easier to debug like that
         for orig_line, new_line in zip_longest(original_contents.splitlines(), new_contents.splitlines()):
             self.assertEqual(orig_line, new_line)
+
+    def test_rewrite_prefix(self) -> None:
+        self.prime('7 prefix')
+        out = self.rewrite_raw(self.builddir, ['kwargs', 'info', 'project', '/'])
+        expected = {
+            'kwargs': {
+                'project#/': {
+                    "default_options": [
+                        'prefix=/export/doocs'
+                    ]
+                }
+            }
+        }
+        self.assertDictEqual(out, expected)
+
+    # Asserts that AstInterpreter.dataflow_dag is what it should be
+    def test_dataflow_dag(self):
+        test_path = Path(self.rewrite_test_dir, '1 basic')
+        interpreter = IntrospectionInterpreter(test_path, '', 'ninja')
+        interpreter.analyze()
+
+        def sortkey(node):
+            return (node.lineno, node.colno, node.end_lineno, node.end_colno)
+
+        def node_to_str(node):
+            return f"{node.__class__.__name__}({node.lineno}:{node.colno})"
+
+        dag_as_str = ""
+        for target in sorted(interpreter.dataflow_dag.tgt_to_srcs.keys(), key=sortkey):
+            dag_as_str += f"Data flowing to {node_to_str(target)}:\n"
+            for source in sorted(interpreter.dataflow_dag.tgt_to_srcs[target], key=sortkey):
+                dag_as_str += f"    {node_to_str(source)}\n"
+
+        expected = Path(test_path / "expected_dag.txt").read_text(encoding='utf-8').strip()
+        self.assertEqual(dag_as_str.strip(), expected)
+
+    @skip_if_not_language('nasm')
+    def test_nasm(self) -> None:
+        srcdir = os.path.join(self.unit_test_dir, '133 nasm language only')
+        self.rewrite_raw(srcdir, ['kwargs', 'info', 'project', '/'])
+

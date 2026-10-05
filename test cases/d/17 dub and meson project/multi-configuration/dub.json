@@ -1,0 +1,16 @@
+{
+  "name": "multi-configuration",
+  "configurations": [
+    {
+      "name": "app",
+      "targetType": "executable"
+    },
+    {
+      "name": "lib",
+      "targetType": "library",
+      "excludedSourceFiles": [
+        "source/app.d"
+      ]
+    }
+  ]
+}

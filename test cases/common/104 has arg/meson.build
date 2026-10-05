@@ -52,6 +52,28 @@ if cc.get_id() == 'gcc'
   assert(not cc.has_multi_arguments(['-Wno-pragmas', '-Wno-lol-meson-test-flags']), 'should error out even if some -Wno args are valid')
 endif
 
+if cpp.get_id() == 'gcc' and cpp.version().version_compare('>=12.1.0')
+  # Handle special -Wno-attributes=foo where -Wattributes=foo is invalid
+  # i.e. our usual -Wno-foo -Wfoo hack doesn't work for -Wattributes=foo.
+  assert(cpp.has_argument('-Wno-attributes=meson::i_do_not_exist'))
+endif
+
+if cpp.get_id() == 'gcc'
+  # Handle negative flags whose positive counterparts require a value to be
+  # specified.
+  if cpp.version().version_compare('>=4.4.0')
+    assert(cpp.has_argument('-Wno-frame-larger-than'))
+  endif
+  if cpp.version().version_compare('>=4.7.0')
+    assert(cpp.has_argument('-Wno-stack-usage'))
+  endif
+  if cpp.version().version_compare('>=7.1.0')
+    assert(cpp.has_argument('-Wno-alloc-size-larger-than'))
+    assert(cpp.has_argument('-Wno-alloca-larger-than'))
+    assert(cpp.has_argument('-Wno-vla-larger-than'))
+  endif
+endif
+
 if cc.get_id() == 'clang' and cc.version().version_compare('<=4.0.0')
   # 4.0.0 does not support -fpeel-loops. Newer versions may.
   # Please adjust above version number as new versions of clang are released.

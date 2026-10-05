@@ -285,7 +285,7 @@ or they are not called (due to e.g. `if/else`) then nothing is
 downloaded.
 
 If this is not sufficient for you, starting from release 0.40.0 Meson
-has a option called `wrap-mode` which can be used to disable wrap
+has an option called `wrap-mode` which can be used to disable wrap
 downloads altogether with `--wrap-mode=nodownload`. You can also
 disable dependency fallbacks altogether with `--wrap-mode=nofallback`,
 which also implies the `nodownload` option.
@@ -332,6 +332,27 @@ that could fulfill these requirements:
 
 Out of these we have chosen Python because it is the best fit for our
 needs.
+
+## Do you at least support my ancient python install?
+
+Yes! :) We have a relatively sedate version support policy. You can read about
+it in the [Contributing documentation](Contributing.md#python)
+
+We are also willing to support old versions of meson as LTS releases,
+particularly, if it is the final version to support a given python version. If
+you have a use case, please discuss it with us and be willing to help backport
+bug fixes.
+
+- python 3.5: [supported through Meson 0.56.2](Release-notes-for-0.56.0.md#python-35-support-will-be-dropped-in-the-next-release)
+- python 3.6: [supported through Meson 0.61.5](Release-notes-for-0.61.0.md#python-36-support-will-be-dropped-in-the-next-release)
+- python 3.7: [supported through Meson 1.11.x](Release-notes-for-1.11.0.md#last-major-version-supporting-python-37-38-and-39)
+- python 3.8: [supported through Meson 1.11.x](Release-notes-for-1.11.0.md#last-major-version-supporting-python-37-38-and-39)
+- python 3.9: [supported through Meson 1.11.x](Release-notes-for-1.11.0.md#last-major-version-supporting-python-37-38-and-39)
+- python 3.10: Currently supported
+
+We encourage projects to support a wide range of Meson versions if they are not
+actually using the latest features anyway. In many, many cases it is quite
+practical to support e.g. Meson 0.61.
 
 ## But I really want a version of Meson that doesn't use python!
 
@@ -695,3 +716,21 @@ directory. It glob ignores ```"*"```, since all generated files should not be
 checked into git.
 
 Users of older versions of Meson may need to set up ignore files themselves.
+
+## How to add preprocessor defines to a target?
+
+Just add `-DFOO` to `c_args` or `cpp_args`. This works for all known compilers.
+
+```meson
+mylib = library('mylib', 'mysource.c', c_args: ['-DFOO'])
+```
+
+Even though [MSVC documentation](https://learn.microsoft.com/en-us/cpp/build/reference/d-preprocessor-definitions)
+uses `/D` for preprocessor defines, its [command-line syntax](https://learn.microsoft.com/en-us/cpp/build/reference/compiler-command-line-syntax)
+accepts `-` instead of `/`.
+It's not necessary to treat preprocessor defines specially in Meson ([GH-6269](https://github.com/mesonbuild/meson/issues/6269#issuecomment-560003922)).
+
+## Why do all outputs go to the build directory that corresponds to the source directory in which they are declared?
+
+This simplifies debugging build problems, since you always know that files in
+build directory X must come from the corresponding source directory X.

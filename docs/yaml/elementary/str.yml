@@ -203,7 +203,7 @@ methods:
 
 # str.split
 - name: split
-  returns: list[str]
+  returns: array[str]
   description: |
     Splits the string at the specified character
     (or whitespace if not set) and returns the parts in an
@@ -224,7 +224,7 @@ methods:
       description: Specifies the character / substring where to split the string.
 
 - name: splitlines
-  returns: list[str]
+  returns: array[str]
   since: 1.2.0
   description: |
     Splits the string into an array of lines.
@@ -250,7 +250,7 @@ methods:
   returns: str
   description: |
     The opposite of split,
-    for example `'.'.join(['a', 'b', 'c']` yields `'a.b.c'`.
+    for example `'.'.join(['a', 'b', 'c'])` yields `'a.b.c'`.
 
   example: |
     ```meson
@@ -270,7 +270,7 @@ methods:
         The strings to join with the current string.
 
         Before Meson *0.60.0* this function only accepts a single positional
-        argument of the type [[list[str]]].
+        argument of the type [[array[str]]].
 
 # str.underscorify
 - name: underscorify
@@ -305,6 +305,12 @@ methods:
     ```
 
     It is best to be unambiguous and specify the full revision level to compare.
+
+    *Since 1.8.0* multiple versions can be compared:
+
+    ```meson
+    '3.6'.version_compare('>=3', '<4.0') == true
+    ```
 
   posargs:
     compare_string:

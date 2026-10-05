@@ -22,17 +22,17 @@ posargs:
     description: The *unique* test id
 
   executable:
-    type: exe | jar | external_program | file | custom_tgt | custom_idx
+    type: exe | jar | program | file | custom_tgt | custom_idx
     description: |
       The program to execute. *(Since 1.4.0)* A CustomTarget is also accepted.
 
 kwargs:
   args:
-    type: list[str | file | tgt]
+    type: array[str | file | tgt | program]
     description: Arguments to pass to the executable
 
   env:
-    type: env | list[str] | dict[str]
+    type: env | array[str] | dict[str]
     description: |
       environment variables to set, such as `['NAME1=value1',
       'NAME2=value2']`, or an [[@env]] object which allows more sophisticated
@@ -40,17 +40,35 @@ kwargs:
 
   should_fail:
     type: bool
+    deprecated: 1.11.0
     default: false
     description: |
       when true the test is considered passed if the
       executable returns a non-zero return value (i.e. reports an error)
 
-  suite:
-    type: str | list[str]
+  expected_fail:
+    type: bool
+    since: 1.11.0
+    default: false
     description: |
-      `'label'` (or list of labels `['label1', 'label2']`)
+      when true the test is considered passed if the
+      executable returns a non-zero return value (i.e. reports an error)
+
+  expected_exitcode:
+    type: int
+    since: 1.11.0
+    default: 0
+    description: |
+      the test is considered passed if the
+      executable returns the specified returncode,
+      only has effect when protocol is set to exitcode
+
+  suite:
+    type: str | array[str]
+    description: |
+      `'label'` (or array of labels `['label1', 'label2']`)
       attached to this test. The suite name is qualified by a (sub)project
-      name resulting in `(sub)project_name:label`. In the case of a list
+      name resulting in `(sub)project_name:label`. In the case of an array
       of strings, the suite names will be `(sub)project_name:label1`,
       `(sub)project_name:label2`, etc.
 
@@ -70,7 +88,7 @@ kwargs:
       for the test
 
   depends:
-    type: list[build_tgt | custom_tgt]
+    type: array[build_tgt | custom_tgt | custom_idx | program]
     since: 0.46.0
     description: |
       specifies that this test depends on the specified
@@ -78,6 +96,7 @@ kwargs:
       line argument. This is meant for cases where test finds those
       targets internally, e.g. plugins or globbing. Those targets are built
       before test is executed even if they have `build_by_default : false`.
+      `program` is supported *since 1.11.2*.
 
   protocol:
     type: str

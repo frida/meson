@@ -1,4 +1,4 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 
-# Always error
-exit(1)
+# Do nothing
+exit(0)

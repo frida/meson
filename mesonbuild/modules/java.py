@@ -7,12 +7,14 @@ import pathlib
 import typing as T
 
 from mesonbuild import mesonlib
-from mesonbuild.build import CustomTarget, CustomTargetIndex, GeneratedList, Target
+from mesonbuild.build import CustomTarget
 from mesonbuild.compilers import detect_compiler_for
-from mesonbuild.interpreterbase.decorators import ContainerTypeInfo, FeatureDeprecated, FeatureNew, KwargInfo, typed_pos_args, typed_kwargs
+from mesonbuild.interpreterbase.decorators import (
+    ContainerTypeInfo, FeatureDeprecated, FeatureNew, KwargInfo, TypedArgs,
+)
 from mesonbuild.mesonlib import version_compare, MachineChoice
 from . import NewExtensionModule, ModuleReturnValue, ModuleInfo
-from ..interpreter.type_checking import NoneType
+from ..interpreter.type_checking import TGT_VARG, NoneType
 
 if T.TYPE_CHECKING:
     from . import ModuleState
@@ -37,25 +39,27 @@ class JavaModule(NewExtensionModule):
 
     @FeatureNew('java.generate_native_headers', '0.62.0')
     @FeatureDeprecated('java.generate_native_headers', '1.0.0')
-    @typed_pos_args(
+    @TypedArgs(
         'java.generate_native_headers',
-        varargs=(str, mesonlib.File, Target, CustomTargetIndex, GeneratedList))
-    @typed_kwargs(
-        'java.generate_native_headers',
-        KwargInfo('classes', ContainerTypeInfo(list, str), default=[], listify=True, required=True),
-        KwargInfo('package', (str, NoneType), default=None))
+        var_types=TGT_VARG,
+        kw_types=[
+            KwargInfo('classes', ContainerTypeInfo(list, str), default=[], listify=True, required=True),
+            KwargInfo('package', (str, NoneType), default=None),
+        ],
+    )
     def generate_native_headers(self, state: ModuleState, args: T.Tuple[T.List[mesonlib.FileOrString]],
                                 kwargs: T.Dict[str, T.Optional[str]]) -> ModuleReturnValue:
         return self.__native_headers(state, args, kwargs)
 
     @FeatureNew('java.native_headers', '1.0.0')
-    @typed_pos_args(
+    @TypedArgs(
         'java.native_headers',
-        varargs=(str, mesonlib.File, Target, CustomTargetIndex, GeneratedList))
-    @typed_kwargs(
-        'java.native_headers',
-        KwargInfo('classes', ContainerTypeInfo(list, str), default=[], listify=True, required=True),
-        KwargInfo('package', (str, NoneType), default=None))
+        var_types=TGT_VARG,
+        kw_types=[
+            KwargInfo('classes', ContainerTypeInfo(list, str), default=[], listify=True, required=True),
+            KwargInfo('package', (str, NoneType), default=None),
+        ],
+    )
     def native_headers(self, state: ModuleState, args: T.Tuple[T.List[mesonlib.FileOrString]],
                        kwargs: T.Dict[str, T.Optional[str]]) -> ModuleReturnValue:
         return self.__native_headers(state, args, kwargs)
@@ -89,17 +93,15 @@ class JavaModule(NewExtensionModule):
 
         prefix = classes[0] if not package else package
 
-        target = CustomTarget(
-            f'{prefix}-native-headers',
-            state.subdir,
-            state.subproject,
-            state.environment,
-            command,
-            args[0],
-            headers,
-            state.is_build_only_subproject,
-            backend=state.backend
-        )
+        sources = [mesonlib.File.from_source_file(state.environment.source_dir, state.subdir, s)
+                   if isinstance(s, str) else s for s in args[0]]
+        target = CustomTarget(f'{prefix}-native-headers',
+                              state.subdir,
+                              state.environment,
+                              command,
+                              sources, headers,
+                              state.current_build_project,
+                              backend=state.backend)
 
         # It is only known that 1.8.0 won't pre-create the directory. 11 and 16
         # do not exhibit this behavior.

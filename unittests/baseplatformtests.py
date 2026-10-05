@@ -25,16 +25,31 @@ import mesonbuild.environment
 import mesonbuild.coredata
 import mesonbuild.modules.gnome
 from mesonbuild.mesonlib import (
-    is_cygwin, join_args, split_args, windows_proof_rmtree, python_command
+    is_windows, is_cygwin, join_args, split_args, windows_proof_rmtree, python_command
 )
 import mesonbuild.modules.pkgconfig
 
 
 from run_tests import (
-    Backend, ensure_backend_detects_changes, get_backend_commands,
+    Backend, get_backend_commands,
     get_builddir_target_args, get_meson_script, run_configure_inprocess,
     run_mtest_inprocess, handle_meson_skip_test,
 )
+
+if T.TYPE_CHECKING:
+    from typing_extensions import TypeAlias, TypedDict
+
+    class CompDbEntry(TypedDict):
+
+        # `output` is not strictly required, but Ninja always generates it
+        # `arguments` is allowed, but Ninja never generates it
+
+        directory: str
+        command: str
+        file: str
+        output: str
+
+    CompDB: TypeAlias = T.List[CompDbEntry]
 
 
 # magic attribute used by unittest.result.TestResult._is_relevant_tb_level
@@ -45,79 +60,97 @@ __unittest = True
 class BasePlatformTests(TestCase):
     prefix = '/usr'
     libdir = 'lib'
+    _mktmpdir: T.Callable[[], str]
 
-    def setUp(self):
-        super().setUp()
-        self.maxDiff = None
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls.maxDiff = None
         src_root = str(PurePath(__file__).parents[1])
-        self.src_root = src_root
+        cls.src_root = src_root
         # Get the backend
-        self.backend_name = os.environ['MESON_UNIT_TEST_BACKEND']
-        backend_type = 'vs' if self.backend_name.startswith('vs') else self.backend_name
-        self.backend = getattr(Backend, backend_type)
-        self.meson_args = ['--backend=' + self.backend_name]
-        self.meson_native_files = []
-        self.meson_cross_files = []
-        self.meson_command = python_command + [get_meson_script()]
-        self.setup_command = self.meson_command + ['setup'] + self.meson_args
-        self.mconf_command = self.meson_command + ['configure']
-        self.mintro_command = self.meson_command + ['introspect']
-        self.wrap_command = self.meson_command + ['wrap']
-        self.rewrite_command = self.meson_command + ['rewrite']
+        cls.backend_name = os.environ.get('MESON_UNIT_TEST_BACKEND', 'ninja')
+        backend_type = 'vs' if cls.backend_name.startswith('vs') else cls.backend_name
+        cls.backend = getattr(Backend, backend_type)
+        cls.meson_args = ['--backend=' + cls.backend_name]
+        cls.meson_command = python_command + [get_meson_script()]
+        cls.setup_command = cls.meson_command + ['setup'] + cls.meson_args
+        cls.mconf_command = cls.meson_command + ['configure']
+        cls.mintro_command = cls.meson_command + ['introspect']
+        cls.wrap_command = cls.meson_command + ['wrap']
+        cls.rewrite_command = cls.meson_command + ['rewrite']
         # Backend-specific build commands
-        self.build_command, self.clean_command, self.test_command, self.install_command, \
-            self.uninstall_command = get_backend_commands(self.backend)
+        cls.build_command, cls.clean_command, cls.test_command, cls.install_command, \
+            cls.uninstall_command = get_backend_commands(cls.backend)
         # Test directories
-        self.common_test_dir = os.path.join(src_root, 'test cases/common')
-        self.python_test_dir = os.path.join(src_root, 'test cases/python')
-        self.rust_test_dir = os.path.join(src_root, 'test cases/rust')
-        self.vala_test_dir = os.path.join(src_root, 'test cases/vala')
-        self.framework_test_dir = os.path.join(src_root, 'test cases/frameworks')
-        self.unit_test_dir = os.path.join(src_root, 'test cases/unit')
-        self.rewrite_test_dir = os.path.join(src_root, 'test cases/rewrite')
-        self.linuxlike_test_dir = os.path.join(src_root, 'test cases/linuxlike')
-        self.objc_test_dir = os.path.join(src_root, 'test cases/objc')
-        self.objcpp_test_dir = os.path.join(src_root, 'test cases/objcpp')
+        cls.common_test_dir = os.path.join(src_root, 'test cases', 'common')
+        cls.python_test_dir = os.path.join(src_root, 'test cases', 'python')
+        cls.rust_test_dir = os.path.join(src_root, 'test cases', 'rust')
+        cls.vala_test_dir = os.path.join(src_root, 'test cases', 'vala')
+        cls.framework_test_dir = os.path.join(src_root, 'test cases', 'frameworks')
+        cls.unit_test_dir = os.path.join(src_root, 'test cases', 'unit')
+        cls.rewrite_test_dir = os.path.join(src_root, 'test cases', 'rewrite')
+        cls.linuxlike_test_dir = os.path.join(src_root, 'test cases', 'linuxlike')
+        cls.java_test_dir = os.path.join(src_root, 'test cases', 'java')
+        cls.objc_test_dir = os.path.join(src_root, 'test cases', 'objc')
+        cls.objcpp_test_dir = os.path.join(src_root, 'test cases', 'objcpp')
+        cls.darwin_test_dir = os.path.join(src_root, 'test cases', 'darwin')
+        cls.fortran_test_dir = os.path.join(src_root, 'test cases', 'fortran')
 
         # Misc stuff
-        self.orig_env = os.environ.copy()
-        if self.backend is Backend.ninja:
-            self.no_rebuild_stdout = ['ninja: no work to do.', 'samu: nothing to do']
+        if cls.backend is Backend.ninja:
+            cls.no_rebuild_stdout = ['ninja: no work to do.', 'samu: nothing to do']
         else:
             # VS doesn't have a stable output when no changes are done
             # XCode backend is untested with unit tests, help welcome!
-            self.no_rebuild_stdout = [f'UNKNOWN BACKEND {self.backend.name!r}']
+            cls.no_rebuild_stdout = [f'UNKNOWN BACKEND {cls.backend.name!r}']
+
+        cls.env_patch = mock.patch.dict(os.environ)
+        cls.env_patch.start()
+
         os.environ['COLUMNS'] = '80'
         os.environ['PYTHONIOENCODING'] = 'utf8'
 
-        self.builddirs = []
+        # If set to 1, force unittests to put their working stuff in /tmp
+        # Many Windows virus scanners have issues with the files being in the
+        # tmp directory.
+        #
+        # Store as an attribute because this path is very hot.
+        # the use of `staticmethod()` here is required because of Python's
+        # Object model, which otherwise sees these as methods
+        if (is_windows() or is_cygwin()) and not os.environ.get('MESON_FORCE_UNITTEST_IN_TMP', '0') == '1':
+            def tmpdir() -> str:
+                return tempfile.mkdtemp(dir=os.getcwd())
+
+            cls._mktmpdir = staticmethod(tmpdir)
+        else:
+            cls._mktmpdir = staticmethod(tempfile.mkdtemp)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        super().tearDownClass()
+        cls.env_patch.stop()
+
+    def setUp(self):
+        super().setUp()
+        self.meson_native_files = []
+        self.meson_cross_files = []
         self.new_builddir()
 
-    def change_builddir(self, newdir):
+    def change_builddir(self, newdir: str) -> None:
         self.builddir = newdir
         self.privatedir = os.path.join(self.builddir, 'meson-private')
         self.logdir = os.path.join(self.builddir, 'meson-logs')
         self.installdir = os.path.join(self.builddir, 'install')
         self.distdir = os.path.join(self.builddir, 'meson-dist')
         self.mtest_command = self.meson_command + ['test', '-C', self.builddir]
-        self.builddirs.append(self.builddir)
+        if os.path.islink(newdir):
+            self.addCleanup(os.unlink, self.builddir)
+        else:
+            self.addCleanup(windows_proof_rmtree, self.builddir)
 
-    def new_builddir(self):
-        # Keep builddirs inside the source tree so that virus scanners
-        # don't complain
-        newdir = tempfile.mkdtemp(dir=os.getcwd())
-        # In case the directory is inside a symlinked directory, find the real
-        # path otherwise we might not find the srcdir from inside the builddir.
-        newdir = os.path.realpath(newdir)
-        self.change_builddir(newdir)
-
-    def new_builddir_in_tempdir(self):
-        # Can't keep the builddir inside the source tree for the umask tests:
-        # https://github.com/mesonbuild/meson/pull/5546#issuecomment-509666523
-        # And we can't do this for all tests because it causes the path to be
-        # a short-path which breaks other tests:
-        # https://github.com/mesonbuild/meson/pull/9497
-        newdir = tempfile.mkdtemp()
+    def new_builddir(self) -> None:
+        newdir = self._mktmpdir()
         # In case the directory is inside a symlinked directory, find the real
         # path otherwise we might not find the srcdir from inside the builddir.
         newdir = os.path.realpath(newdir)
@@ -139,16 +172,6 @@ class BasePlatformTests(TestCase):
         log = self._get_meson_log()
         if log:
             print(log)
-
-    def tearDown(self):
-        for path in self.builddirs:
-            try:
-                windows_proof_rmtree(path)
-            except FileNotFoundError:
-                pass
-        os.environ.clear()
-        os.environ.update(self.orig_env)
-        super().tearDown()
 
     def _run(self, command, *, workdir=None, override_envvars: T.Optional[T.Mapping[str, str]] = None, stderr=True):
         '''
@@ -294,12 +317,13 @@ class BasePlatformTests(TestCase):
             arg = [arg]
         else:
             arg = list(arg)
-        if will_build:
-            ensure_backend_detects_changes(self.backend)
         self._run(self.mconf_command + arg + [self.builddir])
+        if will_build:
+            self.build()
 
-    def getconf(self, optname: str):
-        opts = self.introspect('--buildoptions')
+    def getconf(self, optname: str, opts=None):
+        if opts is None:
+            opts = self.introspect('--buildoptions')
         for x in opts:
             if x.get('name') == optname:
                 return x.get('value')
@@ -309,20 +333,19 @@ class BasePlatformTests(TestCase):
         windows_proof_rmtree(self.builddir)
 
     def utime(self, f):
-        ensure_backend_detects_changes(self.backend)
         os.utime(f)
 
-    def get_compdb(self):
+    def get_compdb(self) -> CompDB:
         if self.backend is not Backend.ninja:
             raise SkipTest(f'Compiler db not available with {self.backend.name} backend')
         try:
             with open(os.path.join(self.builddir, 'compile_commands.json'), encoding='utf-8') as ifile:
-                contents = json.load(ifile)
+                contents = T.cast('CompDB', json.load(ifile))
         except FileNotFoundError:
             raise SkipTest('Compiler db not found')
         # If Ninja is using .rsp files, generate them, read their contents, and
         # replace it as the command for all compile commands in the parsed json.
-        if len(contents) > 0 and contents[0]['command'].endswith('.rsp'):
+        if contents and contents[0]['command'].endswith('.rsp'):
             # Pretend to build so that the rsp files are generated
             self.build(extra_args=['-d', 'keeprsp', '-n'])
             for each in contents:
@@ -366,14 +389,14 @@ class BasePlatformTests(TestCase):
         if isinstance(args, str):
             args = [args]
         out = subprocess.check_output(self.mintro_command + args + [self.builddir],
-                                      universal_newlines=True)
+                                      encoding='utf-8', universal_newlines=True)
         return json.loads(out)
 
     def introspect_directory(self, directory, args):
         if isinstance(args, str):
             args = [args]
         out = subprocess.check_output(self.mintro_command + args + [directory],
-                                      universal_newlines=True)
+                                      encoding='utf-8', universal_newlines=True)
         try:
             obj = json.loads(out)
         except Exception as e:
@@ -503,13 +526,13 @@ class BasePlatformTests(TestCase):
 
         ensures that the copied tree is deleted after running.
 
-        :param srcdir: The locaiton of the source tree to copy
+        :param srcdir: The location of the source tree to copy
         :return: The location of the copy
         """
         dest = tempfile.mkdtemp()
         self.addCleanup(windows_proof_rmtree, dest)
 
-        # shutil.copytree expects the destinatin directory to not exist, Once
+        # shutil.copytree expects the destination directory to not exist, Once
         # python 3.8 is required the `dirs_exist_ok` parameter negates the need
         # for this
         dest = os.path.join(dest, 'subdir')

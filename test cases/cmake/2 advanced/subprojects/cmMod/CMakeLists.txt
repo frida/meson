@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION ${CMAKE_VERSION})
 
 project(cmMod)
 set(CMAKE_CXX_STANDARD 14)
@@ -12,10 +12,18 @@ configure_file("config.h.in" "${CMAKE_CURRENT_BINARY_DIR}/config.h" @ONLY)
 
 add_library(cmModLib       SHARED lib/cmMod.cpp)
 add_library(cmModLibStatic STATIC lib/cmMod.cpp)
+set_target_properties(cmModLibStatic PROPERTIES SOVERSION 1)
 include(GenerateExportHeader)
 generate_export_header(cmModLib)
 
 set_target_properties(cmModLib PROPERTIES VERSION 1.0.1)
+
+include(CheckLinkerFlag)
+check_linker_flag(CXX "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/vers.map" HAS_VER_SCRIPT)
+if(HAS_VER_SCRIPT)
+  target_link_options(cmModLib PRIVATE
+    "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/vers.map")
+endif()
 
 add_executable(testEXE main.cpp "${CMAKE_CURRENT_BINARY_DIR}/config.h")
 

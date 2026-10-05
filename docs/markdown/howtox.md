@@ -205,6 +205,11 @@ has native support for these with the `b_sanitize` option.
 $ meson setup <other options> -Db_sanitize=address
 ```
 
+Clang users might also need to set `-Db_lundef=false`, since otherwise meson will pass
+`-Wl,--no-undefined`, which is an alias for `-Wl,-z,defs`, which is incompatible
+with the address sanitizer when building shared libraries with clang as
+documented [by clang](https://clang.llvm.org/docs/AddressSanitizer.html#usage).
+
 After this you just compile your code and run the test suite. Address
 sanitizer will abort executables which have bugs so they show up as
 test failures.
@@ -238,6 +243,26 @@ And then pass it through the variable (remember to use absolute path):
 ```console
 $ SCANBUILD=$(pwd)/my-scan-build.sh ninja -C builddir scan-build
 ```
+
+## Use clippy
+
+If your project includes Rust targets, you can invoke clippy like this:
+
+```console
+$ meson setup builddir
+$ ninja -C builddir clippy
+```
+
+Clippy will also obey the `werror` [builtin option](Builtin-options.md#core-options).
+
+By default Meson uses as many concurrent processes as there are cores
+on the test machine. You can override this with the environment
+variable `MESON_NUM_PROCESSES`.
+
+Meson will look for `clippy-driver` in the same directory as `rustc`,
+or try to invoke it using `rustup` if `rustc` points to a `rustup`
+binary.  If `clippy-driver` is not detected properly, you can add it to
+a [machine file](Machine-files.md).
 
 ## Use profile guided optimization
 
@@ -323,3 +348,24 @@ executable(
   deps : [my_dep]
 )
 ```
+
+## Exclude a file from unity builds
+
+If your project supports unity builds, you should fix any bugs that crop up when
+source files are concatenated together.
+Sometimes this isn't possible, though, for example if the source files are
+generated.
+
+In this case, you can put them in a separate static library build target and
+override the unity setting.
+
+```meson
+generated_files = ...
+unityproof_lib = static_library('unityproof', generated_files,
+  override_options : ['unity=off'])
+
+main_exe = executable('main', main_sources, link_with : unityproof_lib)
+```
+
+To link the static library into another library target, you may need to use
+`link_whole` instead of `link_with`.

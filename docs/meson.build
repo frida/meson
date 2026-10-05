@@ -135,6 +135,8 @@ documentation = hotdoc.generate_doc(meson.project_name(),
     extra_extension: meson.current_source_dir() / 'extensions' / 'refman_links.py',
     refman_data_file: refman_md[1],
     fatal_warnings: true,
+    devhelp_activate: true,
+    devhelp_online: 'https://mesonbuild.com/',
 )
 
 run_target('upload',
@@ -145,3 +147,5 @@ run_target('upload',
     ],
     depends: documentation,
 )
+
+test('validate_links', find_program('./validatelinks.py'), args: meson.current_source_dir() / 'markdown' / 'Users.md', timeout: 65)

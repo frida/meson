@@ -12,8 +12,8 @@ import functools
 import threading
 import sys
 from itertools import chain
-from unittest import mock, skipIf, SkipTest
-from pathlib import Path
+from unittest import mock, skipIf, SkipTest, TestCase
+from pathlib import Path, PurePath
 import typing as T
 
 import mesonbuild.mlog
@@ -23,6 +23,9 @@ import mesonbuild.envconfig
 import mesonbuild.environment
 import mesonbuild.coredata
 import mesonbuild.modules.gnome
+from mesonbuild import mesonlib
+from mesonbuild import machinefile
+
 from mesonbuild.mesonlib import (
     MachineChoice, is_windows, is_osx, is_cygwin, is_haiku, is_sunos
 )
@@ -38,7 +41,9 @@ from run_tests import (
 )
 
 from .baseplatformtests import BasePlatformTests
-from .helpers import *
+from .helpers import (
+    skip_if_not_language, skipIfNoExecutable, get_classpath, skip_if_env_set
+)
 
 @functools.lru_cache()
 def is_real_gnu_compiler(path):
@@ -47,8 +52,48 @@ def is_real_gnu_compiler(path):
     '''
     if not path:
         return False
-    out = subprocess.check_output([path, '--version'], universal_newlines=True, stderr=subprocess.STDOUT)
+    out = subprocess.check_output([path, '--version'], encoding='utf-8', universal_newlines=True, stderr=subprocess.STDOUT)
     return 'Free Software Foundation' in out
+
+cross_dir = Path(__file__).parent.parent / 'cross'
+
+class MachineFileStoreTests(TestCase):
+
+    def test_loading(self):
+        store = machinefile.MachineFileStore([cross_dir / 'ubuntu-armhf.txt'], [], str(cross_dir))
+        self.assertIsNotNone(store)
+
+    def test_home_variable(self):
+        """Test that ~ expands to the user's home directory."""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.ini', delete=False) as f:
+            f.write(textwrap.dedent('''\
+                [constants]
+                toolchain = ~ / 'sdk'
+
+                [binaries]
+                c = ~ / 'bin' / 'gcc'
+                cpp = toolchain / 'bin' / 'g++'
+                '''))
+            fname = f.name
+
+        try:
+            parser = machinefile.MachineFileParser([fname], '/tmp')
+            if sys.platform in ('linux', 'darwin'):
+                home = PurePath(os.environ['HOME'])
+            elif sys.platform in ('win32', 'cygwin'):
+                # Even with MSYS2 and Cygwin, we must use the windows-native homedir
+                # https://github.com/mesonbuild/meson/pull/15524#issuecomment-3864016608
+                if 'USER' not in os.environ:
+                    raise SkipTest('No USER in env')
+                home = PurePath('C:\\', 'Users', os.environ['USER'])
+            else:
+                raise SkipTest('Don\'t know how to get homedir')
+
+            # Check that ~ expands correctly in binaries section
+            self.assertEqual(parser.sections['binaries']['c'], str(home / 'bin' / 'gcc'))
+            self.assertEqual(parser.sections['binaries']['cpp'], str(home / 'sdk' / 'bin' / 'g++'))
+        finally:
+            os.unlink(fname)
 
 class NativeFileTests(BasePlatformTests):
 
@@ -191,12 +236,86 @@ class NativeFileTests(BasePlatformTests):
     def test_find_program(self):
         self._simple_test('find_program', 'bash')
 
+    def test_find_program_machine_file_version(self):
+        old = self.helper_create_binary_wrapper('unused', version='1.0', release='1.0')
+        new = self.helper_create_binary_wrapper('unused', version='2.0', release='4.0')
+        system = self.helper_create_binary_wrapper('unused', version='3.0', release='5.0')
+        config = self.helper_create_native_file({'binaries': {
+            'meson-test-old': old,
+            'meson-test-new': new,
+            'meson-test-missing': 'meson-test-nonexistent-command',
+            'meson-test-python3': old,
+        }})
+        cases = [
+            ('unsuitable configured program',
+             "'meson-test-old', version: '>=2.0', required: false",
+             'assert(not prog.found())'),
+            ('required unsuitable configured program',
+             "'meson-test-old', version: '>=2.0'", None),
+            ('unsuitable configured program with disabler',
+             "'meson-test-old', version: '>=2.0', required: false, disabler: true",
+             'assert(is_disabler(prog))'),
+            ('next configured alternative',
+             "'meson-test-old', 'meson-test-new', version: '>=2.0'",
+             "assert(run_command(prog, '--version', check: true).stdout().strip() == '2.0')"),
+            ('next unconfigured alternative',
+             "'meson-test-old', 'meson-test-unconfigured', version: '>=2.0'",
+             "assert(run_command(prog, '--version', check: true).stdout().strip() == '3.0')"),
+            ('suitable configured program',
+             "'meson-test-new', version: '>=2.0'",
+             "assert(run_command(prog, '--version', check: true).stdout().strip() == '2.0')"),
+            ('unconfigured alternative before configured alternative',
+             "'meson-test-unconfigured', 'meson-test-new', version: '>=2.0'",
+             "assert(run_command(prog, '--version', check: true).stdout().strip() == '3.0')"),
+            ('unconfigured alternative first without version requirement',
+             "'meson-test-unconfigured', 'meson-test-new'",
+             "assert(run_command(prog, '--version', check: true).stdout().strip() == '3.0')"),
+            ('configured python3 does not fall back to the current interpreter',
+             "'meson-test-python3', version: '>=2.0', required: false",
+             'assert(not prog.found())'),
+            ('custom version argument',
+             "'meson-test-old', 'meson-test-new', version: '>=4.0', version_argument: '--release'",
+             "assert(run_command(prog, '--release', check: true).stdout().strip() == '4.0')"),
+            ('custom version argument for unconfigured alternative',
+             "'meson-test-old', 'meson-test-unconfigured', version: '>=5.0', version_argument: '--release'",
+             "assert(run_command(prog, '--release', check: true).stdout().strip() == '5.0')"),
+            ('missing configured program',
+             "'meson-test-missing', version: '>=2.0', required: false",
+             'assert(not prog.found())'),
+            ('missing configured program with alternative',
+             "'meson-test-missing', 'meson-test-new', version: '>=2.0'",
+             "assert(run_command(prog, '--version', check: true).stdout().strip() == '2.0')"),
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            bindir = Path(d) / 'bin'
+            bindir.mkdir()
+            # Every configured name also has a newer program on PATH. A
+            # machine-file binding must prevent searching PATH for that name.
+            for name in ('old', 'new', 'missing', 'unconfigured'):
+                suffix = '.bat' if is_windows() else ''
+                shutil.copyfile(system, bindir / f'meson-test-{name}{suffix}')
+                if not is_windows():
+                    (bindir / f'meson-test-{name}').chmod(0o755)
+            env = {'PATH': str(bindir) + os.pathsep + os.environ['PATH']}
+            for name, args, assertion in cases:
+                with self.subTest(name):
+                    self.new_builddir()
+                    (Path(d) / 'meson.build').write_text(
+                        "project('machine-file program versions')\n"
+                        f'prog = find_program({args})\n' + (assertion or ''),
+                        encoding='utf-8')
+                    if assertion is None:
+                        with self.assertRaises(subprocess.CalledProcessError) as cm:
+                            self.init(d, extra_args=['--native-file', config], override_envvars=env)
+                        self.assertIn("Program 'meson-test-old' not found or not executable", cm.exception.output)
+                    else:
+                        self.init(d, extra_args=['--native-file', config], override_envvars=env)
+
+    @skipIfNoExecutable('llvm-config')
     def test_config_tool_dep(self):
         # Do the skip at this level to avoid screwing up the cache
-        if mesonbuild.environment.detect_msys2_arch():
+        if mesonbuild.envconfig.detect_msys2_arch():
             raise SkipTest('Skipped due to problems with LLVM on MSYS2')
-        if not shutil.which('llvm-config'):
-            raise SkipTest('No llvm-installed, cannot test')
         self._simple_test('config_dep', 'llvm-config')
 
     def test_python3_module(self):
@@ -210,8 +329,12 @@ class NativeFileTests(BasePlatformTests):
             raise SkipTest('bat indirection breaks internal sanity checks.')
         elif is_osx():
             binary = 'python'
+            if not shutil.which(binary):
+                raise SkipTest('Not running Python2 tests because it was not found.')
         else:
             binary = 'python2'
+            if not shutil.which(binary):
+                raise SkipTest('Not running Python2 tests because it was not found.')
 
             # We not have python2, check for it
             for v in ['2', '2.7', '-2.7']:
@@ -264,7 +387,12 @@ class NativeFileTests(BasePlatformTests):
             if not is_real_gnu_compiler(shutil.which('gcc')):
                 raise SkipTest('Only one compiler found, cannot test.')
             return 'gcc', 'gcc'
-        self.helper_for_compiler('objc', cb)
+        try:
+            self.helper_for_compiler('objc', cb)
+        except mesonlib.EnvironmentException as e:
+            if 'GCC was not built with support for objective-c' in str(e):
+                raise SkipTest("GCC doesn't support objective-c, test cannot run")
+            raise
 
     @skip_if_not_language('objcpp')
     @skip_if_env_set('OBJCXX')
@@ -277,7 +405,12 @@ class NativeFileTests(BasePlatformTests):
             if not is_real_gnu_compiler(shutil.which('g++')):
                 raise SkipTest('Only one compiler found, cannot test.')
             return 'g++', 'gcc'
-        self.helper_for_compiler('objcpp', cb)
+        try:
+            self.helper_for_compiler('objcpp', cb)
+        except mesonlib.EnvironmentException as e:
+            if 'GCC was not built with support for objective-c++' in str(e):
+                raise SkipTest("G++ doesn't support objective-c++, test cannot run")
+            raise
 
     @skip_if_not_language('d')
     @skip_if_env_set('DC')
@@ -319,7 +452,7 @@ class NativeFileTests(BasePlatformTests):
             elif comp.id == 'gcc':
                 if shutil.which('ifort'):
                     # There is an ICC for windows (windows build, linux host),
-                    # but we don't support that ATM so lets not worry about it.
+                    # but we don't support that ATM so let's not worry about it.
                     if is_windows():
                         return 'ifort', 'intel-cl'
                     return 'ifort', 'intel'
@@ -525,10 +658,10 @@ class NativeFileTests(BasePlatformTests):
             elif each['name'] == 'sub:default_library':
                 self.assertEqual(each['value'], 'static')
                 found += 1
-        self.assertEqual(found, 4, 'Did not find all three sections')
+        self.assertEqual(found, 3, 'Did not find all three sections')
 
-    def test_builtin_options_subprojects_overrides_buildfiles(self):
-        # If the buildfile says subproject(... default_library: shared), ensure that's overwritten
+    def test_builtin_options_machinefile_overrides_subproject(self):
+        # The buildfile says subproject(... default_library: static), the machinefile overrides it
         testcase = os.path.join(self.common_test_dir, '223 persubproject options')
         config = self.helper_create_native_file({'sub2:built-in options': {'default_library': 'shared'}})
 
@@ -540,8 +673,8 @@ class NativeFileTests(BasePlatformTests):
                 check = cm.exception.stdout
             self.assertIn(check, 'Parent should override default_library')
 
-    def test_builtin_options_subprojects_dont_inherits_parent_override(self):
-        # If the buildfile says subproject(... default_library: shared), ensure that's overwritten
+    def test_builtin_options_machinefile_global_loses_over_subproject(self):
+        # The buildfile says subproject(... default_library: static), ensure that it overrides the machinefile
         testcase = os.path.join(self.common_test_dir, '223 persubproject options')
         config = self.helper_create_native_file({'built-in options': {'default_library': 'both'}})
         self.init(testcase, extra_args=['--native-file', config])
@@ -623,7 +756,7 @@ class NativeFileTests(BasePlatformTests):
 
         testcase = os.path.join(self.rust_test_dir, '12 bindgen')
         config = self.helper_create_native_file({
-            'properties': {'bindgen_clang_arguments': 'sentinal'}
+            'properties': {'bindgen_clang_arguments': 'sentinel'}
         })
 
         self.init(testcase, extra_args=['--native-file', config])
@@ -631,10 +764,10 @@ class NativeFileTests(BasePlatformTests):
         for t in targets:
             if t['id'].startswith('rustmod-bindgen'):
                 args: T.List[str] = t['target_sources'][0]['compiler']
-                self.assertIn('sentinal', args, msg="Did not find machine file value")
+                self.assertIn('sentinel', args, msg="Did not find machine file value")
                 cargs_start = args.index('--')
-                sent_arg = args.index('sentinal')
-                self.assertLess(cargs_start, sent_arg, msg='sentinal argument does not come after "--"')
+                sent_arg = args.index('sentinel')
+                self.assertLess(cargs_start, sent_arg, msg='sentinel argument does not come after "--"')
                 break
         else:
             self.fail('Did not find a bindgen target')
@@ -750,14 +883,16 @@ class CrossFileTests(BasePlatformTests):
                 f.write(cross_content)
             name = os.path.basename(f.name)
 
-            with mock.patch.dict(os.environ, {'XDG_DATA_HOME': d}):
-                self.init(testdir, extra_args=['--cross-file=' + name], inprocess=True)
-                self.wipe()
+            with self.subTest('using XDG_DATA_HOME'):
+                with mock.patch.dict(os.environ, {'XDG_DATA_HOME': d}):
+                    self.init(testdir, extra_args=['--cross-file=' + name], inprocess=True)
+                    self.wipe()
 
-            with mock.patch.dict(os.environ, {'XDG_DATA_DIRS': d}):
-                os.environ.pop('XDG_DATA_HOME', None)
-                self.init(testdir, extra_args=['--cross-file=' + name], inprocess=True)
-                self.wipe()
+            with self.subTest('using XDG_DATA_DIRS'):
+                with mock.patch.dict(os.environ, {'XDG_DATA_DIRS': d}):
+                    os.environ.pop('XDG_DATA_HOME', None)
+                    self.init(testdir, extra_args=['--cross-file=' + name], inprocess=True)
+                    self.wipe()
 
         with tempfile.TemporaryDirectory() as d:
             dir_ = os.path.join(d, '.local', 'share', 'meson', 'cross')
@@ -769,13 +904,14 @@ class CrossFileTests(BasePlatformTests):
             # If XDG_DATA_HOME is set in the environment running the
             # tests this test will fail, os mock the environment, pop
             # it, then test
-            with mock.patch.dict(os.environ):
-                os.environ.pop('XDG_DATA_HOME', None)
-                with mock.patch('mesonbuild.coredata.os.path.expanduser', lambda x: x.replace('~', d)):
-                    self.init(testdir, extra_args=['--cross-file=' + name], inprocess=True)
-                    self.wipe()
+            with self.subTest('env vars unset'):
+                with mock.patch.dict(os.environ):
+                    os.environ.pop('XDG_DATA_HOME', None)
+                    with mock.patch('mesonbuild.coredata.os.path.expanduser', lambda x: x.replace('~', d)):
+                        self.init(testdir, extra_args=['--cross-file=' + name], inprocess=True)
+                        self.wipe()
 
-    def helper_create_cross_file(self, values):
+    def helper_create_cross_file(self, values: T.Dict[str, T.Dict[str, T.Any]]) -> str:
         """Create a config file as a temporary file.
 
         values should be a nested dictionary structure of {section: {key:
@@ -953,6 +1089,45 @@ class CrossFileTests(BasePlatformTests):
                 break
         self.assertEqual(found, 2, 'Did not find all sections.')
 
+    def test_external_property_build_machine_native(self):
+        testdir = os.path.join(self.unit_test_dir, '137 external property nonexisting')
+        self.meson_native_files = [os.path.join(testdir, "propfile")]
+        out = self.init(testdir, allow_fail=True, extra_args=['-Dnative=true'])
+        self.assertIn('Unknown property for host machine: nonexisting', out)
+
+    def test_external_property_host_machine_native(self):
+        testdir = os.path.join(self.unit_test_dir, '137 external property nonexisting')
+        self.meson_native_files = [os.path.join(testdir, "propfile")]
+        out = self.init(testdir, allow_fail=True, extra_args=['-Dnative=false'])
+        self.assertIn('Unknown property for host machine: nonexisting', out)
+
+    def test_external_property_build_machine_cross(self):
+        # meson.get_external_property(..., native : true) refers to the build
+        # machine. In a cross build the build and host machines are distinct, so
+        # the error for a missing property must refer to the build machine.
+        crossdir = os.path.join(self.unit_test_dir, '69 cross')
+        # Reuse the cross test project to generate a native and a cross file
+        # describing this machine, so the configuration below is treated as a
+        # cross build (see test_identity_cross).
+        self.init(crossdir, extra_args=['-Dgenerate=true'])
+
+        nativefile = os.path.join(self.builddir, "nativefile")
+        crossfile = os.path.join(self.builddir, "crossfile")
+
+        self.new_builddir()
+        testdir = os.path.join(self.unit_test_dir, '137 external property nonexisting')
+        self.meson_native_files = [nativefile, os.path.join(testdir, "propfile")]
+        self.meson_cross_files = [crossfile]
+        out = self.init(testdir, allow_fail=True, extra_args=['-Dnative=true'])
+        self.assertIn('Unknown property for build machine: nonexisting', out)
+
+        self.new_builddir()
+        testdir = os.path.join(self.unit_test_dir, '137 external property nonexisting')
+        self.meson_native_files = [nativefile]
+        self.meson_cross_files = [crossfile, os.path.join(testdir, "propfile")]
+        out = self.init(testdir, allow_fail=True, extra_args=['-Dnative=false'])
+        self.assertIn('Unknown property for host machine: nonexisting', out)
+
     def test_project_options_native_only(self) -> None:
         # Do not load project options from a native file when doing a cross
         # build
@@ -968,3 +1143,63 @@ class CrossFileTests(BasePlatformTests):
                 break
         else:
             self.fail('Did not find expected option.')
+
+    @skip_if_not_language('rust')
+    @skipIfNoExecutable('bindgen')
+    def test_bindgen_finds_target_in_clang_options(self) -> None:
+        testcase = os.path.join(self.unit_test_dir, '135 minimal bindgen')
+
+        def check_target(include: T.Optional[str], exclude: T.Optional[str] = None) -> None:
+            configuration = self.introspect('--targets')
+            for each in configuration:
+                if each['name'].startswith('rustmod-bindgen'):
+                    if include:
+                        self.assertIn(f'--target={include}', each['target_sources'][0]['compiler'])
+                    if exclude:
+                        self.assertNotIn(f'--target={exclude}', each['target_sources'][0]['compiler'])
+                    if not (include or exclude):
+                        self.assertFalse(any(x.startswith('--target') for x in each['target_sources'][0]['compiler']))
+                    break
+            else:
+                self.fail('--target was not set')
+
+        with self.subTest('none set'):
+            self.init(testcase)
+            check_target(None)
+
+        rustc = shutil.which('rustc')
+        assert rustc is not None, 'Should have skipped'
+        build_tuple = subprocess.run([rustc, '--print', 'host-tuple'], universal_newlines=True, check=True, capture_output=True).stdout.strip()
+        host_tuple = 'aarch64-unknown-linux-gnu'
+
+        with self.subTest('properties only'):
+            self.new_builddir()
+            config = self.helper_create_cross_file({'properties': {'bindgen_clang_arguments': [f'--target={build_tuple}']}})
+            self.init(testcase, extra_args=['--native-file', config])
+            check_target(build_tuple)
+
+        with self.subTest('compiler only'):
+            self.new_builddir()
+            config = self.helper_create_cross_file({'binaries': {'rust': [rustc, f'--target={build_tuple}']}})
+            self.init(testcase, extra_args=['-Dadd_rust_language=true', '--cross-file', config])
+            check_target(build_tuple)
+
+        with self.subTest('properties and compiler'):
+            # https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1132495
+            if build_tuple == host_tuple:
+                raise SkipTest('Do not run aarch64 cross compilation test on aarch64 itself.')
+            self.new_builddir()
+            config = self.helper_create_cross_file({
+                'binaries': {'rust': [rustc, f'--target={build_tuple}']},
+                'properties': {'bindgen_clang_arguments': [f'--target={host_tuple}']},
+            })
+            self.init(testcase, extra_args=['-Dadd_rust_language=true', '--cross-file', config])
+            check_target(host_tuple, build_tuple)
+
+        with self.subTest('unused compiler'):
+            self.new_builddir()
+            config = self.helper_create_cross_file({
+                'binaries': {'rust': [rustc, f'--target={build_tuple}']},
+            })
+            self.init(testcase, extra_args=['--cross-file', config])
+            check_target(None, build_tuple)

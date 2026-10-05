@@ -30,6 +30,13 @@ C_FUNC_ATTRIBUTES = {
         'int foo(void) __attribute__((constructor));',
     'constructor_priority':
         'int foo( void ) __attribute__((__constructor__(65535/2)));',
+    'counted_by':
+        '''
+        struct foo {
+            unsigned int count;
+            char bar[] __attribute__((counted_by(count)));
+        };
+        ''',
     'deprecated':
         'int foo(void) __attribute__((deprecated("")));',
     'destructor':
@@ -80,6 +87,8 @@ C_FUNC_ATTRIBUTES = {
         'int foo(void) __attribute__((noreturn));',
     'nothrow':
         'int foo(void) __attribute__((nothrow));',
+    'null_terminated_string_arg':
+        'int foo(const char * p) __attribute__((null_terminated_string_arg(1)));',
     'optimize':
         '__attribute__((optimize(3))) int foo(void) { return 0; }',
     'packed':
@@ -137,7 +146,7 @@ CXX_FUNC_ATTRIBUTES = {
     'ifunc':
         ('extern "C" {'
          'int my_foo(void) { return 0; }'
-         'static int (*resolve_foo(void))(void) { return my_foo; }'
+         'int (*resolve_foo(void))(void) { return my_foo; }'
          '}'
          'int foo(void) __attribute__((ifunc("resolve_foo")));'),
 }

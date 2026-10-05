@@ -1,12 +1,11 @@
 name: include_directories
 returns: inc
 description: |
-  Returns an opaque object which contains the directories (relative to
-  the current directory) given in the positional arguments. The result
-  can then be passed to the `include_directories:` keyword argument when
-  building executables or libraries. You can use the returned object in
-  any subdirectory you want, Meson will make the paths work
-  automatically.
+  Returns an opaque object which contains the directories (relative to the
+  current directory) given in the positional arguments. The result can then be
+  passed to the `include_directories:` and `d_import_dirs:` keyword arguments
+  when building executables or libraries. You can use the returned object in any
+  subdirectory you want, Meson will make the paths work automatically.
 
   Note that this function call itself does not add the directories into
   the search path, since there is no global search path. For something
@@ -18,6 +17,17 @@ description: |
 
   Each directory given is converted to two include paths: one that is
   relative to the source root and one relative to the build root.
+
+warnings:
+  - |
+    When `is_system : true` is used, the include directory order on the
+    command line is **reversed** compared to the order given in the
+    arguments: the *last* directory listed has the highest priority
+    (it appears first among the `-isystem` flags and is searched first
+    by the compiler).  This is the opposite of the default (`is_system :
+    false`), where the *first* directory listed has the highest priority.
+    This may be changed in future releases, but behavior will not change
+    as long as `meson_version` is not changed in `project()`.
 
 example: |
   For example, with the following source tree layout in

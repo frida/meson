@@ -46,6 +46,11 @@ def get_pybindir():
         return sysconfig.get_path('scripts', scheme=scheme, vars={'base': ''}).strip('\\/')
     return sysconfig.get_path('scripts', vars={'base': ''}).strip('\\/')
 
+def has_python_module(module: str) -> bool:
+    result = subprocess.run(python_command + ['-c', f'import {module}'])
+    return result.returncode == 0
+
+
 class CommandTests(unittest.TestCase):
     '''
     Test that running meson in various ways works as expected by checking the
@@ -79,9 +84,13 @@ class CommandTests(unittest.TestCase):
         # If this call hangs CI will just abort. It is very hard to distinguish
         # between CI issue and test bug in that case. Set timeout and fail loud
         # instead.
-        p = subprocess.run(command, stdout=subprocess.PIPE,
-                           env=env, text=True,
-                           cwd=workdir, timeout=60 * 5)
+        p = subprocess.run(command,
+                           stdout=subprocess.PIPE,
+                           env=env,
+                           encoding='utf-8',
+                           text=True,
+                           cwd=workdir,
+                           timeout=60 * 5)
         print(p.stdout)
         if p.returncode != 0:
             raise subprocess.CalledProcessError(p.returncode, command)
@@ -141,11 +150,17 @@ class CommandTests(unittest.TestCase):
         # distutils complains that prefix isn't contained in PYTHONPATH
         os.environ['PYTHONPATH'] = os.path.join(str(pylibdir), '')
         os.environ['PATH'] = str(bindir) + os.pathsep + os.environ['PATH']
-        self._run(python_command + ['setup.py', 'install', '--prefix', str(prefix)])
-        # Fix importlib-metadata by appending all dirs in pylibdir
-        PYTHONPATHS = [pylibdir] + [x for x in pylibdir.iterdir()]
-        PYTHONPATHS = [os.path.join(str(x), '') for x in PYTHONPATHS]
-        os.environ['PYTHONPATH'] = os.pathsep.join(PYTHONPATHS)
+        if has_python_module('gpep517'):
+            self._run(python_command + ['-m', 'gpep517', 'install-from-source', '--destdir', '/', '--prefix', str(prefix)])
+        elif has_python_module('pip'):
+            self._run(python_command + ['-m', 'pip', 'install', '--prefix', str(prefix), '.'])
+        else:
+            # Legacy deprecated setuptools command used as fallback
+            self._run(python_command + ['setup.py', 'install', '--prefix', str(prefix)])
+            # Fix importlib-metadata by appending all dirs in pylibdir
+            PYTHONPATHS = [pylibdir] + [x for x in pylibdir.iterdir() if x.name.endswith('.egg')]
+            PYTHONPATHS = [os.path.join(str(x), '') for x in PYTHONPATHS]
+            os.environ['PYTHONPATH'] = os.pathsep.join(PYTHONPATHS)
         # Check that all the files were installed correctly
         self.assertTrue(bindir.is_dir())
         self.assertTrue(pylibdir.is_dir())
@@ -203,15 +218,15 @@ class CommandTests(unittest.TestCase):
         test_command = 'import sys; print(sys.argv[1])'
         env = os.environ.copy()
         del env['MESON_COMMAND_TESTS']
-        with open(script_file, 'w') as f:
+        with open(script_file, 'w', encoding='utf-8') as f:
             f.write('#!/usr/bin/env python3\n\n')
             f.write(f'{test_command}\n')
+        self.addCleanup(os.remove, script_file)
 
         for cmd in [['-c', test_command, 'fake argument'], [script_file, 'fake argument']]:
             pyout = self._run(python_command + cmd)
             mesonout = self._run(python_command + [meson_command, 'runpython'] + cmd, env=env)
             self.assertEqual(pyout, mesonout)
-
 
 if __name__ == '__main__':
     print('Meson build system', meson_version, 'Command Tests')

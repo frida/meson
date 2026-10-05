@@ -2,11 +2,12 @@
 # Copyright 2019 The Meson development team
 
 from __future__ import annotations
+import os
+import typing as T
 
 from .. import mesonlib
 from .. import mlog
 from .common import cmake_is_debug
-import typing as T
 
 if T.TYPE_CHECKING:
     from .traceparser import CMakeTraceParser, CMakeTarget
@@ -20,7 +21,7 @@ def parse_generator_expressions(
     '''Parse CMake generator expressions
 
     Most generator expressions are simply ignored for
-    simplicety, however some are required for some common
+    simplicity, however some are required for some common
     use cases.
     '''
 
@@ -56,9 +57,9 @@ def parse_generator_expressions(
         props = trace.targets[args[0]].properties.get(args[1], []) if args[0] in trace.targets else []
         return ';'.join(props)
 
-    def target_file(arg: str) -> str:
+    def target_artifact(arg: str, genex: str, linker_file: bool) -> str:
         if arg not in trace.targets:
-            mlog.warning(f"Unable to evaluate the cmake variable '$<TARGET_FILE:{arg}>'.")
+            mlog.warning(f"Unable to evaluate the cmake expression '$<{genex}:{arg}>'.")
             return ''
         tgt = trace.targets[arg]
 
@@ -78,15 +79,32 @@ def parse_generator_expressions(
             if 'RELEASE' in cfgs:
                 cfg = 'RELEASE'
 
-        if f'IMPORTED_IMPLIB_{cfg}' in tgt.properties:
-            return ';'.join([x for x in tgt.properties[f'IMPORTED_IMPLIB_{cfg}'] if x])
-        elif 'IMPORTED_IMPLIB' in tgt.properties:
-            return ';'.join([x for x in tgt.properties['IMPORTED_IMPLIB'] if x])
-        elif f'IMPORTED_LOCATION_{cfg}' in tgt.properties:
-            return ';'.join([x for x in tgt.properties[f'IMPORTED_LOCATION_{cfg}'] if x])
-        elif 'IMPORTED_LOCATION' in tgt.properties:
-            return ';'.join([x for x in tgt.properties['IMPORTED_LOCATION'] if x])
+        # TARGET_LINKER_FILE is the import library on DLL platforms, and falls
+        # back to the main artifact (TARGET_FILE) everywhere else.
+        bases = ['IMPORTED_IMPLIB', 'IMPORTED_LOCATION'] if linker_file else ['IMPORTED_LOCATION']
+        for base in bases:
+            for prop in [f'{base}_{cfg}', base]:
+                vals = [x for x in tgt.properties.get(prop, []) if x]
+                if vals:
+                    if len(vals) > 1:
+                        mlog.warning(f"'$<{genex}:{arg}>' evaluated to more than one file; only the first one is used.")
+                    return vals[0]
+        mlog.warning(f"Unable to evaluate the cmake expression '$<{genex}:{arg}>'.")
         return ''
+
+    def target_file(arg: str) -> str:
+        return target_artifact(arg, 'TARGET_FILE', False)
+
+    def target_linker_file(arg: str) -> str:
+        return target_artifact(arg, 'TARGET_LINKER_FILE', True)
+
+    def target_file_name(arg: str) -> str:
+        tgt_file = target_artifact(arg, 'TARGET_FILE_NAME', False)
+        return os.path.basename(tgt_file) if tgt_file else ''
+
+    def target_file_dir(arg: str) -> str:
+        tgt_file = target_artifact(arg, 'TARGET_FILE_DIR', False)
+        return os.path.dirname(tgt_file) if tgt_file else ''
 
     supported: T.Dict[str, T.Callable[[str], str]] = {
         # Boolean functions
@@ -130,6 +148,9 @@ def parse_generator_expressions(
         'TARGET_NAME_IF_EXISTS': lambda x: x if x in trace.targets else '',
         'TARGET_PROPERTY': target_property,
         'TARGET_FILE': target_file,
+        'TARGET_FILE_NAME': target_file_name,
+        'TARGET_FILE_DIR': target_file_dir,
+        'TARGET_LINKER_FILE': target_linker_file,
     }
 
     # Recursively evaluate generator expressions
@@ -170,6 +191,8 @@ def parse_generator_expressions(
         # Evaluate the function
         if func in supported:
             res = supported[func](args)
+        else:
+            mlog.warning(f"Unknown generator expression '$<{func}:{args}>'.", once=True, fatal=False)
 
         return res
 

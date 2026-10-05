@@ -20,6 +20,8 @@ from mesonbuild import coredata
 
 # Elementtree does not support CDATA. So hack it.
 WINVER_CHECK = 'Installed OR (VersionNT64 &gt; 602)>'
+NUGET_INDEX = 'https://api.nuget.org/v3/index.json'
+WIXEXT_TOOL = 'WixToolset.UI.wixext'
 
 def gen_guid():
     '''
@@ -70,8 +72,9 @@ class PackageGenerator:
         self.final_output = f'meson-{self.version}-64.msi'
         self.staging_dirs = ['dist', 'dist2']
         self.progfile_dir = 'ProgramFiles64Folder'
-        redist_globs = ['C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Community\\VC\\Redist\\MSVC\\v*\\MergeModules\\Microsoft_VC142_CRT_x64.msm',
-                        'C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Redist\\MSVC\\v*\\MergeModules\\Microsoft_VC143_CRT_x64.msm']
+        redist_globs = ['C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Redist\\MSVC\\v*\\MergeModules\\Microsoft_VC143_CRT_x64.msm',
+                        'C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\VC\\Redist\\MSVC\\v*\\MergeModules\\Microsoft_VC145_CRT_x64.msm',
+                        ]
         redist_path = None
         for g in redist_globs:
             trials = glob(g)
@@ -228,13 +231,13 @@ class PackageGenerator:
         # ElementTree cannot do pretty-printing, so do it manually
         import xml.dom.minidom
         doc = xml.dom.minidom.parse(self.main_xml)
-        with open(self.main_xml, 'w') as open_file:
+        with open(self.main_xml, 'w', encoding='utf-8') as open_file:
             open_file.write(doc.toprettyxml())
         # One last fix, add CDATA.
         with open(self.main_xml) as open_file:
             data = open_file.read()
         data = data.replace('X'*len(WINVER_CHECK), WINVER_CHECK)
-        with open(self.main_xml, 'w') as open_file:
+        with open(self.main_xml, 'w', encoding='utf-8') as open_file:
             open_file.write(data)
 
     def build_features(self, top_feature, staging_dir):
@@ -302,28 +305,50 @@ class PackageGenerator:
                                ])
 
 
+def is_nuget_source_active():
+    '''
+       Check if nuget source is active
+    '''
+    result = subprocess.run(['dotnet', 'nuget', 'list', 'source', '--format', 'Short'], stdout=subprocess.PIPE)
+    return f'E {NUGET_INDEX}' in result.stdout.decode('utf-8')
+
+def is_wixext_installed():
+    '''
+       Check if wix extension is installed
+    '''
+    result = subprocess.run(['wix', 'extension', 'list'], stdout=subprocess.PIPE)
+    return WIXEXT_TOOL in result.stdout.decode('utf-8')
+
 def install_wix():
-    subprocess.check_call(['dotnet',
-                           'nuget',
-                           'add',
-                           'source',
-                           'https://api.nuget.org/v3/index.json'])
+    # Check if nuget source is active before trying to add it
+    # dotnet nuget add source returns non-zero if the source already exists
+    if not is_nuget_source_active():
+        subprocess.check_call(['dotnet',
+                               'nuget',
+                               'add',
+                               'source',
+                               NUGET_INDEX])
+
     subprocess.check_call(['dotnet',
                            'tool',
                            'install',
                            '--global',
                            'wix'])
-    subprocess.check_call(['wix',
-                           'extension',
-                           'add',
-                           'WixToolset.UI.wixext',
-                           ])
 
 if __name__ == '__main__':
     if not os.path.exists('meson.py'):
         sys.exit(print('Run me in the top level source dir.'))
     if not shutil.which('wix'):
         install_wix()
+
+    # Install wixext if not installed
+    if not is_wixext_installed():
+        subprocess.check_call(['wix',
+                               'extension',
+                               'add',
+                               WIXEXT_TOOL,
+                               ])
+
     subprocess.check_call(['pip', 'install', '--upgrade', 'pyinstaller'])
 
     p = PackageGenerator()

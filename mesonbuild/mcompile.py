@@ -16,8 +16,9 @@ from pathlib import Path
 
 from . import mlog
 from . import mesonlib
+from .options import OptionKey
 from .mesonlib import MesonException, RealPathAction, join_args, listify_array_value, setup_vsenv
-from mesonbuild.environment import detect_ninja
+from mesonbuild.tooldetect import detect_ninja
 from mesonbuild import build
 
 if T.TYPE_CHECKING:
@@ -354,14 +355,14 @@ def run(options: 'argparse.Namespace') -> int:
 
     b = build.load(options.wd)
     cdata = b.environment.coredata
-    need_vsenv = T.cast('bool', cdata.get_option(mesonlib.OptionKey('vsenv')))
+    need_vsenv = T.cast('bool', cdata.optstore.get_value_for(OptionKey('vsenv')))
     if setup_vsenv(need_vsenv):
         mlog.log(mlog.green('INFO:'), 'automatically activated MSVC compiler environment')
 
     cmd: T.List[str] = []
     env: T.Optional[T.Dict[str, str]] = None
 
-    backend = cdata.get_option(mesonlib.OptionKey('backend'))
+    backend = cdata.optstore.get_value_for(OptionKey('backend'))
     assert isinstance(backend, str)
     mlog.log(mlog.green('INFO:'), 'autodetecting backend as', backend)
     if backend == 'ninja':

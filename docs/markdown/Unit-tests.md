@@ -38,10 +38,10 @@ set to a random value between 1..255. This can help find memory leaks on
 configurations using glibc, including with non-GCC compilers. This feature
 can be disabled as discussed in [[test]].
 
-### ASAN_OPTIONS, UBSAN_OPTIONS, and MSAN_OPTIONS
+### ASAN_OPTIONS, MSAN_OPTIONS, TSAN_OPTIONS, and UBSAN_OPTIONS
 
-By default, the environment variables `ASAN_OPTIONS`, `UBSAN_OPTIONS`, and
-`MSAN_OPTIONS` are set to enable aborting on detected violations and to give a
+By default, the environment variables `ASAN_OPTIONS`, `MSAN_OPTIONS`, `TSAN_OPTIONS`,
+and `UBSAN_OPTIONS` are set to enable aborting on detected violations and to give a
 backtrace. This feature can be disabled as discussed in [[test]].
 
 ## Coverage
@@ -83,11 +83,17 @@ possible.
 
 By default Meson uses as many concurrent processes as there are cores
 on the test machine. You can override this with the environment
-variable `MESON_TESTTHREADS` like this.
+variable `MESON_TESTTHREADS` or, *since 1.7.0*, `MESON_NUM_PROCESSES`:
 
 ```console
-$ MESON_TESTTHREADS=5 meson test
+$ MESON_NUM_PROCESSES=5 meson test
 ```
+
+Setting `MESON_NUM_PROCESSES` to 0 enables the default behavior (core
+count), whereas setting an invalid value results in setting the job
+count to 1.
+
+If both environment variables are present, `MESON_NUM_PROCESSES` prevails.
 
 ## Priorities
 
@@ -126,7 +132,12 @@ In addition, sometimes a test fails set up so that it should fail even
 if it is marked as an expected failure. The GNU standard approach in
 this case is to exit the program with error code 99. Again, Meson will
 detect this and report these tests as `ERROR`, ignoring the setting of
-`should_fail`. This behavior was added in version 0.50.0.
+`should_fail`. This behavior was added in version 0.50.0. In version
+1.11.0 `should_fail` has been deprecated and renamed to `expected_fail`.
+
+In version 1.11.0, `expected_exitcode` has been introduced. This makes
+it possible to positively test for non-zero return codes. An example
+of this would be to test if failure injection is detected in a test.
 
 ## Testing tool
 
@@ -200,6 +211,37 @@ name(s), the test name(s) must be contained in the suite(s). This
 however is redundant-- it would be more useful to specify either
 specific test names or suite(s).
 
+Since version *1.8.0*, you can pass `--slice i/n` to split up the set of tests
+into `n` slices and execute the `ith` such slice. This allows you to distribute
+a set of long-running tests across multiple machines to decrease the overall
+runtime of tests.
+
+Since version *1.12.0*, you can pass `--exclude NAME` to skip processing
+of named tests:
+```console
+$ meson test --list
+m:basic
+m:buggy
+
+$ meson test
+...
+1/2 m:basic        OK              0.01s
+2/2 m:buggy        FAIL            0.00s ...
+
+Ok:                1
+Fail:              1
+
+$ meson test --exclude buggy
+...
+1/1 m:basic        OK              0.00s
+
+Ok:                1
+Fail:              0
+```
+
+For unqualified names (no subproject specified), `--exclude NAME` matches
+the main project.
+
 ### Other test options
 
 Sometimes you need to run the tests multiple times, which is done like this:
@@ -208,17 +250,20 @@ Sometimes you need to run the tests multiple times, which is done like this:
 $ meson test --repeat=10
 ```
 
+Meson will set the `MESON_TEST_ITERATION` environment variable to the
+current iteration of the test *(added 1.5.0)*.
+
 Invoking tests via a helper executable such as Valgrind can be done with the
-`--wrap` argument
+`--wrapper` argument
 
 ```console
-$ meson test --wrap=valgrind testname
+$ meson test --wrapper=valgrind testname
 ```
 
 Arguments to the wrapper binary can be given like this:
 
 ```console
-$ meson test --wrap='valgrind --tool=helgrind' testname
+$ meson test --wrapper='valgrind --tool=helgrind' testname
 ```
 
 Meson also supports running the tests under GDB. Just doing this:
@@ -252,14 +297,32 @@ be specified *(added 0.52.0)*:
 $ meson test --gdb --gdb-path /path/to/gdb testname
 ```
 
+Meson can print the error logs produced by failing tests via the
+`--print-errorlogs` option. The logs can include stack traces and environmental
+variables. This is especially useful when you run the tests on GitHub, Travis,
+Jenkins and the like:
+
 ```console
 $ meson test --print-errorlogs
 ```
 
-Meson will report the output produced by the failing tests along with
-other useful information as the environmental variables. This is
-useful, for example, when you run the tests on Travis-CI, Jenkins and
-the like.
+Running tests interactively can be done with the `--interactive` option.
+`meson test --interactive` invokes tests with stdout, stdin and stderr
+connected directly to the calling terminal. This can be useful if your test is
+an integration test running in a container or virtual machine where a debug
+shell is spawned if it fails *(added 1.5.0)*:
+
+```console
+$ meson test --interactive testname
+```
+
+By default, the output from tests will be limited to the last 100 lines. The
+maximum number of lines to show can be configured with the `--max-lines` option
+*(added 1.5.0)*:
+
+```console
+$ meson test --max-lines=1000 testname
+```
 
 **Timeout**
 
@@ -280,7 +343,7 @@ For further information see the command line help of Meson by running
 
 ## Legacy notes
 
-If `meson test` does not work for you, you likely have a old version
+If `meson test` does not work for you, you likely have an old version
 of Meson. In that case you should call `mesontest` instead. If
 `mesontest` doesn't work either you have a very old version prior to
 0.37.0 and should upgrade.

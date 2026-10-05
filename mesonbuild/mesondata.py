@@ -25,11 +25,13 @@ class DataFile:
 
     def write_to_private(self, env: 'Environment') -> Path:
         try:
-            resource = importlib.resources.files('mesonbuild') / self.path
+            # The issue that mypy/pyright see here is caused by a bug in typeshed:
+            # https://github.com/python/typeshed/pull/15108
+            resource = importlib.resources.files('mesonbuild') / self.path  # type: ignore[operator]
             if isinstance(resource, Path):
                 return resource
         except AttributeError:
-            # fall through to python 3.7 compatible code
+            # fall through to zipapp compatible code
             pass
 
         out_file = Path(env.scratch_dir) / 'data' / self.path.name

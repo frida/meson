@@ -10,18 +10,21 @@ import xml.etree.ElementTree as ET
 from .vs2010backend import Vs2010Backend
 
 if T.TYPE_CHECKING:
+    from ..arglist import CompilerArgs
     from ..build import Build
-    from ..interpreter import Interpreter
+    from ..compilers.compilers import Language
 
 
 class Vs2022Backend(Vs2010Backend):
 
     name = 'vs2022'
 
-    def __init__(self, build: T.Optional[Build], interpreter: T.Optional[Interpreter], gen_lite: bool = False):
-        super().__init__(build, interpreter, gen_lite=gen_lite)
+    def __init__(self, build: T.Optional[Build], gen_lite: bool = False):
+        super().__init__(build, gen_lite=gen_lite)
         self.sln_file_version = '12.00'
         self.sln_version_comment = 'Version 17'
+
+    def detect_toolset(self) -> None:
         if self.environment is not None:
             comps = self.environment.coredata.compilers.host
             if comps and all(c.id == 'clang-cl' for c in comps.values()):
@@ -39,11 +42,11 @@ class Vs2022Backend(Vs2010Backend):
         if sdk_version:
             self.windows_target_platform_version = sdk_version.rstrip('\\')
 
-    def generate_debug_information(self, link):
+    def generate_debug_information(self, link: ET.Element) -> None:
         # valid values for vs2022 is 'false', 'true', 'DebugFastLink', 'DebugFull'
         ET.SubElement(link, 'GenerateDebugInformation').text = 'DebugFull'
 
-    def generate_lang_standard_info(self, file_args, clconf):
+    def generate_lang_standard_info(self, file_args: T.Dict[Language, CompilerArgs], clconf: ET.Element) -> None:
         if 'cpp' in file_args:
             optargs = [x for x in file_args['cpp'] if x.startswith('/std:c++')]
             if optargs:

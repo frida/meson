@@ -3,64 +3,147 @@
 
 from __future__ import annotations
 import unittest
+from unittest import mock
+import os
+import tempfile
+import textwrap
 import typing as T
 
-from mesonbuild.cargo import builder, cfg
+from mesonbuild.cargo import cfg
 from mesonbuild.cargo.cfg import TokenType
-from mesonbuild.cargo.version import convert
+from mesonbuild.cargo.interpreter import load_cargo_lock
+from mesonbuild.cargo.manifest import Dependency, Lint, Manifest, Package, Workspace
+from mesonbuild.cargo.toml import load_toml
+from mesonbuild.cargo.version import api, cargo_parse, SemVer
+from mesonbuild.mesonlib import MachineChoice, MesonException
 
 
 class CargoVersionTest(unittest.TestCase):
 
-    def test_cargo_to_meson(self) -> None:
-        cases: T.List[T.Tuple[str, T.List[str]]] = [
-            # Basic requirements
-            ('>= 1', ['>= 1']),
-            ('> 1', ['> 1']),
-            ('= 1', ['= 1']),
-            ('< 1', ['< 1']),
-            ('<= 1', ['<= 1']),
+    def test_cargo_parse(self) -> None:
+        # Each case is (cargo_requirement, accepted_versions, rejected_versions).
+        # The conversion from Cargo to Meson constraints is opaque, so probe the
+        # resulting predicate on versions around the boundaries.
+        cases: T.List[T.Tuple[str, T.List[str], T.List[str]]] = [
+            # Basic comparison requirements
+            ('>= 1', ['1', '1.0', '1.5', '2'], ['0.9']),
+            ('> 1', ['1.0.1', '1.5', '2'], ['0.9', '1']),
+            ('= 1', ['1', '1.0', '1.0.0'], ['0.9', '1.0.1', '2']),
+            ('< 1', ['0.9'], ['1', '1.0', '2']),
+            # Trailing zeros in the bound: Meson's Version treats a shorter
+            # prefix as < the same prefix with trailing zeros, so the >= bound
+            # must be canonicalized to behave like Cargo (where 1 == 1.0 == 1.0.0).
+            ('>= 1.0', ['1', '1.0', '1.0.0', '1.5'], ['0.9']),
+            ('>= 1.0.0', ['1', '1.0', '1.0.0', '1.5'], ['0.9']),
+            ('> 1.0', ['1.0.1', '1.5', '2'], ['0.9', '1', '1.0']),
+            ('> 1.0.0', ['1.0.1', '1.5', '2'], ['0.9', '1', '1.0', '1.0.0']),
+            # Cargo's <= must accept x.y.z, which Meson's <= would not
+            ('<= 1', ['0.9', '1', '1.0', '1.5', '1.99'], ['2', '2.0']),
+            ('<= 1.1', ['1.0', '1.1', '1.1.5'], ['1.2', '2']),
+            ('<= 1.1.1', ['1.0', '1.1', '1.1.1'], ['1.1.2', '1.2']),
 
-            # tilde tests
-            ('~1', ['>= 1', '< 2']),
-            ('~1.1', ['>= 1.1', '< 1.2']),
-            ('~1.1.2', ['>= 1.1.2', '< 1.2.0']),
+            # Tilde requirements
+            ('~1', ['1', '1.5', '1.99'], ['0.9', '2']),
+            ('~1.1', ['1.1', '1.1.5'], ['1.0', '1.2', '2']),
+            ('~1.1.2', ['1.1.2', '1.1.5'], ['1.1.1', '1.2.0']),
 
             # Wildcards
-            ('*', []),
-            ('1.*', ['>= 1', '< 2']),
-            ('2.3.*', ['>= 2.3', '< 2.4']),
+            ('*', ['0.1', '1', '99.99'], []),
+            ('1.*', ['1', '1.5'], ['0.9', '2']),
+            ('2.3.*', ['2.3', '2.3.5'], ['2.2', '2.4']),
 
             # Unqualified
-            ('2', ['>= 2', '< 3']),
-            ('2.4', ['>= 2.4', '< 3']),
-            ('2.4.5', ['>= 2.4.5', '< 3']),
-            ('0.0.0', ['< 1']),
-            ('0.0', ['< 1']),
-            ('0', ['< 1']),
-            ('0.0.5', ['>= 0.0.5', '< 0.0.6']),
-            ('0.5.0', ['>= 0.5.0', '< 0.6']),
-            ('0.5', ['>= 0.5', '< 0.6']),
-            ('1.0.45', ['>= 1.0.45', '< 2']),
+            ('2', ['2', '2.5'], ['1', '3']),
+            ('2.4', ['2.4', '2.5'], ['2.3', '3']),
+            ('2.4.5', ['2.4.5', '2.6'], ['2.4.4', '3']),
+            ('0.0.0', ['0', '0.0.0', '0.0.5', '0.5'], ['1']),
+            ('0.0', ['0', '0.5', '0.999'], ['1']),
+            ('0', ['0', '0.5'], ['1']),
+            ('0.0.5', ['0.0.5'], ['0.0.4', '0.0.6']),
+            ('0.5.0', ['0.5.0', '0.5.5'], ['0.4.0', '0.6']),
+            ('0.5', ['0.5', '0.5.5'], ['0.4', '0.6']),
+            ('1.0.45', ['1.0.45', '1.5'], ['1.0.44', '2']),
 
-            # Caret (Which is the same as unqualified)
-            ('^2', ['>= 2', '< 3']),
-            ('^2.4', ['>= 2.4', '< 3']),
-            ('^2.4.5', ['>= 2.4.5', '< 3']),
-            ('^0.0.0', ['< 1']),
-            ('^0.0', ['< 1']),
-            ('^0', ['< 1']),
-            ('^0.0.5', ['>= 0.0.5', '< 0.0.6']),
-            ('^0.5.0', ['>= 0.5.0', '< 0.6']),
-            ('^0.5', ['>= 0.5', '< 0.6']),
+            # Caret (equivalent to unqualified)
+            ('^2', ['2', '2.5'], ['1', '3']),
+            ('^2.4', ['2.4', '2.5'], ['2.3', '3']),
+            ('^2.4.5', ['2.4.5', '2.6'], ['2.4.4', '3']),
+            ('^1.0', ['1', '1.0', '1.0.0', '1.5'], ['0.9', '2']),
+            ('^1.0.0', ['1', '1.0', '1.0.0', '1.5'], ['0.9', '2']),
+            ('^0.0.0', ['0', '0.0.5'], ['1']),
+            ('^0.0', ['0', '0.5'], ['1']),
+            ('^0', ['0', '0.5'], ['1']),
+            ('^0.0.5', ['0.0.5'], ['0.0.4', '0.0.6']),
+            ('^0.5.0', ['0.5.0', '0.5.5'], ['0.4.0', '0.6']),
+            ('^0.5', ['0.5', '0.5.5'], ['0.4', '0.6']),
 
             # Multiple requirements
-            ('>= 1.2.3, < 1.4.7', ['>= 1.2.3', '< 1.4.7']),
+            ('>= 1.2.3, < 1.4.7', ['1.2.3', '1.3.0'], ['1.2.2', '1.4.7', '1.5']),
+
+            # Pre-releases are excluded unless a constraint itself names a
+            # pre-release, even when otherwise in range.
+            ('>= 1.0', ['1.0', '1.5', '2'], ['2.0-pre1', '1.5-pre1']),
+            ('^1', ['1', '1.5'], ['1.5.0-pre', '2.0-pre']),
+            # A pre-release bound enables pre-release matching and orders them.
+            ('>= 1.0.0-alpha',
+             ['1.0.0-alpha', '1.0.0-alpha.1', '1.0.0-beta', '1.0.0', '1.5'],
+             ['1.0.0-alph', '0.9']),
+            ('>= 1.0.0-alpha, < 1.0.0',
+             ['1.0.0-alpha', '1.0.0-beta', '1.0.0-rc.1'],
+             ['1.0.0', '0.9']),
         ]
 
+        for (cargo_req, accepted, rejected) in cases:
+            check = cargo_parse(cargo_req)
+            for ver in accepted:
+                with self.subTest(req=cargo_req, ver=ver):
+                    self.assertTrue(check(ver), f'{cargo_req!r} should accept {ver!r}')
+            for ver in rejected:
+                with self.subTest(req=cargo_req, ver=ver):
+                    self.assertFalse(check(ver), f'{cargo_req!r} should reject {ver!r}')
+
+    def test_semver_has_prerelease(self) -> None:
+        self.assertTrue(SemVer('1.0.0-alpha').has_prerelease)
+        self.assertFalse(SemVer('1.0.0').has_prerelease)
+        self.assertFalse(SemVer('1.0.0+build.5').has_prerelease)
+
+    def test_semver_parse(self) -> None:
+        # Pre-release components parse into the version vector after a -1
+        # sentinel; build metadata (after '+') is discarded.
+        self.assertEqual(SemVer('1.2.3')._v, [1, 2, 3, 0])
+        self.assertEqual(SemVer('1.0.0-alpha.1')._v, [1, 0, 0, -1, 'alpha', 1])
+        self.assertEqual(SemVer('1.2.3-rc.1+exp.sha')._v, [1, 2, 3, -1, 'rc', 1])
+        self.assertEqual(SemVer('1.0.0+build.5')._v, [1, 0, 0, 0])
+
+        # numeric identifiers sort below alphanumeric ones, a larger set of fields
+        # wins, and a release sorts above all of its pre-releases.
+        # https://semver.org/#spec-item-11
+        ordered = [
+            '1.0.0-alpha', '1.0.0-alpha.1', '1.0.0-alpha.beta', '1.0.0-beta',
+            '1.0.0-beta.2', '1.0.0-beta.11', '1.0.0-rc.1', '1.0.0',
+        ]
+        for lo, hi in zip(ordered, ordered[1:]):
+            with self.subTest(lo=lo, hi=hi):
+                self.assertLess(SemVer(lo), SemVer(hi))
+                self.assertGreater(SemVer(hi), SemVer(lo))
+
+        # Build metadata does not affect precedence.
+        self.assertEqual(SemVer('1.0.0+build.5'), SemVer('1.0.0'))
+        self.assertEqual(SemVer('1.2.3-rc.1+exp.sha'), SemVer('1.2.3-rc.1'))
+
+    def test_api(self) -> None:
+        cases: T.List[T.Tuple[str, str]] = [
+            # Plain versions
+            ('1.2.3', '1'),
+            ('0.4.5', '0.4'),
+            ('0.0.3', '0'),
+
+            # Explicit operators
+            ('1.*', '1'),
+        ]
         for (data, expected) in cases:
-            with self.subTest():
-                self.assertListEqual(convert(data), expected)
+            with self.subTest(data=data):
+                self.assertEqual(api(data), expected)
 
 
 class CargoCfgTest(unittest.TestCase):
@@ -98,10 +181,27 @@ class CargoCfgTest(unittest.TestCase):
                 (TokenType.IDENTIFIER, 'unix'),
                 (TokenType.RPAREN, None),
             ]),
+            ('windows', [
+                (TokenType.IDENTIFIER, 'windows'),
+            ]),
         ]
         for data, expected in cases:
             with self.subTest():
                 self.assertListEqual(list(cfg.lexer(data)), expected)
+
+    def test_parse_invalid(self) -> None:
+        cases = [
+            'all(unix,)',
+            'any(',
+            'not(',
+            'not(all(unix,))',
+            'not(any)',
+            ''
+        ]
+        for data in cases:
+            with self.subTest():
+                with self.assertRaises(MesonException):
+                    cfg.parse(iter(cfg.lexer(data)))
 
     def test_parse(self) -> None:
         cases = [
@@ -127,61 +227,591 @@ class CargoCfgTest(unittest.TestCase):
                             cfg.Equal(cfg.Identifier("target_arch"), cfg.String("x86")),
                             cfg.Equal(cfg.Identifier("target_os"), cfg.String("linux")),
                         ]))),
+            ('all(any(target_os = "android", target_os = "linux"), any(custom_cfg))',
+                cfg.All([
+                    cfg.Any([
+                        cfg.Equal(cfg.Identifier("target_os"), cfg.String("android")),
+                        cfg.Equal(cfg.Identifier("target_os"), cfg.String("linux")),
+                    ]),
+                    cfg.Any([
+                        cfg.Identifier("custom_cfg"),
+                    ]),
+                ])),
         ]
         for data, expected in cases:
             with self.subTest():
                 self.assertEqual(cfg.parse(iter(cfg.lexer(data))), expected)
 
-    def test_ir_to_meson(self) -> None:
-        build = builder.Builder('')
-        HOST_MACHINE = build.identifier('host_machine')
-
+    def test_eval_ir(self) -> None:
+        d = {
+            'target_os': 'unix',
+            'unix': '',
+        }
         cases = [
-            ('target_os = "windows"',
-             build.equal(build.method('system', HOST_MACHINE),
-                         build.string('windows'))),
-            ('target_arch = "x86"',
-             build.equal(build.method('cpu_family', HOST_MACHINE),
-                         build.string('x86'))),
-            ('target_family = "unix"',
-             build.equal(build.method('system', HOST_MACHINE),
-                         build.string('unix'))),
-            ('not(target_arch = "x86")',
-             build.not_(build.equal(
-                build.method('cpu_family', HOST_MACHINE),
-                build.string('x86')))),
-            ('any(target_arch = "x86", target_arch = "x86_64")',
-             build.or_(
-                build.equal(build.method('cpu_family', HOST_MACHINE),
-                            build.string('x86')),
-                build.equal(build.method('cpu_family', HOST_MACHINE),
-                            build.string('x86_64')))),
-            ('any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")',
-             build.or_(
-                build.equal(build.method('cpu_family', HOST_MACHINE),
-                            build.string('x86')),
-                build.or_(
-                    build.equal(build.method('cpu_family', HOST_MACHINE),
-                                build.string('x86_64')),
-                    build.equal(build.method('cpu_family', HOST_MACHINE),
-                                build.string('aarch64'))))),
-            ('all(target_arch = "x86", target_arch = "x86_64")',
-             build.and_(
-                build.equal(build.method('cpu_family', HOST_MACHINE),
-                            build.string('x86')),
-                build.equal(build.method('cpu_family', HOST_MACHINE),
-                            build.string('x86_64')))),
-            ('all(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")',
-             build.and_(
-                build.equal(build.method('cpu_family', HOST_MACHINE),
-                            build.string('x86')),
-                build.and_(
-                    build.equal(build.method('cpu_family', HOST_MACHINE),
-                                build.string('x86_64')),
-                    build.equal(build.method('cpu_family', HOST_MACHINE),
-                                build.string('aarch64'))))),
+            ('target_os = "windows"', False),
+            ('target_os = "unix"', True),
+            ('doesnotexist = "unix"', False),
+            ('not(target_os = "windows")', True),
+            ('any(target_os = "windows", target_arch = "x86_64")', False),
+            ('any(target_os = "windows", target_os = "unix")', True),
+            ('all(target_os = "windows", target_os = "unix")', False),
+            ('all(not(target_os = "windows"), target_os = "unix")', True),
+            ('any(unix, windows)', True),
+            ('all()', True),
+            ('any()', False),
+            ('unix', True),
+            ('windows', False),
         ]
         for data, expected in cases:
             with self.subTest():
-                value = cfg.ir_to_meson(cfg.parse(iter(cfg.lexer(data))), build)
+                value = cfg.eval_cfg(f'cfg({data})', d)
                 self.assertEqual(value, expected)
+
+class CargoLockTest(unittest.TestCase):
+    def test_wraps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filename = os.path.join(tmpdir, 'Cargo.lock')
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(textwrap.dedent('''\
+                    version = 3
+                    [[package]]
+                    name = "foo"
+                    version = "0.1"
+                    source = "registry+https://github.com/rust-lang/crates.io-index"
+                    checksum = "8a30b2e23b9e17a9f90641c7ab1549cd9b44f296d3ccbf309d2863cfe398a0cb"
+                    [[package]]
+                    name = "bar"
+                    version = "0.1"
+                    source = "git+https://github.com/gtk-rs/gtk-rs-core?branch=0.19#23c5599424cc75ec66618891c915d9f490f6e4c2"
+                    [[package]]
+                    name = "member"
+                    version = "0.1"
+                    source = "git+https://github.com/gtk-rs/gtk-rs-core?branch=0.19#23c5599424cc75ec66618891c915d9f490f6e4c2"
+                    '''))
+            cargolock = load_cargo_lock(filename, 'subprojects')
+            wraps = cargolock.wraps
+            self.assertEqual(len(wraps), 2)
+            self.assertEqual(wraps['foo-0.1-rs'].name, 'foo-0.1-rs')
+            self.assertEqual(wraps['foo-0.1-rs'].directory, 'foo-0.1')
+            self.assertEqual(wraps['foo-0.1-rs'].type, 'file')
+            self.assertEqual(wraps['foo-0.1-rs'].get('method'), 'cargo')
+            self.assertEqual(wraps['foo-0.1-rs'].get('source_url'), 'https://static.crates.io/crates/foo/0.1/download')
+            self.assertEqual(wraps['foo-0.1-rs'].get('source_hash'), '8a30b2e23b9e17a9f90641c7ab1549cd9b44f296d3ccbf309d2863cfe398a0cb')
+            self.assertEqual(wraps['gtk-rs-core-0.19'].name, 'gtk-rs-core-0.19')
+            self.assertEqual(wraps['gtk-rs-core-0.19'].directory, 'gtk-rs-core-0.19')
+            self.assertEqual(wraps['gtk-rs-core-0.19'].type, 'git')
+            self.assertEqual(wraps['gtk-rs-core-0.19'].get('method'), 'cargo')
+            self.assertEqual(wraps['gtk-rs-core-0.19'].get('url'), 'https://github.com/gtk-rs/gtk-rs-core')
+            self.assertEqual(wraps['gtk-rs-core-0.19'].get('revision'), '23c5599424cc75ec66618891c915d9f490f6e4c2')
+            self.assertEqual(list(wraps['gtk-rs-core-0.19'].provided_deps), ['gtk-rs-core-0.19', 'bar-0.1-rs', 'member-0.1-rs'])
+
+class CargoTomlTest(unittest.TestCase):
+    CARGO_TOML_1 = textwrap.dedent('''\
+        [package]
+        name = "mandelbrot"
+        version = "0.1.0"
+        authors = ["Sebastian Dröge <sebastian@centricular.com>"]
+        edition = "2018"
+        license = "GPL-3.0"
+
+        [package.metadata.docs.rs]
+        all-features = true
+        rustc-args = [
+            "--cfg",
+            "docsrs",
+        ]
+        rustdoc-args = [
+            "--cfg",
+            "docsrs",
+            "--generate-link-to-definition",
+        ]
+
+        [dependencies]
+        gtk = { package = "gtk4", version = "0.9" }
+        num-complex = "0.4"
+        rayon = "1.0"
+        once_cell = "1"
+        async-channel = "2.1"
+        zerocopy = { version = "0.7", features = ["derive"] }
+
+        [lints.rust]
+        unknown_lints = "allow"
+        unexpected_cfgs = { level = "deny", check-cfg = [ 'cfg(MESON)' ] }
+
+        [lints.clippy]
+        pedantic = {level = "warn", priority = -1}
+
+        [dev-dependencies.gir-format-check]
+        version = "^0.1"
+        ''')
+
+    CARGO_TOML_2 = textwrap.dedent('''\
+        [package]
+        name = "pango"
+        edition = "2021"
+        rust-version = "1.70"
+        version = "0.20.4"
+        authors = ["The gtk-rs Project Developers"]
+
+        [package.metadata.system-deps.pango]
+        name = "pango"
+        version = "1.40"
+
+        [package.metadata.system-deps.pango.v1_42]
+        version = "1.42"
+
+        [lib]
+        name = "pango"
+
+        [[test]]
+        name = "check_gir"
+        path = "tests/check_gir.rs"
+
+        [features]
+        v1_42 = ["pango-sys/v1_42"]
+        v1_44 = [
+            "v1_42",
+            "pango-sys/v1_44",
+        ]
+    ''')
+
+    CARGO_TOML_3 = textwrap.dedent('''\
+        [package]
+        name = "bits"
+        edition = "2021"
+        rust-version = "1.70"
+        version = "0.1.0"
+
+        [lib]
+        proc-macro = true
+        crate-type = ["lib"] # ignored
+    ''')
+
+    CARGO_TOML_PROFILE = textwrap.dedent('''\
+        [package]
+        name = "demo"
+        version = "0.1.0"
+        edition = "2021"
+
+        [profile.release]
+        opt-level = 3
+        debug = false
+        strip = "symbols"
+        debug-assertions = false
+        overflow-checks = false
+        lto = "thin"
+        panic = "abort"
+        incremental = false
+        codegen-units = 16
+
+        [profile.release.build-override]
+        opt-level = 0
+        codegen-units = 256
+
+        [profile.dev]
+        opt-level = "s"
+    ''')
+
+    CARGO_TOML_WS = textwrap.dedent('''\
+        [workspace]
+        resolver = "2"
+        members = ["tutorial"]
+
+        [workspace.package]
+        version = "0.14.0-alpha.1"
+        repository = "https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs"
+        edition = "2021"
+        rust-version = "1.83"
+
+        [workspace.dependencies]
+        glib = { path = "glib" }
+        gtk = { package = "gtk4", version = "0.9" }
+        once_cell = "1.0"
+        syn = { version = ">=1, <3", features = ["parse"] }
+
+        [workspace.lints.rust]
+        warnings = "deny"
+    ''')
+
+    def test_cargo_toml_ws_lints(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fname = os.path.join(tmpdir, 'Cargo.toml')
+            with open(fname, 'w', encoding='utf-8') as f:
+                f.write(self.CARGO_TOML_WS)
+            workspace_toml = load_toml(fname)
+
+        workspace = Workspace.from_raw(workspace_toml, tmpdir)
+        pkg = Manifest.from_raw({'package': {'name': 'foo'},
+                                 'lints': {'workspace': True}}, 'Cargo.toml', workspace)
+        lints = pkg.lints
+        self.assertEqual(lints[0].name, 'warnings')
+        self.assertEqual(lints[0].level, 'deny')
+        self.assertEqual(lints[0].priority, 0)
+
+        pkg = Manifest.from_raw({'package': {'name': 'bar'}}, 'Cargo.toml', workspace)
+        self.assertEqual(pkg.lints, [])
+
+    @staticmethod
+    def _exclude_workspace(tmpdir: str, members: T.List[str], exclude: T.List[str],
+                           default_members: T.Optional[T.List[str]] = None,
+                           root_package: bool = False) -> Workspace:
+        for d in ['a', 'b', 'sub/c', 'sub/d']:
+            os.makedirs(os.path.join(tmpdir, d), exist_ok=True)
+        raw_ws: T.Dict[str, T.Any] = {'members': members, 'exclude': exclude}
+        if default_members is not None:
+            raw_ws['default-members'] = default_members
+        raw: T.Dict[str, T.Any] = {'workspace': raw_ws}
+        if root_package:
+            raw['package'] = {'name': 'root', 'version': '0.1.0'}
+        return Workspace.from_raw(raw, tmpdir)
+
+    def test_cargo_toml_ws_exclude(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # a literal member takes precedence over exclude
+            ws = self._exclude_workspace(tmpdir, ['a', 'b'], ['b'])
+            self.assertEqual(sorted(ws.members), ['a', 'b'])
+
+            # results of glob expansion do not
+            ws = self._exclude_workspace(tmpdir, ['*'], ['b'])
+            self.assertEqual(sorted(ws.members), ['a', 'sub'])
+
+            # exclude entries are not globs
+            ws = self._exclude_workspace(tmpdir, ['*'], ['b*'])
+            self.assertEqual(sorted(ws.members), ['a', 'b', 'sub'])
+
+            # excluding a directory excludes everything below it
+            ws = self._exclude_workspace(tmpdir, ['sub/*'], ['sub'])
+            self.assertEqual(ws.members, [])
+
+            # an excluded package is not built by default either
+            ws = self._exclude_workspace(tmpdir, ['a', 'sub/*'], ['sub/c'], ['a', 'sub/c'])
+            self.assertEqual(sorted(ws.members), ['a', 'sub/d'])
+            self.assertEqual(ws.default_members, ['a'])
+
+            # excluding the workspace directory excludes literal members too
+            ws = self._exclude_workspace(tmpdir, ['a', 'b'], ['.'])
+            self.assertEqual(ws.members, [])
+            self.assertEqual(ws.default_members, [])
+
+            # but the root package remains a member of the workspace
+            ws = self._exclude_workspace(tmpdir, ['a', 'b'], ['.'], root_package=True)
+            self.assertEqual(ws.members, ['.'])
+            self.assertEqual(ws.default_members, ['.'])
+
+    def test_cargo_toml_ws_package(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fname = os.path.join(tmpdir, 'Cargo.toml')
+            with open(fname, 'w', encoding='utf-8') as f:
+                f.write(self.CARGO_TOML_WS)
+            workspace_toml = load_toml(fname)
+
+        workspace = Workspace.from_raw(workspace_toml, tmpdir)
+        pkg = Package.from_raw({'name': 'foo', 'version': {'workspace': True}}, workspace)
+        self.assertEqual(pkg.name, 'foo')
+        self.assertEqual(pkg.version, '0.14.0-alpha.1')
+        self.assertEqual(pkg.edition, '2015')
+        self.assertEqual(pkg.repository, None)
+
+    def test_update_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fname = os.path.join(tmpdir, 'Cargo.toml')
+            with open(fname, 'w', encoding='utf-8') as f:
+                f.write(self.CARGO_TOML_WS)
+            workspace_toml = load_toml(fname)
+
+        workspace = Workspace.from_raw(workspace_toml, tmpdir)
+        dep = Dependency.from_raw('syn', {'workspace': True, 'features': ['full']}, 'member', workspace)
+        self.assertEqual(dep.api, '1')
+        dep.update_version('=2.0.113')
+        self.assertEqual(dep.api, '2')
+
+    def test_cargo_toml_ws_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fname = os.path.join(tmpdir, 'Cargo.toml')
+            with open(fname, 'w', encoding='utf-8') as f:
+                f.write(self.CARGO_TOML_WS)
+            workspace_toml = load_toml(fname)
+
+        workspace = Workspace.from_raw(workspace_toml, tmpdir)
+        dep = Dependency.from_raw('glib', {'workspace': True}, 'member', workspace)
+        self.assertEqual(dep.package, 'glib')
+        self.assertEqual(dep.version, '')
+        self.assertTrue(dep.accepts_version('9999'))
+        self.assertEqual(dep.path, '../glib')
+        self.assertEqual(dep.features, [])
+
+        dep = Dependency.from_raw('gtk', {'workspace': True}, 'member', workspace)
+        self.assertEqual(dep.package, 'gtk4')
+        self.assertEqual(dep.version, '0.9')
+        self.assertTrue(dep.accepts_version('0.9'))
+        self.assertFalse(dep.accepts_version('0.10'))
+        self.assertEqual(dep.api, '0.9')
+        self.assertEqual(dep.features, [])
+
+        dep = Dependency.from_raw('once_cell', {'workspace': True, 'optional': True}, 'member', workspace)
+        self.assertEqual(dep.package, 'once_cell')
+        self.assertEqual(dep.version, '1.0')
+        self.assertTrue(dep.accepts_version('1.0'))
+        self.assertTrue(dep.accepts_version('1.23'))
+        self.assertFalse(dep.accepts_version('2.0'))
+        self.assertFalse(dep.accepts_version('2.0-pre1'))
+        self.assertEqual(dep.api, '1')
+        self.assertEqual(dep.features, [])
+        self.assertTrue(dep.optional)
+
+        dep = Dependency.from_raw('syn', {'workspace': True, 'features': ['full']}, 'member', workspace)
+        self.assertEqual(dep.package, 'syn')
+        self.assertEqual(dep.version, '>=1, <3')
+        self.assertTrue(dep.accepts_version('1.0'))
+        self.assertTrue(dep.accepts_version('2.0'))
+        self.assertFalse(dep.accepts_version('3.0'))
+        self.assertEqual(dep.api, '1')
+        self.assertEqual(sorted(set(dep.features)), ['full', 'parse'])
+
+    def test_cargo_toml_package(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fname = os.path.join(tmpdir, 'Cargo.toml')
+            with open(fname, 'w', encoding='utf-8') as f:
+                f.write(self.CARGO_TOML_1)
+            manifest_toml = load_toml(fname)
+            manifest = Manifest.from_raw(manifest_toml, 'Cargo.toml')
+
+        self.assertEqual(manifest.package.name, 'mandelbrot')
+        self.assertEqual(manifest.package.version, '0.1.0')
+        self.assertEqual(manifest.package.authors[0], 'Sebastian Dröge <sebastian@centricular.com>')
+        self.assertEqual(manifest.package.edition, '2018')
+        self.assertEqual(manifest.package.license, 'GPL-3.0')
+
+        print(manifest.package.metadata)
+        self.assertEqual(len(manifest.package.metadata), 1)
+
+    def test_cargo_toml_lints(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fname = os.path.join(tmpdir, 'Cargo.toml')
+            with open(fname, 'w', encoding='utf-8') as f:
+                f.write(self.CARGO_TOML_1)
+            manifest_toml = load_toml(fname)
+            manifest = Manifest.from_raw(manifest_toml, 'Cargo.toml')
+
+        self.assertEqual(len(manifest.lints), 3)
+        self.assertEqual(manifest.lints[0].name, 'clippy::pedantic')
+        self.assertEqual(manifest.lints[0].level, 'warn')
+        self.assertEqual(manifest.lints[0].priority, -1)
+        self.assertEqual(manifest.lints[0].check_cfg, None)
+
+        self.assertEqual(manifest.lints[1].name, 'unknown_lints')
+        self.assertEqual(manifest.lints[1].level, 'allow')
+        self.assertEqual(manifest.lints[1].priority, 0)
+        self.assertEqual(manifest.lints[1].check_cfg, None)
+
+        self.assertEqual(manifest.lints[2].name, 'unexpected_cfgs')
+        self.assertEqual(manifest.lints[2].level, 'deny')
+        self.assertEqual(manifest.lints[2].priority, 0)
+        self.assertEqual(manifest.lints[2].check_cfg, ['cfg(MESON)'])
+
+    def test_cargo_toml_lints_to_args(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fname = os.path.join(tmpdir, 'Cargo.toml')
+            with open(fname, 'w', encoding='utf-8') as f:
+                f.write(self.CARGO_TOML_1)
+            manifest_toml = load_toml(fname)
+            manifest = Manifest.from_raw(manifest_toml, 'Cargo.toml')
+
+        self.assertEqual(manifest.lints[0].to_arguments(False), ['-W', 'clippy::pedantic'])
+        self.assertEqual(manifest.lints[0].to_arguments(True), ['-W', 'clippy::pedantic'])
+        self.assertEqual(manifest.lints[1].to_arguments(False), ['-A', 'unknown_lints'])
+        self.assertEqual(manifest.lints[1].to_arguments(True), ['-A', 'unknown_lints'])
+        self.assertEqual(manifest.lints[2].to_arguments(False), ['-D', 'unexpected_cfgs'])
+        self.assertEqual(manifest.lints[2].to_arguments(True),
+                         ['-D', 'unexpected_cfgs', '--check-cfg', 'cfg(MESON)'])
+
+    def test_cargo_toml_dependencies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fname = os.path.join(tmpdir, 'Cargo.toml')
+            with open(fname, 'w', encoding='utf-8') as f:
+                f.write(self.CARGO_TOML_1)
+            manifest_toml = load_toml(fname)
+            manifest = Manifest.from_raw(manifest_toml, 'Cargo.toml')
+
+        self.assertEqual(len(manifest.dependencies), 6)
+        self.assertEqual(manifest.dependencies['gtk'][0].package, 'gtk4')
+        self.assertEqual(manifest.dependencies['gtk'][0].version, '0.9')
+        self.assertTrue(manifest.dependencies['gtk'][0].accepts_version('0.9'))
+        self.assertFalse(manifest.dependencies['gtk'][0].accepts_version('0.10'))
+        self.assertEqual(manifest.dependencies['gtk'][0].api, '0.9')
+        self.assertEqual(manifest.dependencies['num-complex'][0].package, 'num-complex')
+        self.assertEqual(manifest.dependencies['num-complex'][0].version, '0.4')
+        self.assertTrue(manifest.dependencies['num-complex'][0].accepts_version('0.4'))
+        self.assertFalse(manifest.dependencies['num-complex'][0].accepts_version('0.5'))
+        self.assertEqual(manifest.dependencies['rayon'][0].package, 'rayon')
+        self.assertEqual(manifest.dependencies['rayon'][0].version, '1.0')
+        self.assertTrue(manifest.dependencies['rayon'][0].accepts_version('1.0'))
+        self.assertTrue(manifest.dependencies['rayon'][0].accepts_version('1.23'))
+        self.assertFalse(manifest.dependencies['rayon'][0].accepts_version('2.0'))
+        self.assertFalse(manifest.dependencies['rayon'][0].accepts_version('2.0-pre1'))
+        self.assertEqual(manifest.dependencies['rayon'][0].api, '1')
+        self.assertEqual(manifest.dependencies['once_cell'][0].package, 'once_cell')
+        self.assertEqual(manifest.dependencies['once_cell'][0].version, '1')
+        self.assertTrue(manifest.dependencies['once_cell'][0].accepts_version('1.0'))
+        self.assertTrue(manifest.dependencies['once_cell'][0].accepts_version('1.23'))
+        self.assertFalse(manifest.dependencies['once_cell'][0].accepts_version('2.0'))
+        self.assertFalse(manifest.dependencies['once_cell'][0].accepts_version('2.0-pre1'))
+        self.assertEqual(manifest.dependencies['once_cell'][0].api, '1')
+        self.assertEqual(manifest.dependencies['async-channel'][0].package, 'async-channel')
+        self.assertEqual(manifest.dependencies['async-channel'][0].version, '2.1')
+        self.assertFalse(manifest.dependencies['async-channel'][0].accepts_version('2.0'))
+        self.assertTrue(manifest.dependencies['async-channel'][0].accepts_version('2.1'))
+        self.assertTrue(manifest.dependencies['async-channel'][0].accepts_version('2.23'))
+        self.assertFalse(manifest.dependencies['async-channel'][0].accepts_version('2.0'))
+        self.assertFalse(manifest.dependencies['async-channel'][0].accepts_version('2.0-pre1'))
+        self.assertEqual(manifest.dependencies['async-channel'][0].api, '2')
+        self.assertEqual(manifest.dependencies['zerocopy'][0].package, 'zerocopy')
+        self.assertEqual(manifest.dependencies['zerocopy'][0].version, '0.7')
+        self.assertTrue(manifest.dependencies['zerocopy'][0].accepts_version('0.7'))
+        self.assertFalse(manifest.dependencies['zerocopy'][0].accepts_version('0.8'))
+        self.assertEqual(manifest.dependencies['zerocopy'][0].features, ['derive'])
+        self.assertEqual(manifest.dependencies['zerocopy'][0].api, '0.7')
+
+        self.assertEqual(len(manifest.dev_dependencies), 1)
+        self.assertEqual(manifest.dev_dependencies['gir-format-check'][0].package, 'gir-format-check')
+        self.assertEqual(manifest.dev_dependencies['gir-format-check'][0].version, '^0.1')
+        self.assertTrue(manifest.dev_dependencies['gir-format-check'][0].accepts_version('0.1'))
+        self.assertFalse(manifest.dev_dependencies['gir-format-check'][0].accepts_version('0.2'))
+        self.assertEqual(manifest.dev_dependencies['gir-format-check'][0].api, '0.1')
+
+    def test_cargo_toml_proc_macro(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fname = os.path.join(tmpdir, 'Cargo.toml')
+            with open(fname, 'w', encoding='utf-8') as f:
+                f.write(self.CARGO_TOML_3)
+            manifest_toml = load_toml(fname)
+            manifest = Manifest.from_raw(manifest_toml, 'Cargo.toml')
+
+        self.assertEqual(manifest.lib.name, 'bits')
+        self.assertEqual(manifest.lib.crate_type, ['proc-macro'])
+        self.assertEqual(manifest.lib.path, 'src/lib.rs')
+
+        del manifest_toml['lib']['crate-type']
+        manifest = Manifest.from_raw(manifest_toml, 'Cargo.toml')
+        self.assertEqual(manifest.lib.name, 'bits')
+        self.assertEqual(manifest.lib.crate_type, ['proc-macro'])
+        self.assertEqual(manifest.lib.path, 'src/lib.rs')
+
+    def test_cargo_toml_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fname = os.path.join(tmpdir, 'Cargo.toml')
+            with open(fname, 'w', encoding='utf-8') as f:
+                f.write(self.CARGO_TOML_2)
+            manifest_toml = load_toml(fname)
+            manifest = Manifest.from_raw(manifest_toml, 'Cargo.toml')
+
+        self.assertEqual(manifest.lib.name, 'pango')
+        self.assertEqual(manifest.lib.crate_type, ['lib'])
+        self.assertEqual(manifest.lib.path, 'src/lib.rs')
+        self.assertEqual(manifest.lib.test, True)
+        self.assertEqual(manifest.lib.doctest, True)
+        self.assertEqual(manifest.lib.bench, True)
+        self.assertEqual(manifest.lib.doc, True)
+        self.assertEqual(manifest.lib.harness, True)
+        self.assertEqual(manifest.lib.edition, '2021')
+        self.assertEqual(manifest.lib.required_features, [])
+        self.assertEqual(manifest.lib.plugin, False)
+
+        self.assertEqual(len(manifest.test), 1)
+        self.assertEqual(manifest.test[0].name, 'check_gir')
+        self.assertEqual(manifest.test[0].crate_type, ['bin'])
+        self.assertEqual(manifest.test[0].path, 'tests/check_gir.rs')
+        self.assertEqual(manifest.lib.path, 'src/lib.rs')
+        self.assertEqual(manifest.test[0].test, True)
+        self.assertEqual(manifest.test[0].doctest, True)
+        self.assertEqual(manifest.test[0].bench, False)
+        self.assertEqual(manifest.test[0].doc, False)
+        self.assertEqual(manifest.test[0].harness, True)
+        self.assertEqual(manifest.test[0].edition, '2021')
+        self.assertEqual(manifest.test[0].required_features, [])
+        self.assertEqual(manifest.test[0].plugin, False)
+
+    def test_cargo_toml_system_deps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fname = os.path.join(tmpdir, 'Cargo.toml')
+            with open(fname, 'w', encoding='utf-8') as f:
+                f.write(self.CARGO_TOML_2)
+            manifest_toml = load_toml(fname)
+            manifest = Manifest.from_raw(manifest_toml, 'Cargo.toml')
+
+        self.assertIn('system-deps', manifest.package.metadata)
+
+        self.assertEqual(len(manifest.system_dependencies), 1)
+        self.assertEqual(manifest.system_dependencies['pango'].name, 'pango')
+        self.assertEqual(manifest.system_dependencies['pango'].version, '1.40')
+        self.assertEqual(manifest.system_dependencies['pango'].meson_version, ['>=1.40'])
+        self.assertEqual(manifest.system_dependencies['pango'].optional, False)
+        self.assertEqual(manifest.system_dependencies['pango'].feature, None)
+
+        self.assertEqual(len(manifest.system_dependencies['pango'].feature_overrides), 1)
+        self.assertEqual(manifest.system_dependencies['pango'].feature_overrides['v1_42'], {'version': '1.42'})
+
+    def test_cargo_toml_features(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fname = os.path.join(tmpdir, 'Cargo.toml')
+            with open(fname, 'w', encoding='utf-8') as f:
+                f.write(self.CARGO_TOML_2)
+            manifest_toml = load_toml(fname)
+            manifest = Manifest.from_raw(manifest_toml, 'Cargo.toml')
+
+        self.assertEqual(len(manifest.features), 3)
+        self.assertEqual(manifest.features['v1_42'], ['pango-sys/v1_42'])
+        self.assertEqual(manifest.features['v1_44'], ['v1_42', 'pango-sys/v1_44'])
+        self.assertEqual(manifest.features['default'], [])
+
+    def test_cargo_toml_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fname = os.path.join(tmpdir, 'Cargo.toml')
+            with open(fname, 'w', encoding='utf-8') as f:
+                f.write(self.CARGO_TOML_PROFILE)
+            manifest_toml = load_toml(fname)
+            manifest = Manifest.from_raw(manifest_toml, 'Cargo.toml')
+
+        self.assertEqual(sorted(manifest.profile), ['dev', 'release'])
+        release = manifest.profile['release']
+        self.assertEqual(release.opt_level, '3')
+        self.assertEqual(release.debug, False)
+        self.assertEqual(release.strip, True)
+        self.assertEqual(release.debug_assertions, False)
+        self.assertEqual(release.overflow_checks, False)
+        self.assertEqual(release.lto, True)
+        self.assertEqual(release.lto_mode, 'thin')
+        self.assertEqual(release.panic, 'abort')
+        self.assertEqual(release.incremental, False)
+        self.assertEqual(release.codegen_units, 16)
+
+        build_override = release.build_override
+        assert build_override is not None
+        self.assertEqual(build_override.opt_level, '0')
+        self.assertEqual(build_override.codegen_units, 256)
+        self.assertIsNone(build_override.lto)
+        self.assertIsNone(build_override.lto_mode)
+
+        self.assertEqual(manifest.profile['dev'].opt_level, 's')
+
+    def test_cargo_toml_profile_to_meson_options(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fname = os.path.join(tmpdir, 'Cargo.toml')
+            with open(fname, 'w', encoding='utf-8') as f:
+                f.write(self.CARGO_TOML_PROFILE)
+            manifest = Manifest.from_raw(load_toml(fname), 'Cargo.toml')
+
+        release = manifest.profile['release']
+        host = release.to_meson_options(MachineChoice.HOST)
+        self.assertEqual(host['optimization'], '3')
+        self.assertEqual(host['rust_codegen_units'], 16)
+        self.assertEqual(host['b_lto_mode'], 'thin')
+        self.assertEqual(host['rust_panic'], 'abort')
+
+        build = release.to_meson_options(MachineChoice.BUILD)
+        # On the build machine the [build-override] keys are layered on top.
+        self.assertEqual(build['optimization'], '0')
+        self.assertEqual(build['rust_codegen_units'], 256)
+        # keys not set by build-override stay from the base profile
+        self.assertEqual(build['b_lto_mode'], 'thin')
+        self.assertEqual(build['rust_panic'], 'abort')

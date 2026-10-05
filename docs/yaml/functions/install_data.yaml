@@ -2,6 +2,9 @@ name: install_data
 returns: void
 description: |
   Installs files from the source tree that are listed as positional arguments.
+  Please note that this can only install static files from the source tree.
+  Generated files are installed via the `install_dir:` kwarg on the respective
+  generators, such as `custom_target()` or `configure_file()`.
 
   See [Installing](Installing.md) for more examples.
 
@@ -13,7 +16,7 @@ varargs:
 warnings:
   - the `install_mode` kwarg ignored integer values between 0.59.0 -- 1.1.0.
   - an omitted `install_dir` kwarg did not work correctly inside of a subproject until 1.3.0.
-  - an omitted `install_dir` kwarg did not work correctly when combined with the `preserve_path` kwarg untill 1.3.0.
+  - an omitted `install_dir` kwarg did not work correctly when combined with the `preserve_path` kwarg until 1.3.0.
 
 kwargs:
   install_dir:
@@ -25,7 +28,7 @@ kwargs:
       If omitted, the directory defaults to `{datadir}/{projectname}` *(since 0.45.0)*.
 
   install_mode:
-    type: list[str | int]
+    type: array[str | int]
     since: 0.38.0
     description: |
       specify the file mode in symbolic format and
@@ -58,16 +61,16 @@ kwargs:
       This is equivalent to GNU Automake's `nobase` option.
 
   rename:
-    type: list[str]
+    type: array[str]
     since: 0.46.0
     description: |
-      If specified renames each source file into corresponding file from `rename` list.
+      If specified renames each source file into corresponding file from `rename` array.
       Nested paths are allowed and they are
-      joined with `install_dir`. Length of `rename` list must be equal to
+      joined with `install_dir`. Length of `rename` array must be equal to
       the number of sources.
 
   sources:
-    type: list[file | str]
+    type: array[file | str]
     description: Additional files to install.
 
   follow_symlinks:

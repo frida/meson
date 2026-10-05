@@ -3,47 +3,40 @@
 from __future__ import annotations
 
 from ...interpreterbase import (
-    FeatureBroken, InvalidArguments, MesonOperator, ObjectHolder, KwargInfo,
-    noKwargs, noPosargs, typed_operator, typed_kwargs
+    InterpreterObject, MesonOperator, ObjectHolder,
+    FeatureBroken, InvalidArguments, KwargInfo,
+    typed_operator, TypedArgs
 )
+from ..type_checking import in_set_validator
 
 import typing as T
 
 if T.TYPE_CHECKING:
-    # Object holders need the actual interpreter
-    from ...interpreter import Interpreter
+    from typing_extensions import Literal, TypedDict
+
     from ...interpreterbase import TYPE_var, TYPE_kwargs
 
+    class ToStringKw(TypedDict):
+        fill: int
+        format: Literal['dec', 'hex', 'oct', 'bin']
+
 class IntegerHolder(ObjectHolder[int]):
-    def __init__(self, obj: int, interpreter: 'Interpreter') -> None:
-        super().__init__(obj, interpreter)
-        self.methods.update({
-            'is_even': self.is_even_method,
-            'is_odd': self.is_odd_method,
-            'to_string': self.to_string_method,
-        })
+    # Operators that only require type checks
+    TRIVIAL_OPERATORS = {
+        # Arithmetic
+        MesonOperator.UMINUS: (None, lambda obj, x: -obj.held_object),
+        MesonOperator.PLUS: (int, lambda obj, x: obj.held_object + x),
+        MesonOperator.MINUS: (int, lambda obj, x: obj.held_object - x),
+        MesonOperator.TIMES: (int, lambda obj, x: obj.held_object * x),
 
-        self.trivial_operators.update({
-            # Arithmetic
-            MesonOperator.UMINUS: (None, lambda x: -self.held_object),
-            MesonOperator.PLUS: (int, lambda x: self.held_object + x),
-            MesonOperator.MINUS: (int, lambda x: self.held_object - x),
-            MesonOperator.TIMES: (int, lambda x: self.held_object * x),
-
-            # Comparison
-            MesonOperator.EQUALS: (int, lambda x: self.held_object == x),
-            MesonOperator.NOT_EQUALS: (int, lambda x: self.held_object != x),
-            MesonOperator.GREATER: (int, lambda x: self.held_object > x),
-            MesonOperator.LESS: (int, lambda x: self.held_object < x),
-            MesonOperator.GREATER_EQUALS: (int, lambda x: self.held_object >= x),
-            MesonOperator.LESS_EQUALS: (int, lambda x: self.held_object <= x),
-        })
-
-        # Use actual methods for functions that require additional checks
-        self.operators.update({
-            MesonOperator.DIV: self.op_div,
-            MesonOperator.MOD: self.op_mod,
-        })
+        # Comparison
+        MesonOperator.EQUALS: (int, lambda obj, x: obj.held_object == x),
+        MesonOperator.NOT_EQUALS: (int, lambda obj, x: obj.held_object != x),
+        MesonOperator.GREATER: (int, lambda obj, x: obj.held_object > x),
+        MesonOperator.LESS: (int, lambda obj, x: obj.held_object < x),
+        MesonOperator.GREATER_EQUALS: (int, lambda obj, x: obj.held_object >= x),
+        MesonOperator.LESS_EQUALS: (int, lambda obj, x: obj.held_object <= x),
+    }
 
     def display_name(self) -> str:
         return 'int'
@@ -55,31 +48,40 @@ class IntegerHolder(ObjectHolder[int]):
                                      location=self.current_node)
         return super().operator_call(operator, other)
 
-    @noKwargs
-    @noPosargs
+    @TypedArgs('int.is_even')
+    @InterpreterObject.method('is_even')
     def is_even_method(self, args: T.List[TYPE_var], kwargs: TYPE_kwargs) -> bool:
         return self.held_object % 2 == 0
 
-    @noKwargs
-    @noPosargs
+    @TypedArgs('int.is_odd')
+    @InterpreterObject.method('is_odd')
     def is_odd_method(self, args: T.List[TYPE_var], kwargs: TYPE_kwargs) -> bool:
         return self.held_object % 2 != 0
 
-    @typed_kwargs(
+    @TypedArgs(
         'to_string',
-        KwargInfo('fill', int, default=0, since='1.3.0')
+        kw_types=[
+            KwargInfo('fill', int, default=0, since='1.3.0'),
+            KwargInfo('format', str, default='dec', since='1.12.0',
+                      validator=in_set_validator({'dec', 'hex', 'oct', 'bin'})),
+        ]
     )
-    @noPosargs
-    def to_string_method(self, args: T.List[TYPE_var], kwargs: T.Dict[str, T.Any]) -> str:
-        return str(self.held_object).zfill(kwargs['fill'])
+    @InterpreterObject.method('to_string')
+    def to_string_method(self, args: T.List[TYPE_var], kwargs: ToStringKw) -> str:
+        format_codes = {'hex': 'x', 'oct': 'o', 'bin': 'b', 'dec': 'd'}
+        return '{:#0{fill}{format}}'.format(self.held_object,
+                                            fill=max(0, kwargs['fill']),
+                                            format=format_codes[kwargs['format']])
 
     @typed_operator(MesonOperator.DIV, int)
+    @InterpreterObject.operator(MesonOperator.DIV)
     def op_div(self, other: int) -> int:
         if other == 0:
             raise InvalidArguments('Tried to divide by 0')
         return self.held_object // other
 
     @typed_operator(MesonOperator.MOD, int)
+    @InterpreterObject.operator(MesonOperator.MOD)
     def op_mod(self, other: int) -> int:
         if other == 0:
             raise InvalidArguments('Tried to divide by 0')

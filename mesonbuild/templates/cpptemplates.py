@@ -1,18 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2019 The Meson development team
+# Copyright © 2023-2025 Intel Corporation
 
 from __future__ import annotations
+import typing as T
 
 from mesonbuild.templates.sampleimpl import FileHeaderImpl
 
+if T.TYPE_CHECKING:
+    from ..minit import Arguments
 
 hello_cpp_template = '''#include <iostream>
 
 #define PROJECT_NAME "{project_name}"
 
 int main(int argc, char **argv) {{
-    if(argc != 1) {{
-        std::cout << argv[0] <<  "takes no arguments.\\n";
+    if (argc != 1) {{
+        std::cout << argv[0] << " takes no arguments.\\n";
         return 1;
     }}
     std::cout << "This is project " << PROJECT_NAME << ".\\n";
@@ -20,13 +24,26 @@ int main(int argc, char **argv) {{
 }}
 '''
 
-hello_cpp_meson_template = '''project('{project_name}', 'cpp',
+hello_cpp_meson_template = '''project(
+  '{project_name}',
+  'cpp',
   version : '{version}',
-  default_options : ['warning_level=3',
-                     'cpp_std=c++14'])
+  meson_version : '>= {meson_version}',
+  default_options : ['warning_level=3', 'cpp_std=c++14'],
+)
 
-exe = executable('{exe_name}', '{source_name}',
-  install : true)
+dependencies = [{dependencies}
+]
+
+sources = [{source_files}
+]
+
+exe = executable(
+  '{exe_name}',
+  sources,
+  install : true,
+  dependencies : dependencies,
+)
 
 test('basic', exe)
 '''
@@ -37,6 +54,12 @@ lib_hpp_template = '''#pragma once
     #define {utoken}_PUBLIC __declspec(dllexport)
   #else
     #define {utoken}_PUBLIC __declspec(dllimport)
+  #endif
+#elif defined __OS2__
+  #ifdef BUILDING_{utoken}
+    #define {utoken}_PUBLIC __declspec(dllexport)
+  #else
+    #define {utoken}_PUBLIC
   #endif
 #else
   #ifdef BUILDING_{utoken}
@@ -83,7 +106,7 @@ lib_cpp_test_template = '''#include <{header_file}>
 #include <iostream>
 
 int main(int argc, char **argv) {{
-    if(argc != 1) {{
+    if (argc != 1) {{
         std::cout << argv[0] << " takes no arguments.\\n";
         return 1;
     }}
@@ -92,28 +115,48 @@ int main(int argc, char **argv) {{
 }}
 '''
 
-lib_cpp_meson_template = '''project('{project_name}', 'cpp',
+lib_cpp_meson_template = '''project(
+  '{project_name}',
+  'cpp',
   version : '{version}',
-  default_options : ['warning_level=3', 'cpp_std=c++14'])
+  meson_version : '>= {meson_version}',
+  default_options : ['warning_level=3', 'cpp_std=c++14'],
+)
+
+dependencies = [{dependencies}
+]
 
 # These arguments are only used to build the shared library
 # not the executables that use the library.
 lib_args = ['-DBUILDING_{utoken}']
 
-shlib = shared_library('{lib_name}', '{source_file}',
+sources = [{source_files}
+]
+
+lib = library(
+  '{lib_name}',
+  sources,
   install : true,
-  cpp_args : lib_args,
+  cpp_shared_args : lib_args,
   gnu_symbol_visibility : 'hidden',
+  dependencies : dependencies,
 )
 
-test_exe = executable('{test_exe_name}', '{test_source_file}',
-  link_with : shlib)
+test_exe = executable(
+  '{test_exe_name}',
+  '{test_source_file}',
+  dependencies : dependencies,
+  link_with : lib,
+)
 test('{test_name}', test_exe)
 
 # Make this library usable as a Meson subproject.
 {ltoken}_dep = declare_dependency(
-  include_directories: include_directories('.'),
-  link_with : shlib)
+  include_directories : include_directories('.'),
+  dependencies : dependencies,
+  link_with : lib,
+)
+meson.override_dependency('{project_name}', {ltoken}_dep)
 
 # Make this library usable from the system's
 # package manager.
@@ -121,12 +164,9 @@ install_headers('{header_file}', subdir : '{header_dir}')
 
 pkg_mod = import('pkgconfig')
 pkg_mod.generate(
-  name : '{project_name}',
-  filebase : '{ltoken}',
+  lib,
   description : 'Meson sample project.',
   subdirs : '{header_dir}',
-  libraries : shlib,
-  version : '{version}',
 )
 '''
 
@@ -141,3 +181,7 @@ class CppProject(FileHeaderImpl):
     lib_header_template = lib_hpp_template
     lib_test_template = lib_cpp_test_template
     lib_meson_template = lib_cpp_meson_template
+
+    def __init__(self, args: Arguments):
+        super().__init__(args)
+        self.meson_version = '1.3.0'

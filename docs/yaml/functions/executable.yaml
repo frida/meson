@@ -4,9 +4,9 @@ description: |
   Creates a new executable. The first argument specifies its name and
   the remaining positional arguments define the input files to use.
 
-  The lists for the kwargs (such as `sources`, `objects`, and `dependencies`) are
-  always flattened, which means you can freely nest and add lists while
-  creating the final list.
+  The arrays for the kwargs (such as `sources`, `objects`, and `dependencies`) are
+  always flattened, which means you can freely nest and add arrays while
+  creating the final array.
 
   The returned object also has methods that are documented in [[@exe]].
 
@@ -21,20 +21,34 @@ varargs_inherit: _build_target_base
 kwargs_inherit: _build_target_base
 
 kwargs:
+  android_exe_type:
+    type: str
+    default: "'executable'"
+    since: 1.8.0
+    description: |
+      Specifies the intended target of the executable. This can either be
+      `executable`, if the intended usecase is to run the executable using
+      fork + exec, or `application` if the executable is supposed to be
+      loaded as shared object by the android runtime.
+
+
   export_dynamic:
     type: bool
     since: 0.45.0
     description: |
        when set to true causes the target's symbols to be
-        dynamically exported, allowing modules built using the
-        [[shared_module]] function to refer to functions,
-        variables and other symbols defined in the executable itself. Implies
-        the `implib` argument.
+       dynamically exported, allowing modules built using the
+       [[shared_module]] function to refer to functions,
+       variables and other symbols defined in the executable itself.
 
   implib:
     type: bool | str
     since: 0.42.0
     description: |
+      When set to a string, that will be the name of a generated import library.
+
+      *Since 1.10.0* passing a boolean value is deprecated.
+
       When set to true, an import library is generated for the
       executable (the name of the import library is based on *exe_name*).
       Alternatively, when set to a string, that gives the base name for

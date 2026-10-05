@@ -80,11 +80,29 @@ string_var = '42'
 num = string_var.to_int()
 ```
 
+Hexadecimal, octal, and binary strings can be converted to numbers since
+1.12.0:
+
+```meson
+hex_var = '0xFF'.to_int()    # 255
+oct_var = '0o755'.to_int()   # 493
+bin_var = '0b1010'.to_int()  # 10
+```
+
 Numbers can be converted to a string:
 
 ```meson
 int_var = 42
 string_var = int_var.to_string()
+```
+
+Numbers can be formatted as hexadecimal, octal, or binary strings since 1.12.0:
+
+```meson
+int_var = 255
+hex_str = int_var.to_string(format: 'hex')  # '0xff'
+oct_str = int_var.to_string(format: 'oct')  # '0o377'
+bin_str = int_var.to_string(format: 'bin')  # '0b11111111'
 ```
 
 ## Booleans
@@ -150,6 +168,8 @@ combined = str1 + '_' + str2 # combined is now abc_xyz
 
 You can concatenate any two strings using `/` as an operator to build paths.
 This will always use `/` as the path separator on all platforms.
+If any one of the individual segments is an absolute path, all segments before
+it are dropped.  For example:
 
 ```meson
 joined = '/usr/share' / 'projectname'    # => /usr/share/projectname
@@ -564,7 +584,7 @@ executable('exe1', 'foo.c', 'bar.c', 'foobar.c')
 
 Because of an internal implementation detail, the following syntax
 is currently also supported, even though the first argument of
-[[executable]] is a single [[@str]] and not a [[@list]]:
+[[executable]] is a single [[@str]] and not a [[@array]]:
 
 ```meson
 # WARNING: This example is only valid because of an internal

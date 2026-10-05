@@ -11,6 +11,7 @@ import struct
 import shutil
 import subprocess
 import typing as T
+import zipfile
 
 from ..mesonlib import OrderedSet, generate_list, Popen_safe
 
@@ -25,14 +26,289 @@ DT_MIPS_RLD_MAP_REL = 1879048245
 # Global cache for tools
 INSTALL_NAME_TOOL = False
 
+# -------------------AIX-------------------------
+# Reference documents:
+# https://www.ibm.com/docs/en/aix/7.1?topic=formats-xcoff-object-file-format
+# https://www.ibm.com/docs/en/aix/7.2?topic=formats-ar-file-format-big
+
+# Size of magic number
+XCOFF_MAGIC_SIZE = 2
+
+
+def align(value: int, align_bytes: int) -> int:
+    # Function used by AIX to align value to align_bytes
+    align_bytes = 1 << align_bytes
+    return ((value + align_bytes - 1) // align_bytes) * align_bytes
+
+
+class XcoffFixedLengthHeader:
+    # AIX archive fixed length header (struct fl_hdr)
+    FL_HDR_SIZE = 128
+    FL_HDR_FORMAT = '8s 20s 20s 20s 20s 20s 20s'
+
+    def __init__(self, file: T.BinaryIO) -> None:
+        header_data = file.read(self.FL_HDR_SIZE)
+        fl_magic, fl_memoff, fl_gstoff, fl_gst64off, fl_fstmoff, fl_lstmoff, fl_freeoff = struct.unpack(
+            self.FL_HDR_FORMAT, header_data
+        )
+        self.fl_magic = fl_magic
+        self.fl_fstmoff = int(fl_fstmoff)
+
+
+class XcoffArchiveHeader:
+    # AIX archive header (struct ar_hdr)
+    AR_HDR_SIZE = 114
+    AR_HDR_FORMAT = '20s 20s 20s 12s 12s 12s 12s 4s 2s'
+
+    def __init__(self, file: T.BinaryIO) -> None:
+        header_data = file.read(self.AR_HDR_SIZE)
+        ar_size, ar_nxtmem, ar_prvmem, ar_date, ar_uid, ar_gid, ar_mode, ar_namlen, _ar_name = struct.unpack(
+            self.AR_HDR_FORMAT, header_data
+        )
+        ar_namlen_int = int(ar_namlen.strip())
+        # The Magic number always starts at the even byte boundary
+        self.ar_namlen = ar_namlen_int if ar_namlen_int % 2 == 0 else ar_namlen_int + 1
+        # Seek past the archive member name
+        file.seek(self.ar_namlen, os.SEEK_CUR)
+
+
+class XcoffCompositeFileHeader:
+    # XCOFF composite file header
+    CFH_HDR_SIZE = 24
+    CFH_HDR_SIZE_32 = 20
+    CFH_HDR_FORMAT = '2s 2s 4s 8s 2s 2s 4s'
+    CFH_HDR_FORMAT_32 = '2s 2s 4s 4s 4s 2s 2s'
+
+    def __init__(self, file: T.BinaryIO, magic: int) -> None:
+        if magic == 0x01DF:
+            cfh_header_data = file.read(self.CFH_HDR_SIZE_32)
+            f_magic, f_nscns, f_timdat, f_symptr, f_nsyms, f_opthdr, f_flags = struct.unpack(
+                self.CFH_HDR_FORMAT_32, cfh_header_data
+            )
+        else:
+            cfh_header_data = file.read(self.CFH_HDR_SIZE)
+            f_magic, f_nscns, f_timdat, f_symptr, f_opthdr, f_flags, f_nsyms = struct.unpack(
+                self.CFH_HDR_FORMAT, cfh_header_data
+            )
+        self.f_flags = int.from_bytes(f_flags, byteorder='big')
+        self.f_opthdr = int.from_bytes(f_opthdr, byteorder='big')
+
+
+class XcoffAuxiliaryHeader:
+    # XCOFF auxiliary header
+    AUX_HDR_SIZE = 120
+    AUX_HDR_SIZE_32 = 72
+    AUX_HDR_FORMAT = '2s 2s 4s 8s 8s 8s 2s 2s 2s 2s 2s 2s 2s 2s 2s 1s 1s 1s 1s 1s 1s 8s 8s 8s 8s 8s 8s 2s 2s 2s 10s'
+    AUX_HDR_FORMAT_32 = '2s 2s 4s 4s 4s 4s 4s 4s 4s 2s 2s 2s 2s 2s 2s 2s 2s 2s 1s 1s 4s 4s 4s 1s 1s 1s 1s 2s 2s'
+
+    def __init__(self, file: T.BinaryIO, magic: int, opthdr_size: int) -> None:
+        if magic == 0x01DF:
+            if opthdr_size < self.AUX_HDR_SIZE_32:
+                sys.exit(f'Error: Auxiliary header size {opthdr_size} is too small for 32-bit XCOFF')
+            aux_header_data = file.read(self.AUX_HDR_SIZE_32)
+            if len(aux_header_data) < self.AUX_HDR_SIZE_32:
+                sys.exit(f'Error: Could not read auxiliary header, got {len(aux_header_data)} bytes, expected {self.AUX_HDR_SIZE_32}')
+            (o_mflags, o_vstamp, o_tsize, o_dsize, o_bsize, o_entry, o_text_start, o_data_start, o_toc,
+             o_snentry, o_sntext, o_sndata, o_sntoc, o_snloader, o_snbss, o_algntext, o_algndata, o_modtype,
+             o_cpuflag, o_cputype, o_maxstack, o_maxdata, o_debugger, o_textpsize, o_datapsize, o_stackpsize,
+             o_flags, o_sntdata, o_sntbss) = struct.unpack(self.AUX_HDR_FORMAT_32, aux_header_data)
+        else:
+            if opthdr_size < self.AUX_HDR_SIZE:
+                sys.exit(f'Error: Auxiliary header size {opthdr_size} is too small for 64-bit XCOFF')
+            aux_header_data = file.read(self.AUX_HDR_SIZE)
+            if len(aux_header_data) < self.AUX_HDR_SIZE:
+                sys.exit(f'Error: Could not read auxiliary header, got {len(aux_header_data)} bytes, expected {self.AUX_HDR_SIZE}')
+            (o_mflags, o_vstamp, o_debugger, o_text_start, o_data_start, o_toc, o_snentry, o_sntext, o_sndata,
+             o_sntoc, o_snloader, o_snbss, o_algntext, o_algndata, o_modtype, o_cpuflag, o_cputype, o_textpsize,
+             o_datapsize, o_stackpsize, o_flags, o_tsize, o_dsize, o_bsize, o_entry, o_maxstack, o_maxdata,
+             o_sntdata, o_sntbss, o_x64flags, dummy) = struct.unpack(self.AUX_HDR_FORMAT, aux_header_data)
+
+        self.o_algntext = int.from_bytes(o_algntext, byteorder='big')
+        self.o_algndata = int.from_bytes(o_algndata, byteorder='big')
+        self.o_snloader = int.from_bytes(o_snloader, byteorder='big')
+
+
+class XcoffSectionHeader:
+    # XCOFF section header
+    SCN_HDR_SIZE = 72
+    SCN_HDR_SIZE_32 = 40
+    SCN_HDR_FORMAT = '8s 8s 8s 8s 8s 8s 8s 4s 4s 4s 4s'
+    SCN_HDR_FORMAT_32 = '8s 4s 4s 4s 4s 4s 4s 2s 2s 2s 2s'
+
+    def __init__(self, file: T.BinaryIO, magic: int) -> None:
+        if magic == 0x01DF:
+            scn_header_data = file.read(self.SCN_HDR_SIZE_32)
+            if len(scn_header_data) < self.SCN_HDR_SIZE_32:
+                raise EOFError('End of archive member reached')
+            (s_name, s_paddr, s_vaddr, s_size, s_scnptr, s_relptr, s_lnnoptr, s_nreloc, s_nlnno, s_flags,
+             dummy) = struct.unpack(self.SCN_HDR_FORMAT_32, scn_header_data)
+        else:
+            scn_header_data = file.read(self.SCN_HDR_SIZE)
+            if len(scn_header_data) < self.SCN_HDR_SIZE:
+                raise EOFError('End of archive member reached')
+            (s_name, s_paddr, s_vaddr, s_size, s_scnptr, s_relptr, s_lnnoptr, s_nreloc, s_nlnno, s_flags,
+             dummy) = struct.unpack(self.SCN_HDR_FORMAT, scn_header_data)
+        self.s_scnptr = int.from_bytes(s_scnptr, byteorder='big')
+
+
+class XcoffLoaderHeader:
+    # XCOFF loader header
+    LDR_HDR_SIZE = 56
+    LDR_HDR_SIZE_32 = 32
+    LDR_HDR_FORMAT = '4s 4s 4s 4s 4s 4s 8s 8s 8s 8s'
+    LDR_HDR_FORMAT_32 = '4s 4s 4s 4s 4s 4s 4s 4s'
+
+    def __init__(self, file: T.BinaryIO, magic: int) -> None:
+        if magic == 0x01DF:
+            ldr_header_data = file.read(self.LDR_HDR_SIZE_32)
+            (l_version, l_nsyms, l_nreloc, l_istlen, l_nimpid, l_impoff, l_stlen,
+             l_stoff) = struct.unpack(self.LDR_HDR_FORMAT_32, ldr_header_data)
+        else:
+            ldr_header_data = file.read(self.LDR_HDR_SIZE)
+            (l_version, l_nsyms, l_nreloc, l_istlen, l_nimpid, l_stlen, l_impoff, l_stoff, l_symoff,
+             l_rldoff) = struct.unpack(self.LDR_HDR_FORMAT, ldr_header_data)
+        self.l_impoff = int.from_bytes(l_impoff, byteorder='big')
+        self.l_istlen = int.from_bytes(l_istlen, byteorder='big')
+
+
+def traverse_xcoff(file: T.BinaryIO, rpath_dirs_to_remove: T.Set[bytes], new_rpath: T.Optional[bytes], verbose: bool = True) -> None:
+    """Traverse XCOFF file or archive and modify Libpath entries.
+
+    Handles both standalone XCOFF shared objects (.so) and XCOFF archives (.a).
+    Archives are detected by magic number and processed member by member.
+    """
+    def dummy_print(*args: object) -> None:
+        pass
+    log_msg: T.Callable[..., None]
+    log_msg = print if verbose else dummy_print
+
+    # Detect if this is an archive by checking for magic number
+    magic_check = file.read(8)
+    file.seek(0)
+
+    # Read archive headers if this is an archive
+    ar_header: T.Optional[XcoffArchiveHeader] = None
+    if magic_check == b'<bigaf>\n':
+        fl_header = XcoffFixedLengthHeader(file)
+        file.seek(fl_header.fl_fstmoff)
+        ar_header = XcoffArchiveHeader(file)
+
+    composite_header_pos = file.tell()
+    # Read XCOFF magic number
+    magic_data = file.read(XCOFF_MAGIC_SIZE)
+    if len(magic_data) != XCOFF_MAGIC_SIZE:
+        sys.exit(0)
+    magic_number = struct.unpack('>H', magic_data)[0]  # Big-endian 16-bit integer
+    if magic_number == 0x01DF:
+        log_msg(' Changing Libpath for a 32-bit Shared Object')
+    elif magic_number == 0x01F7:
+        log_msg(' Changing Libpath for a 64-bit Shared Object')
+    else:
+        log_msg(' Not a shared object')
+        sys.exit(0)
+    # Reposition to start of XCOFF headers
+    file.seek(composite_header_pos)
+    cfh_header = XcoffCompositeFileHeader(file, magic_number)
+    if not cfh_header.f_flags & 0x2000:
+        log_msg('Did not change rpath since not a shared library/archive')
+        return
+    # Read auxiliary header
+    aux_header = XcoffAuxiliaryHeader(file, magic_number, cfh_header.f_opthdr)
+
+    # Calculate the bytes_to_align
+    bytes_to_align = max(aux_header.o_algntext, aux_header.o_algndata)
+
+    # Seek to section header and read it
+    if magic_number == 0x01DF:
+        file.seek((aux_header.o_snloader - 1) * XcoffSectionHeader.SCN_HDR_SIZE_32, os.SEEK_CUR)
+    else:
+        file.seek((aux_header.o_snloader - 1) * XcoffSectionHeader.SCN_HDR_SIZE, os.SEEK_CUR)
+    try:
+        scn_header = XcoffSectionHeader(file, magic_number)
+    except EOFError:
+        return  # End of archive member, nothing to fix
+
+    header_len = 0
+    if ar_header:
+        header_len = XcoffFixedLengthHeader.FL_HDR_SIZE + XcoffArchiveHeader.AR_HDR_SIZE + ar_header.ar_namlen
+        scnptrFromArchiveStart = scn_header.s_scnptr + align(header_len, bytes_to_align)
+    else:
+        scnptrFromArchiveStart = scn_header.s_scnptr
+
+    file.seek(scnptrFromArchiveStart)
+
+    # Read loader header
+    ldr_header = XcoffLoaderHeader(file, magic_number)
+
+    if ar_header:
+        scnptrFromArchiveStartPlusOff = scn_header.s_scnptr + ldr_header.l_impoff + align(header_len, bytes_to_align)
+    else:
+        scnptrFromArchiveStartPlusOff = scn_header.s_scnptr + ldr_header.l_impoff
+    file.seek(scnptrFromArchiveStartPlusOff)
+
+    # Read and update libpath
+    libpath = file.read(ldr_header.l_istlen)
+    build_libpath = libpath.split(b'\x00')[0]
+    # Build the new rpath by merging new_rpath with existing paths (excluding removed ones)
+    new_rpaths: OrderedSet[bytes] = OrderedSet()
+    if new_rpath:
+        new_rpaths.update(new_rpath.split(b':'))
+
+    new_rpaths.update(
+        path
+        for path in build_libpath.split(b':')
+        if path and path not in rpath_dirs_to_remove
+    )
+
+    install_rpath = b':'.join(new_rpaths)
+
+    # If the length of the build_rpath length is < install_rpath length then we do not have space to write
+    # the same hence exit. Otherwise, we can and the length has to be the same as build_rpath.
+    # If the install_rpath length is less than build_rpath length then pad the difference
+    if len(install_rpath) > len(build_libpath):
+        sys.exit('Error: install_rpath is bigger than build_rpath')
+    # Pad with colon bytes to match build_libpath length
+    install_rpath = install_rpath + (b':' * (len(build_libpath) - len(install_rpath)))
+    file.seek(scnptrFromArchiveStartPlusOff)
+    file.write(install_rpath)
+    log_msg(f'Successfully changed libpath from {build_libpath!r} to {install_rpath!r}')
+
+
+def fix_aix(fname: str, rpath_dirs_to_remove: T.Set[bytes], new_rpath: T.Optional[bytes], verbose: bool = True) -> None:
+    """Writes Libpath to an xcoff shared object.
+
+    In AIX, shared modules are .so files and shared libraries are in .a archives.
+    Follows the same calling convention as fix_elf:
+    - Errors: sys.exit('error message')
+    - Wrong file type: sys.exit(0)
+    - Success: return normally
+    """
+    if new_rpath is None:
+        return
+
+    try:
+        with open(fname, 'r+b') as file:
+            traverse_xcoff(file, rpath_dirs_to_remove, new_rpath, verbose)
+    except FileNotFoundError:
+        sys.exit(f'Error: File not found: {fname}')
+    except Exception as e:
+        sys.exit(f'Unexpected error processing {fname}: {e}')
+
+
+# ----------------ELF------------------
+
 class DataSizes:
     def __init__(self, ptrsize: int, is_le: bool) -> None:
         if is_le:
             p = '<'
         else:
             p = '>'
+        self.Char = p + 'c'
+        self.CharSize = 1
         self.Half = p + 'h'
         self.HalfSize = 2
+        self.Section = p + 'h'
+        self.SectionSize = 2
         self.Word = p + 'I'
         self.WordSize = 4
         self.Sword = p + 'i'
@@ -70,6 +346,24 @@ class DynamicEntry(DataSizes):
         else:
             ofile.write(struct.pack(self.Sword, self.d_tag))
             ofile.write(struct.pack(self.Word, self.val))
+
+class DynsymEntry(DataSizes):
+    def __init__(self, ifile: T.BinaryIO, ptrsize: int, is_le: bool) -> None:
+        super().__init__(ptrsize, is_le)
+        is_64 = ptrsize == 64
+        self.st_name = struct.unpack(self.Word, ifile.read(self.WordSize))[0]
+        if is_64:
+            self.st_info = struct.unpack(self.Char, ifile.read(self.CharSize))[0]
+            self.st_other = struct.unpack(self.Char, ifile.read(self.CharSize))[0]
+            self.st_shndx = struct.unpack(self.Section, ifile.read(self.SectionSize))[0]
+            self.st_value = struct.unpack(self.Addr, ifile.read(self.AddrSize))[0]
+            self.st_size = struct.unpack(self.XWord, ifile.read(self.XWordSize))[0]
+        else:
+            self.st_value = struct.unpack(self.Addr, ifile.read(self.AddrSize))[0]
+            self.st_size = struct.unpack(self.Word, ifile.read(self.WordSize))[0]
+            self.st_info = struct.unpack(self.Char, ifile.read(self.CharSize))[0]
+            self.st_other = struct.unpack(self.Char, ifile.read(self.CharSize))[0]
+            self.st_shndx = struct.unpack(self.Section, ifile.read(self.SectionSize))[0]
 
 class SectionHeader(DataSizes):
     def __init__(self, ifile: T.BinaryIO, ptrsize: int, is_le: bool) -> None:
@@ -115,6 +409,8 @@ class Elf(DataSizes):
         self.verbose = verbose
         self.sections: T.List[SectionHeader] = []
         self.dynamic: T.List[DynamicEntry] = []
+        self.dynsym: T.List[DynsymEntry] = []
+        self.dynsym_strings: T.List[str] = []
         self.open_bf(bfile)
         try:
             (self.ptrsize, self.is_le) = self.detect_elf_type()
@@ -122,6 +418,8 @@ class Elf(DataSizes):
             self.parse_header()
             self.parse_sections()
             self.parse_dynamic()
+            self.parse_dynsym()
+            self.parse_dynsym_strings()
         except (struct.error, RuntimeError):
             self.close_bf()
             raise
@@ -232,6 +530,23 @@ class Elf(DataSizes):
             if e.d_tag == 0:
                 break
 
+    def parse_dynsym(self) -> None:
+        sec = self.find_section(b'.dynsym')
+        if sec is None:
+            return
+        self.bf.seek(sec.sh_offset)
+        for i in range(sec.sh_size // sec.sh_entsize):
+            e = DynsymEntry(self.bf, self.ptrsize, self.is_le)
+            self.dynsym.append(e)
+
+    def parse_dynsym_strings(self) -> None:
+        sec = self.find_section(b'.dynstr')
+        if sec is None:
+            return
+        for i in self.dynsym:
+            self.bf.seek(sec.sh_offset + i.st_name)
+            self.dynsym_strings.append(self.read_str().decode())
+
     @generate_list
     def get_section_names(self) -> T.Generator[str, None, None]:
         section_names = self.sections[self.e_shstrndx]
@@ -336,7 +651,7 @@ class Elf(DataSizes):
         new_rpath = b':'.join(new_rpaths)
 
         if len(old_rpath) < len(new_rpath):
-            msg = "New rpath must not be longer than the old one.\n Old: {}\n New: {}".format(old_rpath.decode('utf-8'), new_rpath.decode('utf-8'))
+            msg = 'New rpath must not be longer than the old one.\n Old: {}\n New: {}'.format(old_rpath.decode('utf-8'), new_rpath.decode('utf-8'))
             sys.exit(msg)
         # The linker does read-only string deduplication. If there is a
         # string that shares a suffix with the rpath, they might get
@@ -353,12 +668,48 @@ class Elf(DataSizes):
             self.bf.write(new_rpath)
             self.bf.write(b'\0')
 
+    def clean_rpath_entry_string(self, entrynum: int) -> None:
+        # Get the rpath string
+        offset = self.get_entry_offset(entrynum)
+        self.bf.seek(offset)
+        rpath_string = self.read_str().decode()
+        reused_str = ''
+
+        # Inspect the dyn strings and check if our rpath string
+        # ends with one of them.
+        # This is to handle a subtle optimization of the linker
+        # where one of the dyn function name offset in the dynstr
+        # table might be set at the an offset of the rpath string.
+        # Example:
+        #
+        # rpath        offset = 1314 string = /usr/lib/foo
+        # dym function offset = 1322 string = foo
+        #
+        # In the following case, the dym function string offset is
+        # placed at the offset +10 of the rpath.
+        # To correctly clear the rpath entry AND keep normal
+        # functionality of this optimization (and the binary),
+        # parse the maximum string we can remove from the rpath entry.
+        #
+        # Since strings MUST be null terminated, we can always check
+        # if the rpath string ends with the dyn function string and
+        # calculate what we can actually remove accordingly.
+        for dynsym_string in self.dynsym_strings:
+            if rpath_string.endswith(dynsym_string):
+                if len(dynsym_string) > len(reused_str):
+                    reused_str = dynsym_string
+
+        # Seek back to start of string
+        self.bf.seek(offset)
+        self.bf.write(b'X' * (len(rpath_string) - len(reused_str)))
+
     def remove_rpath_entry(self, entrynum: int) -> None:
         sec = self.find_section(b'.dynamic')
         if sec is None:
             return None
         for (i, entry) in enumerate(self.dynamic):
             if entry.d_tag == entrynum:
+                self.clean_rpath_entry_string(entrynum)
                 rpentry = self.dynamic[i]
                 rpentry.d_tag = 0
                 self.dynamic = self.dynamic[:i] + self.dynamic[i + 1:] + [rpentry]
@@ -379,11 +730,14 @@ def fix_elf(fname: str, rpath_dirs_to_remove: T.Set[bytes], new_rpath: T.Optiona
             # note: e.get_rpath() and e.get_runpath() may be useful
             e.fix_rpath(fname, rpath_dirs_to_remove, new_rpath)
 
-def get_darwin_rpaths_to_remove(fname: str) -> T.List[str]:
+def get_darwin_rpaths(fname: str) -> OrderedSet[str]:
     p, out, _ = Popen_safe(['otool', '-l', fname], stderr=subprocess.DEVNULL)
     if p.returncode != 0:
         raise subprocess.CalledProcessError(p.returncode, p.args, out)
-    result = []
+    # Need to deduplicate rpaths, as macOS's install_name_tool
+    # is *very* allergic to duplicate -delete_rpath arguments
+    # when calling depfixer on installation.
+    result: OrderedSet[str] = OrderedSet()
     current_cmd = 'FOOBAR'
     for line in out.split('\n'):
         line = line.strip()
@@ -394,46 +748,35 @@ def get_darwin_rpaths_to_remove(fname: str) -> T.List[str]:
             current_cmd = value
         if key == 'path' and current_cmd == 'LC_RPATH':
             rp = value.split('(', 1)[0].strip()
-            result.append(rp)
+            result.add(rp)
     return result
 
-def fix_darwin(fname: str, new_rpath: str, final_path: str, install_name_mappings: T.Dict[str, str]) -> None:
+def fix_darwin(fname: str, rpath_dirs_to_remove: T.Set[bytes], new_rpath: str, final_path: str, install_name_mappings: T.Dict[str, str]) -> None:
     try:
-        rpaths = get_darwin_rpaths_to_remove(fname)
+        old_rpaths = get_darwin_rpaths(fname)
     except subprocess.CalledProcessError:
         # Otool failed, which happens when invoked on a
         # non-executable target. Just return.
         return
+    new_rpaths: OrderedSet[str] = OrderedSet()
+    if new_rpath:
+        new_rpaths.update(new_rpath.split(':'))
+    # filter out build-only rpath entries, like in
+    # fix_rpathtype_entry
+    remove_rpaths = [x.decode('utf8') for x in rpath_dirs_to_remove]
+    for rpath_dir in old_rpaths:
+        if rpath_dir and rpath_dir not in remove_rpaths:
+            new_rpaths.add(rpath_dir)
     try:
         args = []
-        if rpaths:
-            # TODO: fix this properly, not totally clear how
-            #
-            # removing rpaths from binaries on macOS has tons of
-            # weird edge cases. For instance, if the user provided
-            # a '-Wl,-rpath' argument in LDFLAGS that happens to
-            # coincide with an rpath generated from a dependency,
-            # this would cause installation failures, as meson would
-            # generate install_name_tool calls with two identical
-            # '-delete_rpath' arguments, which install_name_tool
-            # fails on. Because meson itself ensures that it never
-            # adds duplicate rpaths, duplicate rpaths necessarily
-            # come from user variables. The idea of using OrderedSet
-            # is to remove *at most one* duplicate RPATH entry. This
-            # is not optimal, as it only respects the user's choice
-            # partially: if they provided a non-duplicate '-Wl,-rpath'
-            # argument, it gets removed, if they provided a duplicate
-            # one, it remains in the final binary. A potentially optimal
-            # solution would split all user '-Wl,-rpath' arguments from
-            # LDFLAGS, and later add them back with '-add_rpath'.
-            for rp in OrderedSet(rpaths):
-                args += ['-delete_rpath', rp]
-            subprocess.check_call(['install_name_tool', fname] + args,
-                                  stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.DEVNULL)
-        args = []
-        if new_rpath:
-            args += ['-add_rpath', new_rpath]
+        # compute diff, translate it into -delete_rpath and -add_rpath
+        # calls
+        for path in new_rpaths:
+            if path not in old_rpaths:
+                args += ['-add_rpath', path]
+        for path in old_rpaths:
+            if path not in new_rpaths:
+                args += ['-delete_rpath', path]
         # Rewrite -install_name @rpath/libfoo.dylib to /path/to/libfoo.dylib
         if fname.endswith('dylib'):
             args += ['-id', final_path]
@@ -448,35 +791,70 @@ def fix_darwin(fname: str, new_rpath: str, final_path: str, install_name_mapping
         raise SystemExit(err)
 
 def fix_jar(fname: str) -> None:
-    subprocess.check_call(['jar', 'xf', fname, 'META-INF/MANIFEST.MF'])
-    with open('META-INF/MANIFEST.MF', 'r+', encoding='utf-8') as f:
-        lines = f.readlines()
-        f.seek(0)
+    with zipfile.ZipFile(fname) as jar:
+        try:
+            manifest = jar.read('META-INF/MANIFEST.MF').decode('utf-8')
+        except KeyError:
+            return
+        lines = manifest.splitlines(keepends=True)
+        stripped = []
+        in_classpath = False
         for line in lines:
-            if not line.startswith('Class-Path:'):
-                f.write(line)
-        f.truncate()
-    # jar -um doesn't allow removing existing attributes.  Use -uM instead,
-    # which a) removes the existing manifest from the jar and b) disables
-    # special-casing for the manifest file, so we can re-add it as a normal
-    # archive member.  This puts the manifest at the end of the jar rather
-    # than the beginning, but the spec doesn't forbid that.
-    subprocess.check_call(['jar', 'ufM', fname, 'META-INF/MANIFEST.MF'])
+            if line.startswith('Class-Path:'):
+                in_classpath = True
+            elif in_classpath and line.startswith(' '):
+                # continuation of the Class-Path attribute value
+                pass
+            else:
+                in_classpath = False
+                stripped.append(line)
+        if stripped == lines:
+            # No Class-Path attribute to remove. Leave the jar alone:
+            # rewriting it would only replace the manifest's timestamp
+            # with the current time, hurting build reproducibility.
+            return
+        entries = [(info, jar.read(info)) for info in jar.infolist()]
+        comment = jar.comment
+    # Use a temp file so that an interrupted or failed rewrite does not leave a corrupt jar
+    tmpname = fname + '.tmp'
+    try:
+        with zipfile.ZipFile(tmpname, 'w') as jar:
+            jar.comment = comment
+            for info, data in entries:
+                if info.filename == 'META-INF/MANIFEST.MF':
+                    data = ''.join(stripped).encode('utf-8')
+                # Passing the original ZipInfo keeps all metadata
+                # (mtime, permissions, compression),
+                # for deterministic build results
+                jar.writestr(info, data)
+        shutil.copystat(fname, tmpname)
+    except BaseException:
+        if os.path.exists(tmpname):
+            os.unlink(tmpname)
+        raise
+    os.replace(tmpname, fname)
 
-def fix_rpath(fname: str, rpath_dirs_to_remove: T.Set[bytes], new_rpath: T.Union[str, bytes], final_path: str, install_name_mappings: T.Dict[str, str], verbose: bool = True) -> None:
+def fix_rpath(fname: str, rpath_dirs_to_remove: T.Set[bytes], new_rpath: T.Union[str, bytes], final_path: str, install_name_mappings: T.Dict[str, str], system: str, verbose: bool = True) -> None:
     global INSTALL_NAME_TOOL  # pylint: disable=global-statement
     # Static libraries, import libraries, debug information, headers, etc
     # never have rpaths
     # DLLs and EXE currently do not need runtime path fixing
-    if fname.endswith(('.a', '.lib', '.pdb', '.h', '.hpp', '.dll', '.exe')):
+
+    if fname.endswith(('.lib', '.pdb', '.h', '.hpp', '.dll', '.exe')):
         return
+    # Shared libraries are .a files on AIX
+    if fname.endswith('.a') and system != 'aix':
+        return
+    if isinstance(new_rpath, str):
+        new_rpath = new_rpath.encode('utf8')
     try:
         if fname.endswith('.jar'):
             fix_jar(fname)
             return
-        if isinstance(new_rpath, str):
-            new_rpath = new_rpath.encode('utf8')
-        fix_elf(fname, rpath_dirs_to_remove, new_rpath, verbose)
+        if system == 'aix':
+            fix_aix(fname, rpath_dirs_to_remove, new_rpath, verbose)
+        else:
+            fix_elf(fname, rpath_dirs_to_remove, new_rpath, verbose)
         return
     except SystemExit as e:
         if isinstance(e.code, int) and e.code == 0:
@@ -487,9 +865,10 @@ def fix_rpath(fname: str, rpath_dirs_to_remove: T.Set[bytes], new_rpath: T.Union
     # on non-mac platforms. That can be expensive on some Windows machines
     # (up to 30ms), which is significant with --only-changed. For details, see:
     # https://github.com/mesonbuild/meson/pull/6612#discussion_r378581401
-    if INSTALL_NAME_TOOL is False:
-        INSTALL_NAME_TOOL = bool(shutil.which('install_name_tool'))
-    if INSTALL_NAME_TOOL:
-        if isinstance(new_rpath, bytes):
-            new_rpath = new_rpath.decode('utf8')
-        fix_darwin(fname, new_rpath, final_path, install_name_mappings)
+    if system == 'darwin':
+        if INSTALL_NAME_TOOL is False:
+            INSTALL_NAME_TOOL = bool(shutil.which('install_name_tool'))
+        if INSTALL_NAME_TOOL:
+            if isinstance(new_rpath, bytes):
+                new_rpath = new_rpath.decode('utf8')
+            fix_darwin(fname, rpath_dirs_to_remove, new_rpath, final_path, install_name_mappings)

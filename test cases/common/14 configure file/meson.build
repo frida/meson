@@ -30,6 +30,13 @@ configure_file(input : files('config.h.in'),
   output : 'config2.h',
   configuration : conf)
 
+# Test if build_subdir works
+configure_file(input : files('config.h.in'),
+  output : 'config2.h',
+  build_subdir : 'config-subdir',
+  install_dir : 'share/appdir/config-subdir',
+  configuration : conf)
+
 # Now generate a header file with an external script.
 genprog = import('python3').find_python()
 scriptfile = '@0@/generator.py'.format(meson.current_source_dir())
@@ -143,6 +150,8 @@ test('test5', executable('prog5', 'prog5.c'))
 conf6 = configuration_data()
 conf6.set('var1', 'foo')
 conf6.set('var2', 'bar')
+conf6.set('var3', 'baz')
+conf6.set('var4', 'qux')
 configure_file(
   input : 'config6.h.in',
   output : '@BASENAME@',
@@ -308,9 +317,15 @@ cdata = configuration_data({
   'A_UNDEFINED' : false,
 })
 
+# merging a confdata into another one should not mark the first as immutable
+cdata_test = configuration_data()
+cdata_test.merge_from(cdata)
+cdata.set_quoted('A_PATH', '/random/path')
+
 configure_file(output : 'config9a.h',
   configuration : cdata,
 )
+
 
 configure_file(output : 'config9b.h',
   configuration : {
@@ -322,6 +337,16 @@ configure_file(output : 'config9b.h',
 )
 
 test('test9', executable('prog9', 'prog9.c'))
+
+# Test @ and curly braces at the same time with cmake format
+conf10 = configuration_data()
+conf10.set('var', 'foo')
+configure_file(
+  input : 'config10.h.in',
+  output : '@BASENAME@',
+  format : 'cmake',
+  configuration : conf10)
+test('test10', executable('prog10', 'prog10.c'))
 
 check_inputs = find_program('check_inputs.py')
 configure_file(output : 'check_inputs.txt',

@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 
+from pathlib import Path
 import sys
 
 ifile = sys.argv[1]
 ofile = sys.argv[2]
 
-with open(ifile) as f:
-    resname = f.readline().strip()
+
+resname = Path(ifile).stem
 
 templ = 'const char %s[] = "%s";\n'
-with open(ofile, 'w') as f:
+with open(ofile, 'w', encoding='utf-8') as f:
     f.write(templ % (resname, resname))

@@ -16,7 +16,7 @@ class NamedObject:
         return self.name.startswith('_')
 
 @dataclass
-class FetureCheck:
+class FeatureCheck:
     since: str
     deprecated: str
 
@@ -33,7 +33,7 @@ class Type:
 
 # Arguments
 @dataclass
-class ArgBase(NamedObject, FetureCheck):
+class ArgBase(NamedObject, FeatureCheck):
     type: Type
 
 @dataclass
@@ -53,7 +53,7 @@ class Kwarg(ArgBase):
 
 # Function
 @dataclass
-class Function(NamedObject, FetureCheck):
+class Function(NamedObject, FeatureCheck):
     notes: T.List[str]
     warnings: T.List[str]
     returns: Type
@@ -78,10 +78,11 @@ class ObjectType(Enum):
     ELEMENTARY = 0
     BUILTIN = 1
     MODULE = 2
-    RETURNED = 3
+    FUNCTIONS = 3
+    RETURNED = 4
 
 @dataclass
-class Object(NamedObject, FetureCheck):
+class Object(NamedObject, FeatureCheck):
     notes: T.List[str]
     warnings: T.List[str]
     long_name: str

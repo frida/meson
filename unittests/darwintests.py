@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2016-2021 The Meson development team
 
+from __future__ import annotations
+
 import subprocess
 import re
 import os
+import platform
 import unittest
+import typing as T
 
 from mesonbuild.mesonlib import (
-    MachineChoice, is_osx
+    MachineChoice, is_osx, version_compare
 )
 from mesonbuild.compilers import (
     detect_c_compiler
@@ -19,7 +23,7 @@ from run_tests import (
 )
 
 from .baseplatformtests import BasePlatformTests
-from .helpers import *
+from .helpers import skip_if_not_language, skipIfNoPkgconfig
 
 @unittest.skipUnless(is_osx(), "requires Darwin")
 class DarwinTests(BasePlatformTests):
@@ -81,12 +85,37 @@ class DarwinTests(BasePlatformTests):
         self.build()
         self.run_tests()
 
+    @unittest.skipIf(version_compare(platform.mac_ver()[0], '<10.7'), '-export_dynamic was added in 10.7')
+    def test_apple_lto_export_dynamic(self):
+        '''
+        Tests that -Wl,-export_dynamic is correctly added, when export_dynamic: true is set.
+        On macOS, this is relevant for LTO builds only.
+        '''
+        testdir = os.path.join(self.common_test_dir, '148 shared module resolving symbol in executable')
+        # Ensure that it builds even with LTO enabled
+        env = {'CFLAGS': '-flto'}
+        self.init(testdir, override_envvars=env)
+        self.build()
+        self.run_tests()
+
     def _get_darwin_versions(self, fname):
         fname = os.path.join(self.builddir, fname)
         out = subprocess.check_output(['otool', '-L', fname], universal_newlines=True)
         m = re.match(r'.*version (.*), current version (.*)\)', out.split('\n')[1])
         self.assertIsNotNone(m, msg=out)
         return m.groups()
+
+    def _get_darwin_rpaths(self, fname: str) -> T.List[str]:
+        out = subprocess.check_output(['otool', '-l', fname], universal_newlines=True)
+        pattern = re.compile(r'path (.*) \(offset \d+\)')
+        rpaths = pattern.findall(out)
+        return rpaths
+
+    def _get_darwin_rpath_libraries(self, fname: str) -> T.List[str]:
+        out = subprocess.check_output(['otool', '-L', fname], universal_newlines=True)
+        pattern = re.compile(r'@rpath/\S+')
+        libs = pattern.findall(out)
+        return libs
 
     @skipIfNoPkgconfig
     def test_library_versioning(self):
@@ -142,3 +171,39 @@ class DarwinTests(BasePlatformTests):
         from mesonbuild.mesonlib import darwin_get_object_archs
         archs = darwin_get_object_archs('/bin/cat')
         self.assertEqual(archs, ['x86_64', 'aarch64'])
+
+    def test_darwin_meson_rpaths_removed_on_install(self):
+        testdir = os.path.join(self.darwin_test_dir, '1 rpath removal on install')
+        self.init(testdir)
+        self.build()
+        # Meson-created RPATHs are usually only valid in the build directory
+        rpaths = self._get_darwin_rpaths(os.path.join(self.builddir, 'libbar.dylib'))
+        self.assertListEqual(rpaths, ['@loader_path/foo'])
+        self.install()
+        # Those RPATHs are no longer valid and should not be present after installation
+        rpaths = self._get_darwin_rpaths(os.path.join(self.installdir, 'usr/lib/libbar.dylib'))
+        self.assertListEqual(rpaths, [])
+        libs = self._get_darwin_rpath_libraries(os.path.join(self.installdir, 'usr/bin/main'))
+        self.assertListEqual(libs, [])
+        libs = self._get_darwin_rpath_libraries(os.path.join(self.installdir, 'usr/bin/main-whole'))
+        self.assertListEqual(libs, [])
+
+    @skip_if_not_language('rust')
+    def test_rust_apple_framework_rlib(self):
+        '''
+        Test that Rust rlibs properly record Apple framework dependencies,
+        so that external tools (like cargo) can link against them without
+        meson's help.
+        '''
+        testdir = os.path.join(self.rust_test_dir, '37 apple framework')
+        self.init(testdir)
+        # Build only the library, not the executable
+        self.build(target='timelib')
+        # Manually invoke rustc to build the executable, using the rlib.
+        # This simulates what cargo or another build system would do.
+        rlib = os.path.join(self.builddir, 'libtimelib.rlib')
+        main_rs = os.path.join(testdir, 'main.rs')
+        out_exe = os.path.join(self.builddir, 'manual_main')
+        subprocess.check_call(['rustc', '--extern', f'timelib={rlib}', main_rs, '-o', out_exe])
+        # Run the executable to verify it works
+        subprocess.check_call([out_exe])

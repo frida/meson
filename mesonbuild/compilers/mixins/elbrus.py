@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Intel Corporation
+# Copyright © 2023-2025 Intel Corporation
 
 from __future__ import annotations
 
@@ -13,11 +13,11 @@ import re
 
 from .gnu import GnuLikeCompiler
 from .gnu import gnu_optimization_args
-from ...mesonlib import Popen_safe, OptionKey
+from ...mesonlib import Popen_safe
+from ...options import OptionKey
 
 if T.TYPE_CHECKING:
-    from ...environment import Environment
-    from ...coredata import KeyedOptionDictType
+    from ...build import BuildTarget
 
 
 class ElbrusCompiler(GnuLikeCompiler):
@@ -38,7 +38,7 @@ class ElbrusCompiler(GnuLikeCompiler):
 
     # FIXME: use _build_wrapper to call this so that linker flags from the env
     # get applied
-    def get_library_dirs(self, env: 'Environment', elf_class: T.Optional[int] = None) -> T.List[str]:
+    def get_library_dirs(self, elf_class: T.Optional[int] = None) -> T.List[str]:
         os_env = os.environ.copy()
         os_env['LC_ALL'] = 'C'
         stdo = Popen_safe(self.get_exelist(ccache=False) + ['--print-search-dirs'], env=os_env)[1]
@@ -49,7 +49,7 @@ class ElbrusCompiler(GnuLikeCompiler):
                 return [os.path.realpath(p) for p in libstr.split(':') if os.path.exists(p)]
         return []
 
-    def get_program_dirs(self, env: 'Environment') -> T.List[str]:
+    def get_program_dirs(self) -> T.List[str]:
         os_env = os.environ.copy()
         os_env['LC_ALL'] = 'C'
         stdo = Popen_safe(self.get_exelist(ccache=False) + ['--print-search-dirs'], env=os_env)[1]
@@ -75,19 +75,28 @@ class ElbrusCompiler(GnuLikeCompiler):
     def get_optimization_args(self, optimization_level: str) -> T.List[str]:
         return gnu_optimization_args[optimization_level]
 
-    def get_prelink_args(self, prelink_name: str, obj_list: T.List[str]) -> T.List[str]:
-        return ['-r', '-nodefaultlibs', '-nostartfiles', '-o', prelink_name] + obj_list
+    def get_prelink_args(self, prelink_name: str, obj_list: T.List[str]) -> T.Tuple[T.List[str], T.List[str]]:
+        return [prelink_name], ['-r', '-nodefaultlibs', '-nostartfiles', '-o', prelink_name] + obj_list
 
     def get_pch_suffix(self) -> str:
         # Actually it's not supported for now, but probably will be supported in future
         return 'pch'
 
-    def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
+    def get_option_std_args(self, target: BuildTarget, subproject: T.Optional[str] = None) -> T.List[str]:
         args: T.List[str] = []
-        std = options[OptionKey('std', lang=self.language, machine=self.for_machine)]
-        if std.value != 'none':
-            args.append('-std=' + std.value)
+        key = OptionKey(f'{self.language}_std', subproject=subproject, machine=self.for_machine)
+        if target:
+            std = self.environment.coredata.get_option_for_target(target, key)
+        else:
+            std = self.environment.coredata.optstore.get_value_for(key)
+        assert isinstance(std, str)
+        if std != 'none':
+            args.append('-std=' + std)
         return args
 
     def openmp_flags(self) -> T.List[str]:
         return ['-fopenmp']
+
+    @classmethod
+    def use_linker_args(cls, linker: str, version: str) -> T.List[str]:
+        return []

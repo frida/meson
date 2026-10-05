@@ -75,6 +75,7 @@ class CMakeTarget:
             self.properties[key] = [x.strip() for x in val]
             assert all(';' not in x for x in self.properties[key])
 
+# FIXME: name can be empty here, so this is not quite a CMakeTarget
 class CMakeGeneratorTarget(CMakeTarget):
     def __init__(self, name: str) -> None:
         super().__init__(name, 'CUSTOM', {})
@@ -165,7 +166,7 @@ class CMakeTraceParser:
     def parse(self, trace: T.Optional[str] = None) -> None:
         # First load the trace (if required)
         if not self.requires_stderr():
-            if not self.trace_file_path.exists and not self.trace_file_path.is_file():
+            if not self.trace_file_path.is_file():
                 raise CMakeException(f'CMake: Trace file "{self.trace_file_path!s}" not found')
             trace = self.trace_file_path.read_text(errors='ignore', encoding='utf-8')
         if not trace:
@@ -395,7 +396,7 @@ class CMakeTraceParser:
         else:
             self.targets[args[0]] = CMakeTarget(args[0], 'NORMAL', {}, tline=tline)
 
-    def _cmake_add_custom_command(self, tline: CMakeTraceLine, name: T.Optional[str] = None) -> None:
+    def _cmake_add_custom_command(self, tline: CMakeTraceLine, name: str = '') -> None:
         # DOC: https://cmake.org/cmake/help/latest/command/add_custom_command.html
         args = self._flatten_args(list(tline.args))  # Commands can be passed as ';' separated lists
 
@@ -423,7 +424,7 @@ class CMakeTraceParser:
         def handle_depends(key: str, target: CMakeGeneratorTarget) -> None:
             target.depends += [key]
 
-        working_dir = None
+        working_dir: str | None = None
 
         def handle_working_dir(key: str, target: CMakeGeneratorTarget) -> None:
             nonlocal working_dir
@@ -437,7 +438,7 @@ class CMakeTraceParser:
 
         for i in args:
             if i in magic_keys:
-                if i == 'OUTPUT':
+                if i in {'OUTPUT', 'BYPRODUCTS'}:
                     fn = handle_output
                 elif i == 'DEPENDS':
                     fn = handle_depends
@@ -637,7 +638,7 @@ class CMakeTraceParser:
 
     def _cmake_target_link_libraries(self, tline: CMakeTraceLine) -> None:
         # DOC: https://cmake.org/cmake/help/latest/command/target_link_libraries.html
-        self._parse_common_target_options('target_link_options', 'LINK_LIBRARIES', 'INTERFACE_LINK_LIBRARIES', tline)
+        self._parse_common_target_options('target_link_libraries', 'LINK_LIBRARIES', 'INTERFACE_LINK_LIBRARIES', tline)
 
     def _cmake_message(self, tline: CMakeTraceLine) -> None:
         # DOC: https://cmake.org/cmake/help/latest/command/message.html

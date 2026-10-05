@@ -36,6 +36,7 @@ pkgg.generate(
   requires : 'glib-2.0', # Not really, but only here to test that this works.
   requires_private : ['gio-2.0', 'gobject-2.0'],
   libraries_private : [lib, '-lz'],
+  cflags_private: '-DSIMPLE_STATIC',
 )
 
 env = environment()
@@ -186,6 +187,9 @@ testcase expect_error('pkgconfig.generate: if a library is not passed as a posit
   pkgg.generate(name: 'foobar')
 endtestcase
 
+# Test for FeatureBroken warning with absolute subdirs
+pkgg.generate(name: 'abssubdir', description: 'absolute subdirs test', subdirs: '/usr/include')
+
 # Make sure the -uninstalled.pc file contains both include directories.
 # See dependencies/test2.c that gets built against both simple7.pc and
 # simple7-uninstalled.pc.
@@ -193,3 +197,11 @@ simple7 = library('simple7', include_directories: 'inc1')
 dep = declare_dependency(include_directories: 'inc2')
 install_headers('inc1/inc1.h', 'inc2/inc2.h')
 pkgg.generate(simple7, libraries: dep)
+
+# Regression test: empty string passed to requires.private should not
+# fail the build
+pkgg.generate(
+  name : 'emptytest',
+  description : 'Check that requires.private can be an empty string',
+  requires_private: '',
+)

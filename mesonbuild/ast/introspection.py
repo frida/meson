@@ -1,29 +1,42 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2018 The Meson development team
-# Copyright © 2024 Intel Corporation
+# Copyright © 2024-2025 Intel Corporation
 
 # This class contains the basic functionality needed to run any interpreter
 # or an interpreter-based tool
 
 from __future__ import annotations
-import copy
 import os
 import typing as T
 
-from .. import compilers, environment, mesonlib, optinterpreter
-from .. import coredata as cdata
-from ..build import Executable, Jar, SharedLibrary, SharedModule, StaticLibrary
+from .. import compilers, environment, mesonlib
+from ..build import Executable, Jar, SharedLibrary, SharedModule, StaticLibrary, BuildProject
 from ..compilers import detect_compiler_for
-from ..interpreterbase import InvalidArguments, SubProject
-from ..mesonlib import MachineChoice, OptionKey
-from ..mparser import BaseNode, ArithmeticNode, ArrayNode, ElementaryNode, IdNode, FunctionNode, BaseStringNode
-from .interpreter import AstInterpreter
+from ..interpreterbase import InvalidArguments, UnknownValue, Feature
+from ..interpreter import type_checking
+from ..mesonlib import MachineChoice, SubProject
+from ..options import OptionKey
+from ..mparser import BaseNode, ArrayNode, ElementaryNode, IdNode, FunctionNode, StringNode
+from .interpreter import AstInterpreter, IntrospectionBuildTarget, IntrospectionDependency
 
 if T.TYPE_CHECKING:
-    from ..build import BuildTarget
+    from ..build import BuildTarget, BuildTargetKeywordArguments
+    from ..compilers.compilers import Language
     from ..interpreterbase import TYPE_var
+    from ..options import ElementaryOptionValues, OptionDict
+    from .interpreter import TYPE_nkwargs, TYPE_nvar
     from .visitor import AstVisitor
 
+
+_TARGET_KWARGS: T.Mapping[str, set[str]] = {
+    'executable': {s.name for s in type_checking.EXECUTABLE_KWS},
+    'jar': {s.name for s in type_checking.JAR_KWS},
+    'library': {s.name for s in type_checking.LIBRARY_KWS},
+    'shared library': {s.name for s in type_checking.SHARED_LIB_KWS},
+    'shared module': {s.name for s in type_checking.SHARED_MOD_KWS},
+    'static library': {s.name for s in type_checking.STATIC_LIB_KWS},
+    'both libraries': {s.name for s in type_checking.LIBRARY_KWS},
+}
 
 # TODO: it would be nice to not have to duplicate this
 BUILD_TARGET_FUNCTIONS = [
@@ -37,40 +50,43 @@ class IntrospectionHelper:
         self.cross_file = [cross_file] if cross_file is not None else []
         self.native_file: T.List[str] = []
         self.cmd_line_options: T.Dict[OptionKey, str] = {}
+        self.builtin_keys: T.Set[OptionKey] = set()
+        self.d_keys: T.Set[OptionKey] = set()
         self.projectoptions: T.List[str] = []
 
     def __eq__(self, other: object) -> bool:
         return NotImplemented
 
 class IntrospectionInterpreter(AstInterpreter):
-    # Interpreter to detect the options without a build directory
-    # Most of the code is stolen from interpreter.Interpreter
+    # If you run `meson setup ...` the `Interpreter`-class walks over the AST.
+    # If you run `meson rewrite ...` and `meson introspect meson.build ...`,
+    # the `AstInterpreter`-class walks over the AST.
+    # Works without a build directory.
+    # Most of the code is stolen from interpreter.Interpreter .
     def __init__(self,
                  source_root: str,
                  subdir: str,
                  backend: str,
                  visitors: T.Optional[T.List[AstVisitor]] = None,
                  cross_file: T.Optional[str] = None,
-                 subproject: SubProject = SubProject(''),
+                 subproject: SubProject = mesonlib.ROOT_SUBPROJECT,
                  subproject_dir: str = 'subprojects',
-                 env: T.Optional[environment.Environment] = None):
-        visitors = visitors if visitors is not None else []
-        super().__init__(source_root, subdir, subproject, visitors=visitors)
-
+                 env: T.Optional[environment.Environment] = None,
+                 invoker_method_default_options: T.Optional[OptionDict] = None):
         options = IntrospectionHelper(cross_file)
+        env_ = env or environment.Environment(source_root, None, options)
+        super().__init__(source_root, subdir, subproject, subproject_dir, env_, visitors=visitors)
+
         self.cross_file = cross_file
-        if env is None:
-            self.environment = environment.Environment(source_root, None, options)
-        else:
-            self.environment = env
-        self.subproject_dir = subproject_dir
-        self.coredata = self.environment.get_coredata()
         self.backend = backend
-        self.default_options = {OptionKey('backend'): self.backend}
+        self.build_project = BuildProject(subproject, '', subproject, MachineChoice.HOST, MachineChoice.HOST)
         self.project_data: T.Dict[str, T.Any] = {}
-        self.targets: T.List[T.Dict[str, T.Any]] = []
-        self.dependencies: T.List[T.Dict[str, T.Any]] = []
-        self.project_node: BaseNode = None
+        self.targets: T.List[IntrospectionBuildTarget] = []
+        self.dependencies: T.List[IntrospectionDependency] = []
+        self.project_node: FunctionNode = None
+        self.project_default_options: OptionDict = {}
+        self.invoker_method_default_options = invoker_method_default_options or {}
+        self.subproject_default_options: T.Dict[SubProject, OptionDict] = {}
 
         self.funcs.update({
             'add_languages': self.func_add_languages,
@@ -82,76 +98,125 @@ class IntrospectionInterpreter(AstInterpreter):
             'shared_library': self.func_shared_lib,
             'shared_module': self.func_shared_module,
             'static_library': self.func_static_lib,
+            'subproject': self.func_subproject,
             'both_libraries': self.func_both_lib,
         })
+
+    def _get_default_options(self, kwargs: T.Dict[str, TYPE_var]) -> OptionDict:
+        raw_options = self.flatten_kwargs(kwargs).get('default_options', {})
+
+        def has_unknown_value(value: T.Any) -> bool:
+            if isinstance(value, UnknownValue):
+                return True
+            if isinstance(value, list):
+                return any(has_unknown_value(i) for i in value)
+            if isinstance(value, dict):
+                return any(has_unknown_value(k) or has_unknown_value(v) for k, v in value.items())
+            return False
+
+        if has_unknown_value(raw_options):
+            return {}
+        if not isinstance(raw_options, (str, list, dict)):
+            return {}
+        convertor = type_checking.DEFAULT_OPTIONS.convertor
+        assert convertor is not None
+        typed_options = T.cast('T.Union[str, T.List[str], T.Dict[str, ElementaryOptionValues]]', raw_options)
+        return T.cast('OptionDict', convertor(typed_options))
 
     def func_project(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> None:
         if self.project_node:
             raise InvalidArguments('Second call to project()')
+        assert isinstance(node, FunctionNode)
         self.project_node = node
         if len(args) < 1:
             raise InvalidArguments('Not enough arguments to project(). Needs at least the project name.')
 
+        def _str_list(node: T.Any) -> T.Optional[T.List[str]]:
+            if isinstance(node, ArrayNode):
+                r = []
+                for v in node.args.arguments:
+                    if not isinstance(v, StringNode):
+                        return None
+                    r.append(v.value)
+                return r
+            if isinstance(node, StringNode):
+                return [node.value]
+            return None
+
         proj_name = args[0]
         proj_vers = kwargs.get('version', 'undefined')
-        proj_langs = self.flatten_args(args[1:])
         if isinstance(proj_vers, ElementaryNode):
             proj_vers = proj_vers.value
         if not isinstance(proj_vers, str):
             proj_vers = 'undefined'
-        self.project_data = {'descriptive_name': proj_name, 'version': proj_vers}
+        proj_langs = self.flatten_args_hack(args[1:])
+        # Match the value returned by ``meson.project_license()`` when
+        # no ``license`` argument is specified in the ``project()`` call.
+        proj_license = _str_list(kwargs.get('license', None)) or ['unknown']
+        proj_license_files = _str_list(kwargs.get('license_files', None)) or []
+        self.project_data = {'descriptive_name': proj_name, 'version': proj_vers, 'license': proj_license, 'license_files': proj_license_files}
 
-        optfile = os.path.join(self.source_root, self.subdir, 'meson.options')
-        if not os.path.exists(optfile):
-            optfile = os.path.join(self.source_root, self.subdir, 'meson_options.txt')
-        if os.path.exists(optfile):
-            oi = optinterpreter.OptionInterpreter(self.subproject)
-            oi.process(optfile)
-            assert isinstance(proj_name, str), 'for mypy'
-            self.coredata.update_project_options(oi.options, T.cast('SubProject', proj_name))
-
-        def_opts = self.flatten_args(kwargs.get('default_options', []))
-        _project_default_options = mesonlib.stringlistify(def_opts)
-        self.project_default_options = cdata.create_options_dict(_project_default_options, self.subproject)
-        self.default_options.update(self.project_default_options)
-        self.coredata.set_default_options(self.default_options, self.subproject, self.environment)
+        self._load_option_file()
+        self.project_default_options = self._get_default_options(kwargs)
+        if self.is_subproject():
+            self.coredata.optstore.initialize_from_subproject_call(
+                self.subproject,
+                self.invoker_method_default_options,
+                self.project_default_options,
+                {},
+                self.environment.options,
+            )
+        else:
+            self.coredata.optstore.initialize_from_top_level_project_call(
+                self.project_default_options,
+                {},
+                self.environment.options,
+            )
 
         if not self.is_subproject() and 'subproject_dir' in kwargs:
-            spdirname = kwargs['subproject_dir']
-            if isinstance(spdirname, BaseStringNode):
-                assert isinstance(spdirname.value, str)
+            # Like flatten_args_hack(), the values are really TYPE_nvar.
+            spdirname = T.cast('TYPE_nvar', kwargs['subproject_dir'])
+            if isinstance(spdirname, StringNode):
                 self.subproject_dir = spdirname.value
         if not self.is_subproject():
             self.project_data['subprojects'] = []
-            subprojects_dir = os.path.join(self.source_root, self.subproject_dir)
-            if os.path.isdir(subprojects_dir):
-                for i in os.listdir(subprojects_dir):
-                    if os.path.isdir(os.path.join(subprojects_dir, i)):
-                        self.do_subproject(SubProject(i))
 
-        self.coredata.init_backend_options(self.backend)
-        options = {k: v for k, v in self.environment.options.items() if k.is_backend()}
+        self.environment.init_backend_options(self.backend)
 
-        self.coredata.set_options(options)
         self._add_languages(proj_langs, True, MachineChoice.HOST)
         self._add_languages(proj_langs, True, MachineChoice.BUILD)
 
+    def func_subproject(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> UnknownValue:
+        if args and isinstance(args[0], str):
+            dirname = SubProject(args[0])
+            self.subproject_default_options.setdefault(dirname, self._get_default_options(kwargs))
+        return UnknownValue()
+
     def do_subproject(self, dirname: SubProject) -> None:
-        subproject_dir_abs = os.path.join(self.environment.get_source_dir(), self.subproject_dir)
-        subpr = os.path.join(subproject_dir_abs, dirname)
+        subdir = os.path.join(self.environment.source_dir, self.subproject_dir, dirname)
         try:
-            subi = IntrospectionInterpreter(subpr, '', self.backend, cross_file=self.cross_file, subproject=dirname, subproject_dir=self.subproject_dir, env=self.environment, visitors=self.visitors)
+            subi = IntrospectionInterpreter(
+                self.source_root,
+                subdir,
+                self.backend,
+                cross_file=self.cross_file,
+                subproject=dirname,
+                subproject_dir=self.subproject_dir,
+                env=self.environment,
+                visitors=self.visitors,
+                invoker_method_default_options=self.subproject_default_options.get(dirname),
+            )
             subi.analyze()
             subi.project_data['name'] = dirname
             self.project_data['subprojects'] += [subi.project_data]
         except (mesonlib.MesonException, RuntimeError):
-            return
+            pass
 
-    def func_add_languages(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> None:
+    def func_add_languages(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> UnknownValue:
         kwargs = self.flatten_kwargs(kwargs)
         required = kwargs.get('required', True)
-        assert isinstance(required, (bool, cdata.UserFeatureOption)), 'for mypy'
-        if isinstance(required, cdata.UserFeatureOption):
+        assert isinstance(required, (bool, Feature, UnknownValue)), 'for mypy'
+        if isinstance(required, Feature):
             required = required.is_enabled()
         if 'native' in kwargs:
             native = kwargs.get('native', False)
@@ -159,64 +224,65 @@ class IntrospectionInterpreter(AstInterpreter):
         else:
             for for_machine in [MachineChoice.BUILD, MachineChoice.HOST]:
                 self._add_languages(args, required, for_machine)
+        return UnknownValue()
 
-    def _add_languages(self, raw_langs: T.List[TYPE_var], required: bool, for_machine: MachineChoice) -> None:
-        langs: T.List[str] = []
-        for l in self.flatten_args(raw_langs):
+    def _add_languages(self, raw_langs: T.List[TYPE_var], required: T.Union[bool, UnknownValue], for_machine: MachineChoice) -> None:
+        langs: T.List[Language] = []
+        for l in self.flatten_args_hack(raw_langs):
+            # we need to call .lower() here because `project('foo', 'CpP')` is valid.
             if isinstance(l, str):
-                langs.append(l)
-            elif isinstance(l, BaseStringNode):
-                langs.append(l.value)
+                langs.append(T.cast('Language', l.lower()))
+            elif isinstance(l, StringNode):
+                langs.append(T.cast('Language', l.value.lower()))
 
         for lang in sorted(langs, key=compilers.sort_clink):
-            lang = lang.lower()
             if lang not in self.coredata.compilers[for_machine]:
                 try:
                     comp = detect_compiler_for(self.environment, lang, for_machine, True, self.subproject)
                 except mesonlib.MesonException:
-                    # do we even care about introspecting this language?
-                    if required:
-                        raise
-                    else:
-                        continue
-                if self.subproject:
-                    options = {}
-                    for k in comp.get_options():
-                        v = copy.copy(self.coredata.options[k])
-                        k = k.evolve(subproject=self.subproject)
-                        options[k] = v
-                    self.coredata.add_compiler_options(options, lang, for_machine, self.environment, self.subproject)
+                    # All code paths are evaluated regardless of conditionals,
+                    # so always ignore compiler detection failures.
+                    continue
+                if comp:
+                    self.coredata.process_compiler_options(lang, comp, self.subproject)
 
-    def func_dependency(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> None:
-        args = self.flatten_args(args)
+    def func_dependency(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> T.Optional[IntrospectionDependency]:
+        assert isinstance(node, FunctionNode)
+        args = self.flatten_args_hack(args)
         kwargs = self.flatten_kwargs(kwargs)
         if not args:
-            return
+            return None
         name = args[0]
+        assert isinstance(name, (str, UnknownValue))
         has_fallback = 'fallback' in kwargs
         required = kwargs.get('required', True)
         version = kwargs.get('version', [])
         if not isinstance(version, list):
             version = [version]
-        if isinstance(required, ElementaryNode):
-            required = required.value
-        if not isinstance(required, bool):
-            required = False
-        self.dependencies += [{
-            'name': name,
-            'required': required,
-            'version': version,
-            'has_fallback': has_fallback,
-            'conditional': node.condition_level > 0,
-            'node': node
-        }]
+        if any(isinstance(el, UnknownValue) for el in version):
+            version = UnknownValue()
+        else:
+            assert all(isinstance(el, str) for el in version)
+            version = T.cast(T.List[str], version)
+        assert isinstance(required, (bool, UnknownValue))
+        newdep = IntrospectionDependency(
+            name=name,
+            required=required,
+            version=version,
+            has_fallback=has_fallback,
+            conditional=node.condition_level > 0,
+            node=node)
+        if not isinstance(name, UnknownValue):
+            self.dependencies += [newdep]
+        return newdep
 
-    def build_target(self, node: BaseNode, args: T.List[TYPE_var], kwargs_raw: T.Dict[str, TYPE_var], targetclass: T.Type[BuildTarget]) -> T.Optional[T.Dict[str, T.Any]]:
-        args = self.flatten_args(args)
+    def build_target(self, node: BaseNode, args: T.List[TYPE_var], kwargs_raw: T.Dict[str, TYPE_var], targetclass: T.Type[BuildTarget]) -> T.Union[IntrospectionBuildTarget, UnknownValue]:
+        assert isinstance(node, FunctionNode)
+        args = self.flatten_args_hack(args)
         if not args or not isinstance(args[0], str):
-            return None
+            return UnknownValue()
         name = args[0]
-        srcqueue = [node]
+        srcqueue: T.List[BaseNode] = [node]
         extra_queue = []
 
         # Process the sources BEFORE flattening the kwargs, to preserve the original nodes
@@ -228,74 +294,66 @@ class IntrospectionInterpreter(AstInterpreter):
 
         kwargs = self.flatten_kwargs(kwargs_raw, True)
 
-        def traverse_nodes(inqueue: T.List[BaseNode]) -> T.List[BaseNode]:
-            res: T.List[BaseNode] = []
-            while inqueue:
-                curr = inqueue.pop(0)
-                arg_node = None
-                assert isinstance(curr, BaseNode)
-                if isinstance(curr, FunctionNode):
-                    arg_node = curr.args
-                elif isinstance(curr, ArrayNode):
-                    arg_node = curr.args
-                elif isinstance(curr, IdNode):
-                    # Try to resolve the ID and append the node to the queue
-                    assert isinstance(curr.value, str)
-                    var_name = curr.value
-                    if var_name in self.assignments:
-                        tmp_node = self.assignments[var_name]
-                        if isinstance(tmp_node, (ArrayNode, IdNode, FunctionNode)):
-                            inqueue += [tmp_node]
-                elif isinstance(curr, ArithmeticNode):
-                    inqueue += [curr.left, curr.right]
-                if arg_node is None:
-                    continue
-                arg_nodes = arg_node.arguments.copy()
-                # Pop the first element if the function is a build target function
-                if isinstance(curr, FunctionNode) and curr.func_name.value in BUILD_TARGET_FUNCTIONS:
-                    arg_nodes.pop(0)
-                elementary_nodes = [x for x in arg_nodes if isinstance(x, (str, BaseStringNode))]
-                inqueue += [x for x in arg_nodes if isinstance(x, (FunctionNode, ArrayNode, IdNode, ArithmeticNode))]
-                if elementary_nodes:
-                    res += [curr]
-            return res
+        oldlen = len(node.args.arguments)
+        source_nodes = node.args.arguments[1:]
+        for k, v in node.args.kwargs.items():
+            assert isinstance(k, IdNode)
+            if k.value == 'sources':
+                source_nodes.append(v)
+        assert oldlen == len(node.args.arguments)
 
-        source_nodes = traverse_nodes(srcqueue)
-        extraf_nodes = traverse_nodes(extra_queue)
+        extraf_nodes = None
+        for k, v in node.args.kwargs.items():
+            assert isinstance(k, IdNode)
+            if k.value == 'extra_files':
+                assert extraf_nodes is None
+                extraf_nodes = v
+
+        for_machine = MachineChoice.BUILD if kwargs.get('native', False) else MachineChoice.HOST
 
         # Make sure nothing can crash when creating the build class
-        kwargs_reduced = {k: v for k, v in kwargs.items() if k in targetclass.known_kwargs and k in {'install', 'build_by_default', 'build_always'}}
-        kwargs_reduced = {k: v.value if isinstance(v, ElementaryNode) else v for k, v in kwargs_reduced.items()}
-        kwargs_reduced = {k: v for k, v in kwargs_reduced.items() if not isinstance(v, BaseNode)}
-        for_machine = MachineChoice.HOST
+        _kwargs_reduced = {k: v for k, v in kwargs.items() if k in _TARGET_KWARGS[targetclass.typename] and k in {'install', 'build_by_default', 'build_always', 'name_prefix'}}
+        _kwargs_reduced = {k: v.value if isinstance(v, ElementaryNode) else v for k, v in _kwargs_reduced.items()}
+        _kwargs_reduced = {k: v for k, v in _kwargs_reduced.items() if not isinstance(v, (BaseNode, UnknownValue))}
+        _kwargs_reduced['native'] = for_machine
+        kwargs_reduced = T.cast('BuildTargetKeywordArguments', _kwargs_reduced)
         objects: T.List[T.Any] = []
         empty_sources: T.List[T.Any] = []
         # Passing the unresolved sources list causes errors
         kwargs_reduced['_allow_no_sources'] = True
-        target = targetclass(name, self.subdir, self.subproject, for_machine, empty_sources, None, objects,
-                             self.environment, self.coredata.compilers[for_machine], self.coredata.is_build_only, kwargs_reduced)
+        target = targetclass(name, self.subdir, for_machine, empty_sources, None, objects,
+                             self.environment, self.coredata.compilers[for_machine],
+                             self.build_project, kwargs_reduced)
         target.process_compilers_late()
 
-        new_target = {
-            'name': target.get_basename(),
-            'id': target.get_id(),
-            'type': target.get_typename(),
-            'defined_in': os.path.normpath(os.path.join(self.source_root, self.subdir, environment.build_filename)),
-            'subdir': self.subdir,
-            'build_by_default': target.build_by_default,
-            'installed': target.should_install(),
-            'outputs': target.get_outputs(),
-            'sources': source_nodes,
-            'extra_files': extraf_nodes,
-            'kwargs': kwargs,
-            'node': node,
-        }
+        build_by_default: T.Union[UnknownValue, bool] = target.build_by_default
+        if 'build_by_default' in kwargs and isinstance(kwargs['build_by_default'], UnknownValue):
+            build_by_default = kwargs['build_by_default']
+
+        install: T.Union[UnknownValue, bool] = target.should_install()
+        if 'install' in kwargs and isinstance(kwargs['install'], UnknownValue):
+            install = kwargs['install']
+
+        new_target = IntrospectionBuildTarget(
+            name=target.get_basename(),
+            machine=target.for_machine.get_lower_case_name(),
+            id=target.get_id(),
+            typename=target.get_typename(),
+            defined_in=os.path.normpath(os.path.join(self.source_root, self.subdir, environment.build_filename)),
+            subdir=self.subdir,
+            build_by_default=build_by_default,
+            installed=install,
+            outputs=target.get_outputs(),
+            source_nodes=source_nodes,
+            extra_files=extraf_nodes,
+            kwargs=kwargs,
+            node=node)
 
         self.targets += [new_target]
         return new_target
 
-    def build_library(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> T.Optional[T.Dict[str, T.Any]]:
-        default_library = self.coredata.get_option(OptionKey('default_library'))
+    def build_library(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> T.Union[IntrospectionBuildTarget, UnknownValue]:
+        default_library = self.coredata.optstore.get_value_for(OptionKey('default_library', subproject=self.subproject))
         if default_library == 'shared':
             return self.build_target(node, args, kwargs, SharedLibrary)
         elif default_library == 'static':
@@ -304,28 +362,28 @@ class IntrospectionInterpreter(AstInterpreter):
             return self.build_target(node, args, kwargs, SharedLibrary)
         return None
 
-    def func_executable(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> T.Optional[T.Dict[str, T.Any]]:
+    def func_executable(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> T.Union[IntrospectionBuildTarget, UnknownValue]:
         return self.build_target(node, args, kwargs, Executable)
 
-    def func_static_lib(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> T.Optional[T.Dict[str, T.Any]]:
+    def func_static_lib(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> T.Union[IntrospectionBuildTarget, UnknownValue]:
         return self.build_target(node, args, kwargs, StaticLibrary)
 
-    def func_shared_lib(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> T.Optional[T.Dict[str, T.Any]]:
+    def func_shared_lib(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> T.Union[IntrospectionBuildTarget, UnknownValue]:
         return self.build_target(node, args, kwargs, SharedLibrary)
 
-    def func_both_lib(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> T.Optional[T.Dict[str, T.Any]]:
+    def func_both_lib(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> T.Union[IntrospectionBuildTarget, UnknownValue]:
         return self.build_target(node, args, kwargs, SharedLibrary)
 
-    def func_shared_module(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> T.Optional[T.Dict[str, T.Any]]:
+    def func_shared_module(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> T.Union[IntrospectionBuildTarget, UnknownValue]:
         return self.build_target(node, args, kwargs, SharedModule)
 
-    def func_library(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> T.Optional[T.Dict[str, T.Any]]:
+    def func_library(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> T.Union[IntrospectionBuildTarget, UnknownValue]:
         return self.build_library(node, args, kwargs)
 
-    def func_jar(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> T.Optional[T.Dict[str, T.Any]]:
+    def func_jar(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> T.Union[IntrospectionBuildTarget, UnknownValue]:
         return self.build_target(node, args, kwargs, Jar)
 
-    def func_build_target(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> T.Optional[T.Dict[str, T.Any]]:
+    def func_build_target(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> T.Union[IntrospectionBuildTarget, UnknownValue]:
         if 'target_type' not in kwargs:
             return None
         target_type = kwargs.pop('target_type')
@@ -353,6 +411,12 @@ class IntrospectionInterpreter(AstInterpreter):
         self.sanity_check_ast()
         self.parse_project()
         self.run()
+        if not self.is_subproject():
+            subprojects_dir = os.path.join(self.source_root, self.subproject_dir)
+            if os.path.isdir(subprojects_dir):
+                for i in os.listdir(subprojects_dir):
+                    if os.path.isdir(os.path.join(subprojects_dir, i)):
+                        self.do_subproject(SubProject(i))
 
     def extract_subproject_dir(self) -> T.Optional[str]:
         '''Fast path to extract subproject_dir kwarg.
@@ -369,6 +433,18 @@ class IntrospectionInterpreter(AstInterpreter):
             assert isinstance(kw, IdNode), 'for mypy'
             if kw.value == 'subproject_dir':
                 # mypy does not understand "and isinstance"
-                if isinstance(val, BaseStringNode):
+                if isinstance(val, StringNode):
                     return val.value
         return None
+
+    def flatten_kwargs(self, kwargs: T.Dict[str, TYPE_var], include_unknown_args: bool = False) -> T.Dict[str, TYPE_var]:
+        # Like flatten_args_hack(), the values are really TYPE_nvar.
+        flattened_kwargs: TYPE_nkwargs = {}
+        for key, val in T.cast('TYPE_nkwargs', kwargs).items():
+            if isinstance(val, BaseNode):
+                resolved = self.node_to_runtime_value(val)
+                if resolved is not None:
+                    flattened_kwargs[key] = resolved
+            elif isinstance(val, (str, bool, int, float)) or include_unknown_args:
+                flattened_kwargs[key] = val
+        return T.cast('T.Dict[str, TYPE_var]', flattened_kwargs)

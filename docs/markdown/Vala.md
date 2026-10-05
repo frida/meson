@@ -297,13 +297,67 @@ foo_lib = shared_library('foo', 'foo.vala',
                   vala_vapi: 'foo-1.0.vapi',
                   dependencies: [glib_dep, gobject_dep],
                   install: true,
-                  install_dir: [true, true, true])
+                  install_vala_header : true,
+                  install_vala_vapi : true,
+)
+```
+
+*(Before Meson 1.11)* the `install_vala_*` keyword arguments did not exist,
+and setting additional outputs to install was done via passing an array to
+`install_dir`. This array was in the form `[build_target, vala_header,
+vala_vapi, vala_gir]`. Any elements not specified are treated as `false`.
+Whether using the array format or the keywords, the accepted values are: `true`,
+which means "install in default location"; `false`, which means "do not
+install"; and a string value, which means "install to this location".
+
+```meson
+foo_lib = shared_library('foo', 'foo.vala',
+                  vala_header: 'foo.h',
+                  vala_vapi: 'foo-1.0.vapi',
+                  dependencies: [glib_dep, gobject_dep],
+                  install: true,
+                  install_dir: [true, true, true],
+)
 ```
 
 In this example, the second and third elements of the `install_dir`
-array indicate the destination with `true` to use default directories
+array indicate the destination with `true` to use default directories.
 (i.e. `include` and `share/vala/vapi`).
 
+### Depending on C header
+
+*(since 1.10.0)*
+
+Given the previous example,
+
+```meson
+foo_lib = shared_library(...)
+foo_h = foo_lib.vala_header()
+```
+
+This header can now be used like any other generated header to create an
+order-only dependency.
+
+
+### Depending on VAPI header
+
+*(since 1.10.0)*
+
+Given the previous example,
+
+```meson
+foo_lib = shared_library(...)
+foo_vapi = foo_lib.vala_vapi()
+```
+
+### Depending on generated GIR
+
+*(since 1.10.0)*
+
+```meson
+foo_lib = shared_library(..., vala_gir : 'foo.gir')
+foo_gir = foo_lib.vala_gir()
+```
 
 ### GObject Introspection and language bindings
 
@@ -329,15 +383,31 @@ foo_lib = shared_library('foo', 'foo.vala',
                   vala_gir: 'Foo-1.0.gir',
                   dependencies: [glib_dep, gobject_dep],
                   install: true,
-                  install_dir: [true, true, true, true])
+                  install_vala_header : true,
+                  install_vala_gir : true,
+                  install_vala_vapi : true,
+)
 ```
 
-The `true` value in `install_dir` tells Meson to use the default
-directory (i.e. `share/gir-1.0` for GIRs). The fourth element in the
-`install_dir` array indicates where the GIR file will be installed.
+The default install location for gir files is `share/gir-1.0`.
 
 To then generate a typelib file use a custom target with the
 `g-ir-compiler` program and a dependency on the library:
+
+*Since Meson 1.10*, use the `.vala_gir()` method to get a handle to the generated `.gir` file:
+
+```meson
+g_ir_compiler = find_program('g-ir-compiler')
+custom_target('foo typelib', command: [g_ir_compiler, '--output', '@OUTPUT@', '@INPUT@'],
+              input: foo_lib.vala_gir(),
+              output: 'Foo-1.0.typelib',
+              install: true,
+              install_dir: get_option('libdir') / 'girepository-1.0')
+```
+
+
+*Before Meson 1.10*, calculating the path to the input is required, as is adding a
+manual dependency to the vala target:
 
 ```meson
 g_ir_compiler = find_program('g-ir-compiler')

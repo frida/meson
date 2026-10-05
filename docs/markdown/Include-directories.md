@@ -7,7 +7,7 @@ short-description: Instructions on handling include directories
 Most `C`/`C++` projects have headers in different directories than
 sources. Thus you need to specify include directories. Let's assume
 that we are at some subdirectory and wish to add its `include`
-subdirectory to some target's search path. To create a include
+subdirectory to some target's search path. To create an include
 directory object we do this:
 
 ```meson
@@ -27,4 +27,6 @@ proper compiler flags to make it all work.
 
 Another thing to note is that `include_directories` adds both the
 source directory and corresponding build directory to include path, so
-you don't have to care.
+you don't have to care. If it turns out you don't want it after all, this can
+be disabled with the `implicit_include_directories` argument to the [build
+function](Reference-manual_functions.md) you use.

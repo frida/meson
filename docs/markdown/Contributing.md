@@ -150,8 +150,8 @@ Subsets of project tests can be selected with
 time when only a certain part of Meson is being tested.
 For example, a useful and easy contribution to Meson is making
 sure the full set of compilers is supported. One could for example test
-various Fortran compilers by setting `FC=ifort` or `FC=flang` or similar
-with `./run_project_test.py --only fortran`.
+various Fortran compilers by setting `FC=ifort`, `FC=flang` or
+`FC=flang-new` or similar with `./run_project_test.py --only fortran`.
 Some families of tests require a particular backend to run.
 For example, all the CUDA project tests run and pass on Windows via
 `./run_project_tests.py --only cuda --backend ninja`
@@ -320,6 +320,8 @@ considered if the platform matches. The following values for
 | `gcc`      | Not `msvc`                                                           |
 | `cygwin`   | Matches when the platform is cygwin                                  |
 | `!cygwin`  | Not `cygwin`                                                         |
+| `windows`  | Matches when the platform is windows or cygwin                       |
+| `!windows` | Not `windows`                                                        |
 
 #### matrix
 
@@ -501,11 +503,58 @@ those are simple.
 - indent 4 spaces, no tabs ever
 - brace always on the same line as if/for/else/function definition
 
-## External dependencies
+## Dependency support policy
 
 The goal of Meson is to be as easily usable as possible. The user
 experience should be "get Python3 and Ninja, run", even on
-Windows. Unfortunately this means that we can't have dependencies on
+Windows.
+
+Additionally, Meson is popularly used in many core infrastructure packages in a
+Unix (and particularly, Linux) userland. This includes:
+- package managers, such as pacman (Arch Linux) and portage (Gentoo)
+- init systems (systemd, openrc, dinit)
+- graphics stacks (xorg, wayland, libdrm, Mesa, gtk)
+
+As such it needs to be able to run early on when bootstrapping a system from
+scratch.
+
+### Python
+
+We will always support all non EOL versions of CPython. Yes, there are people
+out there using and depending on every old version of python. In fact, there
+are people using and depending on systems that had a brand new python at the
+time of release, but with a much longer support cycle than Python itself. We
+need to balance the tradeoff between supporting those systems and being able to
+improve our own codebase and code quality.
+
+Meson will also be *honest* about what versions of python it supports. When a
+version of CPython becomes EOL, it becomes eligible to be removed from our
+support policy. We cannot guarantee continued support forever for software that
+is not supported by its own developers, even if some deprecated LTS systems out
+there still ship it. However, that doesn't mean we will drop support for those
+versions simply because they are old. If we are not using new functionality
+from new python versions, we will continue to mark Meson as compatible with the
+older version -- and test it in CI!
+
+(Note that contrary to popular belief, it is actually easier to test support
+for very old versions of python than it is to drop support for it. We already
+have the CI setup necessary for testing. Upgrading the CI to use newer versions
+of python, on the other hand, represents mildly painful administrative work
+that has to be done.)
+
+So, in order to start requiring a newer version of python, one should check a
+few factors:
+- are the older versions being dropped, already EOL? [Python EOL chart](https://endoflife.date/python)
+- document the new minimum version of corresponding OSes
+- rationalize the benefit of the change in terms of improvements to development
+  and maintenance of Meson. What new language features will be unlocked by the
+  upgrade, that Meson will be able to make good use of? Not every version has
+  new features requiring an upgrade, and not every new feature is so great we
+  need to drop everything to use it
+
+### External dependencies
+
+Unfortunately this also means that we can't have dependencies on
 projects outside of Python's standard library. This applies only to
 core functionality, though. For additional helper programs etc the use
 of external dependencies may be ok. If you feel that you are dealing

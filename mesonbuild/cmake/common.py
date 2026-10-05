@@ -3,21 +3,27 @@
 
 from __future__ import annotations
 
-from ..mesonlib import MesonException, OptionKey
+from ..mesonlib import MesonException
+from ..options import OptionKey
+from ..tooldetect import detect_ninja
 from .. import mlog
 from pathlib import Path
+import functools
 import typing as T
 
 if T.TYPE_CHECKING:
+    from ..compilers.compilers import Language
     from ..environment import Environment
     from ..interpreterbase import TYPE_var
+    from .._typing import ImmutableListProtocol
 
-language_map = {
+language_map: T.Mapping[Language, str] = {
     'c': 'C',
     'cpp': 'CXX',
     'cuda': 'CUDA',
     'objc': 'OBJC',
     'objcpp': 'OBJCXX',
+    'nasm': 'ASM_NASM',
     'cs': 'CSharp',
     'java': 'Java',
     'fortran': 'Fortran',
@@ -34,6 +40,7 @@ backend_generator_map = {
     'vs2017': 'Visual Studio 15 2017',
     'vs2019': 'Visual Studio 16 2019',
     'vs2022': 'Visual Studio 17 2022',
+    'vs2026': 'Visual Studio 18 2026',
 }
 
 blacklist_cmake_defs = [
@@ -51,14 +58,14 @@ blacklist_cmake_defs = [
 ]
 
 def cmake_is_debug(env: 'Environment') -> bool:
-    if OptionKey('b_vscrt') in env.coredata.options:
-        is_debug = env.coredata.get_option(OptionKey('buildtype')) == 'debug'
-        if env.coredata.options[OptionKey('b_vscrt')].value in {'mdd', 'mtd'}:
+    if OptionKey('b_vscrt') in env.coredata.optstore:
+        is_debug = env.coredata.optstore.get_value_for('buildtype') == 'debug'
+        if env.coredata.optstore.get_value_for('b_vscrt') in {'mdd', 'mtd'}:
             is_debug = True
         return is_debug
     else:
         # Don't directly assign to is_debug to make mypy happy
-        debug_opt = env.coredata.get_option(OptionKey('debug'))
+        debug_opt = env.coredata.optstore.get_value_for('debug')
         assert isinstance(debug_opt, bool)
         return debug_opt
 
@@ -103,11 +110,21 @@ def _flags_to_list(raw: str) -> T.List[str]:
     res = [r for r in res if len(r) > 0]
     return res
 
-def cmake_get_generator_args(env: 'Environment') -> T.List[str]:
-    backend_name = env.coredata.get_option(OptionKey('backend'))
-    assert isinstance(backend_name, str)
+@functools.lru_cache(maxsize=None)
+def _cmake_get_generator_args(backend_name: str) -> ImmutableListProtocol[str]:
     assert backend_name in backend_generator_map
-    return ['-G', backend_generator_map[backend_name]]
+    args = ['-G', backend_generator_map[backend_name]]
+    if backend_name == 'ninja':
+        ninja = detect_ninja()
+        if ninja:
+            assert len(ninja) == 1
+            args += [f'-DCMAKE_MAKE_PROGRAM={ninja[0]}']
+    return args
+
+def cmake_get_generator_args(env: 'Environment') -> T.List[str]:
+    backend_name = env.coredata.optstore.get_value_for(OptionKey('backend'))
+    assert isinstance(backend_name, str)
+    return list(_cmake_get_generator_args(backend_name))
 
 def cmake_defines_to_args(raw: T.List[T.Dict[str, TYPE_var]], permissive: bool = False) -> T.List[str]:
     res: T.List[str] = []
@@ -120,10 +137,8 @@ def cmake_defines_to_args(raw: T.List[T.Dict[str, TYPE_var]], permissive: bool =
                 mlog.warning('  --> Ignoring this option')
                 continue
             if isinstance(val, (str, int, float)):
+                # FIXME: should bool use ON/OFF instead?
                 res += [f'-D{key}={val}']
-            elif isinstance(val, bool):
-                val_str = 'ON' if val else 'OFF'
-                res += [f'-D{key}={val_str}']
             else:
                 raise MesonException('Type "{}" of "{}" is not supported as for a CMake define value'.format(type(val).__name__, key))
 

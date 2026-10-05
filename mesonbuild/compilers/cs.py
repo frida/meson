@@ -3,18 +3,17 @@
 
 from __future__ import annotations
 
-import os.path, subprocess
+import os.path
 import textwrap
 import typing as T
 
-from ..mesonlib import EnvironmentException
 from ..linkers import RSPFileSyntax
 
 from .compilers import Compiler
 from .mixins.islinker import BasicLinkerIsCompilerMixin
 
 if T.TYPE_CHECKING:
-    from ..envconfig import MachineInfo
+    from ..dependencies import Dependency
     from ..environment import Environment
     from ..mesonlib import MachineChoice
 
@@ -34,8 +33,8 @@ class CsCompiler(BasicLinkerIsCompilerMixin, Compiler):
     language = 'cs'
 
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice,
-                 info: 'MachineInfo', runner: T.Optional[str] = None):
-        super().__init__([], exelist, version, for_machine, info)
+                 env: Environment, runner: T.Optional[str] = None):
+        super().__init__([], exelist, version, for_machine, env)
         self.runner = runner
 
     @classmethod
@@ -43,9 +42,6 @@ class CsCompiler(BasicLinkerIsCompilerMixin, Compiler):
         return 'C sharp'
 
     def get_always_args(self) -> T.List[str]:
-        return ['/nologo']
-
-    def get_linker_always_args(self) -> T.List[str]:
         return ['/nologo']
 
     def get_output_args(self, fname: str) -> T.List[str]:
@@ -59,6 +55,12 @@ class CsCompiler(BasicLinkerIsCompilerMixin, Compiler):
 
     def get_pic_args(self) -> T.List[str]:
         return []
+
+    def get_dependency_compile_args(self, dep: Dependency) -> T.List[str]:
+        # Historically we ignored all compile args.  Accept what we can, but
+        # filter out -I arguments, which are in some pkg-config files and
+        # aren't accepted by mcs.
+        return [a for a in dep.get_compile_args() if not a.startswith('-I')]
 
     def compute_parameters_with_absolute_paths(self, parameter_list: T.List[str],
                                                build_dir: str) -> T.List[str]:
@@ -76,29 +78,18 @@ class CsCompiler(BasicLinkerIsCompilerMixin, Compiler):
     def get_pch_name(self, header_name: str) -> str:
         return ''
 
-    def sanity_check(self, work_dir: str, environment: 'Environment') -> None:
-        src = 'sanity.cs'
-        obj = 'sanity.exe'
-        source_name = os.path.join(work_dir, src)
-        with open(source_name, 'w', encoding='utf-8') as ofile:
-            ofile.write(textwrap.dedent('''
-                public class Sanity {
-                    static public void Main () {
-                    }
+    def _sanity_check_source_code(self) -> str:
+        return textwrap.dedent('''
+            public class Sanity {
+                static public void Main () {
                 }
-                '''))
-        pc = subprocess.Popen(self.exelist + self.get_always_args() + [src], cwd=work_dir)
-        pc.wait()
-        if pc.returncode != 0:
-            raise EnvironmentException('C# compiler %s cannot compile programs.' % self.name_string())
+            }
+            ''')
+
+    def _sanity_check_run_with_exe_wrapper(self, command: T.List[str]) -> T.List[str]:
         if self.runner:
-            cmdlist = [self.runner, obj]
-        else:
-            cmdlist = [os.path.join(work_dir, obj)]
-        pe = subprocess.Popen(cmdlist, cwd=work_dir)
-        pe.wait()
-        if pe.returncode != 0:
-            raise EnvironmentException('Executables created by Mono compiler %s are not runnable.' % self.name_string())
+            return [self.runner] + command
+        return command
 
     def needs_static_linker(self) -> bool:
         return False
@@ -115,8 +106,8 @@ class MonoCompiler(CsCompiler):
     id = 'mono'
 
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice,
-                 info: 'MachineInfo'):
-        super().__init__(exelist, version, for_machine, info, runner='mono')
+                 env: Environment):
+        super().__init__(exelist, version, for_machine, env, runner='mono')
 
     def rsp_file_syntax(self) -> 'RSPFileSyntax':
         return RSPFileSyntax.GCC

@@ -12,8 +12,9 @@ Windows.
   windows.compile_resources(...(string | File | CustomTarget | CustomTargetIndex),
                             args: []string,
                             depend_files: [](string | File),
-                            depends: [](BuildTarget | CustomTarget)
+                            depends: [](BuildTarget | CustomTarget | CustomTargetIndex)
                             include_directories: [](IncludeDirectories | string)): []CustomTarget
+                            implicit_include_directories: bool
 ```
 
 Compiles Windows `rc` files specified in the positional arguments.
@@ -34,10 +35,13 @@ This method has the following keyword arguments:
 - `include_directories` lists directories to be both searched by the resource
   compiler for referenced resource files, and added to the preprocessor include
   search path.
+- `implicit_include_directories` Controls whether Meson adds
+  the current source and build directories to the include path (*since 1.11.0*)
 
 The resource compiler executable used is the first which exists from the
 following list:
 
 1. The `windres` executable given in the `[binaries]` section of the cross-file
-2. The `WINDRES` environment variable
-3. The resource compiler which is part of the same toolset as the C or C++ compiler in use.
+2. The `RC` environment variable
+3. The `WINDRES` environment variable
+4. The resource compiler which is part of the same toolset as the C or C++ compiler in use.

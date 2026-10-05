@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2019 The Meson development team
+# Copyright © 2023 Intel Corporation
 
 from __future__ import annotations
 
@@ -14,11 +15,12 @@ classes for those cases.
 import typing as T
 
 from ...mesonlib import EnvironmentException, MesonException, is_windows
+from ..compilers import CompileCheckMode
 
 if T.TYPE_CHECKING:
-    from ...coredata import KeyedOptionDictType
-    from ...environment import Environment
     from ...compilers.compilers import Compiler
+    from ...build import BuildTarget
+    from ...options import OptionStore
 else:
     # This is a bit clever, for mypy we pretend that these mixins descend from
     # Compiler, so we get all of the methods and attributes defined for us, but
@@ -36,11 +38,11 @@ class BasicLinkerIsCompilerMixin(Compiler):
     functionality itself.
     """
 
-    def sanitizer_link_args(self, value: str) -> T.List[str]:
+    def sanitizer_link_args(self, target: BuildTarget, value: T.List[str]) -> T.List[str]:
         return []
 
-    def get_lto_link_args(self, *, threads: int = 0, mode: str = 'default',
-                          thinlto_cache_dir: T.Optional[str] = None) -> T.List[str]:
+    def get_lto_link_args(self, *, target: T.Optional[BuildTarget] = None, threads: int = 0,
+                          mode: str = 'default', thinlto_cache_dir: T.Optional[str] = None) -> T.List[str]:
         return []
 
     def can_linker_accept_rsp(self) -> bool:
@@ -55,13 +57,18 @@ class BasicLinkerIsCompilerMixin(Compiler):
     def get_linker_always_args(self) -> T.List[str]:
         return []
 
+    def _sanity_check_mode(self) -> CompileCheckMode:
+        # These compilers produce an executable in one step, there is no
+        # separate link phase that could be skipped.
+        return CompileCheckMode.LINK
+
     def get_linker_lib_prefix(self) -> str:
         return ''
 
-    def get_option_link_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
+    def get_option_link_args(self, target: BuildTarget, subproject: T.Optional[str] = None) -> T.List[str]:
         return []
 
-    def has_multi_link_args(self, args: T.List[str], env: 'Environment') -> T.Tuple[bool, bool]:
+    def has_multi_link_args(self, args: T.List[str]) -> T.Tuple[bool, bool]:
         return False, False
 
     def get_link_debugfile_args(self, targetfile: str) -> T.List[str]:
@@ -70,7 +77,7 @@ class BasicLinkerIsCompilerMixin(Compiler):
     def get_std_shared_lib_link_args(self) -> T.List[str]:
         return []
 
-    def get_std_shared_module_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
+    def get_std_shared_module_args(self, options: OptionStore) -> T.List[str]:
         return self.get_std_shared_lib_link_args()
 
     def get_link_whole_for(self, args: T.List[str]) -> T.List[str]:
@@ -94,14 +101,14 @@ class BasicLinkerIsCompilerMixin(Compiler):
     def bitcode_args(self) -> T.List[str]:
         raise MesonException("This linker doesn't support bitcode bundles")
 
-    def get_soname_args(self, env: 'Environment', prefix: str, shlib_name: str,
+    def get_soname_args(self, prefix: str, shlib_name: str,
                         suffix: str, soversion: str,
                         darwin_versions: T.Tuple[str, str]) -> T.List[str]:
         raise MesonException("This linker doesn't support soname args")
 
-    def build_rpath_args(self, env: 'Environment', build_dir: str, from_dir: str,
-                         rpath_paths: T.Tuple[str, ...], build_rpath: str,
-                         install_rpath: str) -> T.Tuple[T.List[str], T.Set[bytes]]:
+    def build_rpath_args(self, build_dir: str, from_dir: str, target: BuildTarget,
+                         extra_paths: T.Optional[T.List[str]] = None
+                         ) -> T.Tuple[T.List[str], T.Set[bytes]]:
         return ([], set())
 
     def get_asneeded_args(self) -> T.List[str]:
@@ -110,11 +117,14 @@ class BasicLinkerIsCompilerMixin(Compiler):
     def get_optimization_link_args(self, optimization_level: str) -> T.List[str]:
         return []
 
+    def get_linker_fatal_warnings(self) -> T.List[str]:
+        return []
+
     def get_link_debugfile_name(self, targetfile: str) -> T.Optional[str]:
         return None
 
-    def thread_flags(self, env: 'Environment') -> T.List[str]:
+    def thread_flags(self) -> T.List[str]:
         return []
 
-    def thread_link_flags(self, env: 'Environment') -> T.List[str]:
+    def thread_link_flags(self) -> T.List[str]:
         return []

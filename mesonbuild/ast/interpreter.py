@@ -8,8 +8,12 @@ from __future__ import annotations
 import os
 import sys
 import typing as T
+from collections import defaultdict
+from dataclasses import dataclass
+import itertools
+from pathlib import Path
 
-from .. import mparser, mesonlib
+from .. import mparser, mesonlib, mlog
 from .. import environment
 
 from ..interpreterbase import (
@@ -20,6 +24,10 @@ from ..interpreterbase import (
     ContinueRequest,
     Disabler,
     default_resolve_key,
+    is_disabled,
+    UnknownValue,
+    UndefinedVariable,
+    InterpreterObject,
 )
 
 from ..interpreter import (
@@ -31,25 +39,25 @@ from ..interpreter import (
 )
 
 from ..mparser import (
-    ArgumentNode,
     ArithmeticNode,
     ArrayNode,
     AssignmentNode,
     BaseNode,
-    ElementaryNode,
     EmptyNode,
     IdNode,
     MethodNode,
     NotNode,
     PlusAssignmentNode,
     TernaryNode,
-    TestCaseClauseNode,
+    SymbolNode,
+    Token,
+    FunctionNode,
 )
 
 if T.TYPE_CHECKING:
     from .visitor import AstVisitor
     from ..interpreter import Interpreter
-    from ..interpreterbase import SubProject, TYPE_nkwargs, TYPE_var
+    from ..interpreterbase import TYPE_var, TYPE_kwargs
     from ..mparser import (
         AndNode,
         ComparisonNode,
@@ -57,42 +65,139 @@ if T.TYPE_CHECKING:
         IfClauseNode,
         IndexNode,
         OrNode,
+        TestCaseClauseNode,
         UMinusNode,
     )
+    from ..mesonlib import HoldableObject, SubProject
 
-class DontCareObject(MesonInterpreterObject):
-    pass
-
-class MockExecutable(MesonInterpreterObject):
-    pass
-
-class MockStaticLibrary(MesonInterpreterObject):
-    pass
-
-class MockSharedLibrary(MesonInterpreterObject):
-    pass
-
-class MockCustomTarget(MesonInterpreterObject):
-    pass
-
-class MockRunTarget(MesonInterpreterObject):
-    pass
-
-ADD_SOURCE = 0
-REMOVE_SOURCE = 1
+    TYPE_ivar = T.Union[str, int, bool, 'HoldableObject', 'MesonInterpreterObject',
+                        'UnknownValue', 'IntrospectionBuildTarget', 'IntrospectionFile',
+                        'IntrospectionDependency', list['TYPE_ivar'], dict[str | UnknownValue, 'TYPE_ivar']]
+    TYPE_nvar = T.Union[TYPE_ivar, mparser.BaseNode]
+    TYPE_nkwargs = T.Dict[str, TYPE_nvar]
 
 _T = T.TypeVar('_T')
 _V = T.TypeVar('_V')
 
+def _symbol(val: str) -> SymbolNode:
+    return SymbolNode(Token('', '', 0, 0, 0, (0, 0), val))
+
+# `IntrospectionFile` is to the `IntrospectionInterpreter` what `File` is to the normal `Interpreter`.
+@dataclass
+class IntrospectionFile:
+    subdir: str
+    rel: str
+
+    def to_abs_path(self, root_dir: Path) -> Path:
+        return (root_dir / self.subdir / self.rel).resolve()
+
+    def __hash__(self) -> int:
+        return hash((self.__class__.__name__, self.subdir, self.rel))
+
+# `IntrospectionDependency` is to the `IntrospectionInterpreter` what `Dependency` is to the normal `Interpreter`.
+@dataclass
+class IntrospectionDependency(MesonInterpreterObject):
+    name: T.Union[str, UnknownValue]
+    required: T.Union[bool, UnknownValue]
+    version: T.Union[T.List[str], UnknownValue]
+    has_fallback: bool
+    conditional: bool
+    node: FunctionNode
+
+# `IntrospectionBuildTarget` is to the `IntrospectionInterpreter` what `BuildTarget` is to the normal `Interpreter`.
+@dataclass
+class IntrospectionBuildTarget(MesonInterpreterObject):
+    name: str
+    machine: str
+    id: str
+    typename: str
+    defined_in: str
+    subdir: str
+    build_by_default: T.Union[bool, UnknownValue]
+    installed: T.Union[bool, UnknownValue]
+    outputs: T.List[str]
+    source_nodes: T.List[BaseNode]
+    extra_files: BaseNode
+    kwargs: T.Dict[str, TYPE_var]
+    node: FunctionNode
+
+def is_ignored_edge(src: T.Union[BaseNode, UnknownValue]) -> bool:
+    return (isinstance(src, FunctionNode) and src.func_name.value not in {'files', 'get_variable'}) or isinstance(src, MethodNode)
+
+class DataflowDAG:
+    src_to_tgts: T.DefaultDict[T.Union[BaseNode, UnknownValue], T.Set[T.Union[BaseNode, UnknownValue]]]
+    tgt_to_srcs: T.DefaultDict[T.Union[BaseNode, UnknownValue], T.Set[T.Union[BaseNode, UnknownValue]]]
+
+    def __init__(self) -> None:
+        self.src_to_tgts = defaultdict(set)
+        self.tgt_to_srcs = defaultdict(set)
+
+    def add_edge(self, source: T.Union[BaseNode, UnknownValue], target: T.Union[BaseNode, UnknownValue]) -> None:
+        self.src_to_tgts[source].add(target)
+        self.tgt_to_srcs[target].add(source)
+
+    # Returns all nodes in the DAG that are reachable from a node in `srcs`.
+    # In other words, A node `a` is part of the returned set exactly if data
+    # from `srcs` flows into `a`, directly or indirectly.
+    # Certain edges are ignored.
+    def reachable(self, srcs: T.Set[T.Union[BaseNode, UnknownValue]], reverse: bool) -> T.Set[T.Union[BaseNode, UnknownValue]]:
+        reachable = srcs.copy()
+        active = srcs.copy()
+        while active:
+            new: T.Set[T.Union[BaseNode, UnknownValue]] = set()
+            if reverse:
+                for tgt in active:
+                    new.update(src for src in self.tgt_to_srcs[tgt] if not is_ignored_edge(src))
+            else:
+                for src in active:
+                    if is_ignored_edge(src):
+                        continue
+                    new.update(tgt for tgt in self.src_to_tgts[src])
+            reachable.update(new)
+            active = new
+        return reachable
+
+    # Returns all paths from src to target.
+    # Certain edges are ignored.
+    def find_all_paths(self, src: T.Union[BaseNode, UnknownValue], target: T.Union[BaseNode, UnknownValue]) -> T.List[T.List[T.Union[BaseNode, UnknownValue]]]:
+        queue = [(src, [src])]
+        paths = []
+        while queue:
+            cur, path = queue.pop()
+            if cur == target:
+                paths.append(path)
+            if is_ignored_edge(cur):
+                continue
+            queue.extend((tgt, path + [tgt]) for tgt in self.src_to_tgts[cur])
+        return paths
 
 class AstInterpreter(InterpreterBase):
-    def __init__(self, source_root: str, subdir: str, subproject: SubProject, visitors: T.Optional[T.List[AstVisitor]] = None):
-        super().__init__(source_root, subdir, subproject)
+    def __init__(self, source_root: str, subdir: str, subproject: SubProject, subproject_dir: str, env: environment.Environment, visitors: T.Optional[T.List[AstVisitor]] = None):
+        super().__init__(source_root, subdir, subproject, subproject_dir, env)
         self.visitors = visitors if visitors is not None else []
-        self.processed_buildfiles: T.Set[str] = set()
-        self.assignments: T.Dict[str, BaseNode] = {}
-        self.assign_vals: T.Dict[str, T.Any] = {}
-        self.reverse_assignment: T.Dict[str, BaseNode] = {}
+        self.nesting: T.List[int] = []
+        self.cur_assignments: T.DefaultDict[str, T.List[T.Tuple[T.List[int], T.Union[BaseNode, UnknownValue]]]] = defaultdict(list)
+        self.all_assignment_nodes: T.DefaultDict[str, T.List[AssignmentNode]] = defaultdict(list)
+        # dataflow_dag is an acyclic directed graph that contains an edge
+        # from one instance of `BaseNode` to another instance of `BaseNode` if
+        # data flows directly from one to the other. Example: If meson.build
+        # contains this:
+        # var = 'foo' + '123'
+        # executable(var, 'src.c')
+        # var = 'bar'
+        # dataflow_dag will contain an edge from the IdNode corresponding to
+        # 'var' in line 2 to the ArithmeticNode corresponding to 'foo' + '123'.
+        # This graph is crucial for e.g. node_to_runtime_value because we have
+        # to know that 'var' in line2 is 'foo123' and not 'bar'.
+        self.dataflow_dag = DataflowDAG()
+        self.funcvals: T.Dict[BaseNode, T.Any] = {}
+        self.tainted = False
+        self.predefined_vars = {
+            'meson': UnknownValue(),
+            'host_machine': UnknownValue(),
+            'build_machine': UnknownValue(),
+            'target_machine': UnknownValue()
+        }
         self.funcs.update({'project': self.func_do_nothing,
                            'test': self.func_do_nothing,
                            'benchmark': self.func_do_nothing,
@@ -125,7 +230,7 @@ class AstInterpreter(InterpreterBase):
                            'vcs_tag': self.func_do_nothing,
                            'add_languages': self.func_do_nothing,
                            'declare_dependency': self.func_do_nothing,
-                           'files': self.func_do_nothing,
+                           'files': self.func_files,
                            'executable': self.func_do_nothing,
                            'static_library': self.func_do_nothing,
                            'shared_library': self.func_do_nothing,
@@ -134,12 +239,13 @@ class AstInterpreter(InterpreterBase):
                            'custom_target': self.func_do_nothing,
                            'run_target': self.func_do_nothing,
                            'subdir': self.func_subdir,
-                           'set_variable': self.func_do_nothing,
-                           'get_variable': self.func_do_nothing,
-                           'unset_variable': self.func_do_nothing,
+                           'set_variable': self.func_set_variable,
+                           'get_variable': self.func_get_variable,
+                           'unset_variable': self.func_unset_variable,
                            'is_disabler': self.func_do_nothing,
                            'is_variable': self.func_do_nothing,
                            'disabler': self.func_do_nothing,
+                           'default': self.func_do_nothing,
                            'jar': self.func_do_nothing,
                            'warning': self.func_do_nothing,
                            'shared_module': self.func_do_nothing,
@@ -154,14 +260,14 @@ class AstInterpreter(InterpreterBase):
                            'debug': self.func_do_nothing,
                            })
 
-    def _unholder_args(self, args: _T, kwargs: _V) -> T.Tuple[_T, _V]:
+    def _unholder_args(self, args: T.Any, kwargs: T.Any) -> T.Tuple[T.Any, T.Any]:
         return args, kwargs
 
-    def _holderify(self, res: _T) -> _T:
+    def _holderify(self, res: T.Any) -> T.Any:
         return res
 
-    def func_do_nothing(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> bool:
-        return True
+    def func_do_nothing(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> UnknownValue:
+        return UnknownValue()
 
     def load_root_meson_file(self) -> None:
         super().load_root_meson_file()
@@ -169,59 +275,68 @@ class AstInterpreter(InterpreterBase):
             self.ast.accept(i)
 
     def func_subdir(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> None:
-        args = self.flatten_args(args)
+        args = self.flatten_args_hack(args)
         if len(args) != 1 or not isinstance(args[0], str):
             sys.stderr.write(f'Unable to evaluate subdir({args}) in AstInterpreter --> Skipping\n')
             return
 
-        prev_subdir = self.subdir
-        subdir = os.path.join(prev_subdir, args[0])
-        absdir = os.path.join(self.source_root, subdir)
-        buildfilename = os.path.join(subdir, environment.build_filename)
-        absname = os.path.join(self.source_root, buildfilename)
-        symlinkless_dir = os.path.realpath(absdir)
-        build_file = os.path.join(symlinkless_dir, 'meson.build')
-        if build_file in self.processed_buildfiles:
+        subdir, is_new = self._resolve_subdir(self.source_root, args[0])
+        if not is_new:
             sys.stderr.write('Trying to enter {} which has already been visited --> Skipping\n'.format(args[0]))
             return
-        self.processed_buildfiles.add(build_file)
 
-        if not os.path.isfile(absname):
+        if not self._evaluate_subdir(self.source_root, subdir, self.visitors):
+            buildfilename = os.path.join(subdir, environment.build_filename)
             sys.stderr.write(f'Unable to find build file {buildfilename} --> Skipping\n')
-            return
-        with open(absname, encoding='utf-8') as f:
-            code = f.read()
-        assert isinstance(code, str)
-        try:
-            codeblock = mparser.Parser(code, absname).parse()
-        except mesonlib.MesonException as me:
-            me.file = absname
-            raise me
 
-        self.subdir = subdir
-        for i in self.visitors:
-            codeblock.accept(i)
-        self.evaluate_codeblock(codeblock)
-        self.subdir = prev_subdir
+    def inner_method_call(self, iobj: TYPE_ivar, method_name: str, iargs: T.List[TYPE_ivar], nkwargs: TYPE_nkwargs) -> TYPE_ivar:
+        for arg in itertools.chain(iargs, nkwargs.values()):
+            if isinstance(arg, UnknownValue):
+                return UnknownValue()
 
-    def method_call(self, node: BaseNode) -> bool:
-        return True
+        args = T.cast('list[TYPE_var]', iargs)
+        kwargs = T.cast('TYPE_kwargs', nkwargs)
+        if isinstance(iobj, str):
+            result = StringHolder(iobj, T.cast('Interpreter', self)).method_call(method_name, args, kwargs)
+        elif isinstance(iobj, bool):
+            result = BooleanHolder(iobj, T.cast('Interpreter', self)).method_call(method_name, args, kwargs)
+        elif isinstance(iobj, int):
+            result = IntegerHolder(iobj, T.cast('Interpreter', self)).method_call(method_name, args, kwargs)
+        elif isinstance(iobj, list):
+            obj = T.cast('list[TYPE_var]', iobj) # assuming ArrayHolder is fine with receiving TYPE_ivars...
+            result = ArrayHolder(obj, T.cast('Interpreter', self)).method_call(method_name, args, kwargs)
+        elif isinstance(iobj, dict):
+            obj = T.cast('dict[str, TYPE_var]', iobj) # assuming DictHolder is fine with receiving TYPE_ivars...
+            result = DictHolder(obj, T.cast('Interpreter', self)).method_call(method_name, args, kwargs)
+        else:
+            return UnknownValue()
+        return T.cast('TYPE_ivar', result)
 
-    def evaluate_fstring(self, node: mparser.FormatStringNode) -> str:
-        assert isinstance(node, mparser.FormatStringNode)
-        return node.value
+    def method_call(self, node: mparser.MethodNode) -> None:
+        invocable = node.source_object
+        self.evaluate_statement(invocable)
+        obj = self.node_to_runtime_value(invocable)
+        method_name = node.name.value
+        (args, kwargs) = self.reduce_arguments(node.args)
+        if is_disabled(args, kwargs):
+            res = Disabler()
+        else:
+            res = self.inner_method_call(obj, method_name, args, kwargs)
+        self.funcvals[node] = res
 
-    def evaluate_arraystatement(self, cur: mparser.ArrayNode) -> TYPE_var:
-        return self.reduce_arguments(cur.args)[0]
+    def evaluate_fstring(self, node: mparser.StringNode) -> None:
+        pass
 
-    def evaluate_arithmeticstatement(self, cur: ArithmeticNode) -> int:
+    def evaluate_arraystatement(self, cur: mparser.ArrayNode) -> None:
+        for arg in cur.args.arguments:
+            self.evaluate_statement(arg)
+
+    def evaluate_arithmeticstatement(self, cur: ArithmeticNode) -> None:
         self.evaluate_statement(cur.left)
         self.evaluate_statement(cur.right)
-        return 0
 
-    def evaluate_uminusstatement(self, cur: UMinusNode) -> int:
+    def evaluate_uminusstatement(self, cur: UMinusNode) -> None:
         self.evaluate_statement(cur.value)
-        return 0
 
     def evaluate_ternary(self, node: TernaryNode) -> None:
         assert isinstance(node, TernaryNode)
@@ -229,213 +344,486 @@ class AstInterpreter(InterpreterBase):
         self.evaluate_statement(node.trueblock)
         self.evaluate_statement(node.falseblock)
 
-    def evaluate_dictstatement(self, node: mparser.DictNode) -> TYPE_nkwargs:
-        def resolve_key(node: mparser.BaseNode) -> str:
-            if isinstance(node, mparser.BaseStringNode):
-                return node.value
-            return '__AST_UNKNOWN__'
-        arguments, kwargs = self.reduce_arguments(node.args, key_resolver=resolve_key)
-        assert not arguments
-        self.argument_depth += 1
-        for key, value in kwargs.items():
-            if isinstance(key, BaseNode):
-                self.evaluate_statement(key)
-        self.argument_depth -= 1
-        return {}
+    def evaluate_dictstatement(self, node: mparser.DictNode) -> None:
+        for k, v in node.args.kwargs.items():
+            self.evaluate_statement(k)
+            self.evaluate_statement(v)
 
-    def evaluate_plusassign(self, node: PlusAssignmentNode) -> None:
-        assert isinstance(node, PlusAssignmentNode)
-        # Cheat by doing a reassignment
-        self.assignments[node.var_name.value] = node.value  # Save a reference to the value node
-        if node.value.ast_id:
-            self.reverse_assignment[node.value.ast_id] = node
-        self.assign_vals[node.var_name.value] = self.evaluate_statement(node.value)
+    def evaluate_indexing(self, node: IndexNode) -> None:
+        self.evaluate_statement(node.iobject)
+        self.evaluate_statement(node.index)
 
-    def evaluate_indexing(self, node: IndexNode) -> int:
-        return 0
-
-    def unknown_function_called(self, func_name: str) -> None:
-        pass
-
-    def reduce_arguments(
+    # this returns a different type than the supertype; TYPE_nvar and TYPE_nkwargs
+    # are limited to the AstInterpreter
+    def reduce_arguments( # type: ignore[override]
                 self,
                 args: mparser.ArgumentNode,
                 key_resolver: T.Callable[[mparser.BaseNode], str] = default_resolve_key,
                 duplicate_key_error: T.Optional[str] = None,
-            ) -> T.Tuple[T.List[TYPE_var], TYPE_nkwargs]:
-        if isinstance(args, ArgumentNode):
-            kwargs: T.Dict[str, TYPE_var] = {}
-            for key, val in args.kwargs.items():
-                kwargs[key_resolver(key)] = val
-            if args.incorrect_order():
-                raise InvalidArguments('All keyword arguments must be after positional arguments.')
-            return self.flatten_args(args.arguments), kwargs
-        else:
-            return self.flatten_args(args), {}
+            ) -> T.Tuple[T.List[TYPE_ivar], TYPE_nkwargs]:
+        for arg in args.arguments:
+            self.evaluate_statement(arg)
+        for value in args.kwargs.values():
+            self.evaluate_statement(value)
+        kwargs: TYPE_nkwargs = {}
+        for key, val in args.kwargs.items():
+            kwargs[key_resolver(key)] = val
+        if args.incorrect_order():
+            raise InvalidArguments('All keyword arguments must be after positional arguments.')
+        return self.flatten_args(args.arguments), kwargs
 
-    def evaluate_comparison(self, node: ComparisonNode) -> bool:
+    def evaluate_comparison(self, node: ComparisonNode) -> None:
         self.evaluate_statement(node.left)
         self.evaluate_statement(node.right)
-        return False
 
-    def evaluate_andstatement(self, cur: AndNode) -> bool:
+    def evaluate_andstatement(self, cur: AndNode) -> None:
         self.evaluate_statement(cur.left)
         self.evaluate_statement(cur.right)
-        return False
 
-    def evaluate_orstatement(self, cur: OrNode) -> bool:
+    def evaluate_orstatement(self, cur: OrNode) -> None:
         self.evaluate_statement(cur.left)
         self.evaluate_statement(cur.right)
-        return False
 
-    def evaluate_notstatement(self, cur: NotNode) -> bool:
+    def evaluate_notstatement(self, cur: NotNode) -> None:
         self.evaluate_statement(cur.value)
-        return False
+
+    def find_potential_writes(self, node: BaseNode) -> T.Set[str]:
+        if isinstance(node, mparser.ForeachClauseNode):
+            return {el.value for el in node.varnames} | self.find_potential_writes(node.block)
+        elif isinstance(node, mparser.CodeBlockNode):
+            ret = set()
+            for line in node.lines:
+                ret.update(self.find_potential_writes(line))
+            return ret
+        elif isinstance(node, (AssignmentNode, PlusAssignmentNode)):
+            return set([node.var_name.value]) | self.find_potential_writes(node.value)
+        elif isinstance(node, IdNode):
+            return set()
+        elif isinstance(node, ArrayNode):
+            ret = set()
+            for arg in node.args.arguments:
+                ret.update(self.find_potential_writes(arg))
+            return ret
+        elif isinstance(node, mparser.DictNode):
+            ret = set()
+            for k, v in node.args.kwargs.items():
+                ret.update(self.find_potential_writes(k))
+                ret.update(self.find_potential_writes(v))
+            return ret
+        elif isinstance(node, FunctionNode):
+            ret = set()
+            for arg in node.args.arguments:
+                ret.update(self.find_potential_writes(arg))
+            for arg in node.args.kwargs.values():
+                ret.update(self.find_potential_writes(arg))
+            return ret
+        elif isinstance(node, MethodNode):
+            ret = self.find_potential_writes(node.source_object)
+            for arg in node.args.arguments:
+                ret.update(self.find_potential_writes(arg))
+            for arg in node.args.kwargs.values():
+                ret.update(self.find_potential_writes(arg))
+            return ret
+        elif isinstance(node, ArithmeticNode):
+            return self.find_potential_writes(node.left) | self.find_potential_writes(node.right)
+        elif isinstance(node, (mparser.NumberNode, mparser.StringNode, mparser.BreakNode, mparser.BooleanNode, mparser.ContinueNode)):
+            return set()
+        elif isinstance(node, mparser.IfClauseNode):
+            if isinstance(node.elseblock, EmptyNode):
+                ret = set()
+            else:
+                ret = self.find_potential_writes(node.elseblock.block)
+            for i in node.ifs:
+                ret.update(self.find_potential_writes(i))
+            return ret
+        elif isinstance(node, mparser.IndexNode):
+            return self.find_potential_writes(node.iobject) | self.find_potential_writes(node.index)
+        elif isinstance(node, mparser.IfNode):
+            return self.find_potential_writes(node.condition) | self.find_potential_writes(node.block)
+        elif isinstance(node, (mparser.ComparisonNode, mparser.OrNode, mparser.AndNode)):
+            return self.find_potential_writes(node.left) | self.find_potential_writes(node.right)
+        elif isinstance(node, mparser.NotNode):
+            return self.find_potential_writes(node.value)
+        elif isinstance(node, mparser.TernaryNode):
+            return self.find_potential_writes(node.condition) | self.find_potential_writes(node.trueblock) | self.find_potential_writes(node.falseblock)
+        elif isinstance(node, mparser.UMinusNode):
+            return self.find_potential_writes(node.value)
+        elif isinstance(node, mparser.ParenthesizedNode):
+            return self.find_potential_writes(node.inner)
+        raise mesonlib.MesonBugException('Unhandled node type')
 
     def evaluate_foreach(self, node: ForeachClauseNode) -> None:
+        asses = self.find_potential_writes(node)
+        for ass in asses:
+            self.cur_assignments[ass].append((self.nesting.copy(), UnknownValue()))
         try:
             self.evaluate_codeblock(node.block)
         except ContinueRequest:
             pass
         except BreakRequest:
             pass
+        for ass in asses:
+            self.cur_assignments[ass].append((self.nesting.copy(), UnknownValue())) # In case the foreach loops 0 times.
 
     def evaluate_if(self, node: IfClauseNode) -> None:
+        self.nesting.append(0)
         for i in node.ifs:
             self.evaluate_codeblock(i.block)
+            self.nesting[-1] += 1
         if not isinstance(node.elseblock, EmptyNode):
             self.evaluate_codeblock(node.elseblock.block)
+        self.nesting.pop()
+        for var_name in self.cur_assignments:
+            potential_values = []
+            oldval = self.get_cur_value_if_defined(var_name)
+            if not isinstance(oldval, UndefinedVariable):
+                potential_values.append(oldval)
+            for nesting, value in self.cur_assignments[var_name]:
+                if len(nesting) > len(self.nesting):
+                    potential_values.append(value)
+            self.cur_assignments[var_name] = [(nesting, v) for (nesting, v) in self.cur_assignments[var_name] if len(nesting) <= len(self.nesting)]
+            if len(potential_values) > 1 or (len(potential_values) > 0 and isinstance(oldval, UndefinedVariable)):
+                uv = UnknownValue()
+                for pv in potential_values:
+                    self.dataflow_dag.add_edge(pv, uv)
+                self.cur_assignments[var_name].append((self.nesting.copy(), uv))
 
-    def get_variable(self, varname: str) -> int:
-        return 0
+    def func_files(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> T.Any:
+        ret: T.List[T.Union[IntrospectionFile, UnknownValue]] = []
+        for arg in args:
+            if isinstance(arg, str):
+                ret.append(IntrospectionFile(self.subdir, arg))
+            elif isinstance(arg, UnknownValue):
+                ret.append(UnknownValue())
+            else:
+                raise TypeError
+        return ret
+
+    def get_cur_value_if_defined(self, var_name: str) -> T.Union[BaseNode, UnknownValue, UndefinedVariable]:
+        if var_name in self.predefined_vars:
+            return self.predefined_vars[var_name]
+        for nesting, value in reversed(self.cur_assignments[var_name]):
+            if len(self.nesting) >= len(nesting) and self.nesting[:len(nesting)] == nesting:
+                return value
+        if self.tainted:
+            return UnknownValue()
+        return UndefinedVariable()
+
+    def get_cur_value(self, var_name: str) -> T.Union[BaseNode, UnknownValue]:
+        ret = self.get_cur_value_if_defined(var_name)
+        if isinstance(ret, UndefinedVariable):
+            path = mlog.get_relative_path(Path(self.current_node.filename), Path(os.getcwd()))
+            mlog.warning(f"{path}:{self.current_node.lineno}:{self.current_node.colno} will always crash if executed, since a variable named `{var_name}` is not defined")
+            # We could add more advanced analysis of code referencing undefined
+            # variables, but it is probably not worth the effort and the
+            # complexity. So we do the simplest thing, returning an
+            # UnknownValue.
+            return UnknownValue()
+        return ret
+
+    # The function `node_to_runtime_value` takes a node of the ast as an
+    # argument and tries to return the same thing that would be passed to e.g.
+    # `func_message` if you put `message(node)` in your `meson.build` file and
+    # run `meson setup`. If this is not possible, `UnknownValue()` is returned.
+    # There are 3 Reasons why this is sometimes impossible:
+    #     1. Because the meson rewriter is imperfect and has not implemented everything yet
+    #     2. Because the value is different on different machines, example:
+    #     ```meson
+    #     node = somedep.found()
+    #     message(node)
+    #     ```
+    #     will print `true` on some machines and `false` on others, so
+    #     `node_to_runtime_value` does not know whether to return `true` or
+    #     `false` and will return `UnknownValue()`.
+    #     3. Here:
+    #     ```meson
+    #     foreach x : [1, 2]
+    #         node = x
+    #         message(node)
+    #     endforeach
+    #     ```
+    #     `node_to_runtime_value` does not know whether to return `1` or `2` and
+    #     will return `UnknownValue()`.
+    #
+    # If you have something like
+    # ```
+    # node = [123, somedep.found()]
+    # ```
+    # `node_to_runtime_value` will return `[123, UnknownValue()]`.
+    def node_to_runtime_value(self, node: T.Union[UnknownValue, TYPE_ivar, mparser.BaseNode]) -> TYPE_ivar:
+        if isinstance(node, (mparser.StringNode, mparser.BooleanNode, mparser.NumberNode)):
+            return node.value
+        elif isinstance(node, mparser.StringNode):
+            if node.is_fstring:
+                return UnknownValue()
+            else:
+                return node.value
+        elif isinstance(node, list):
+            return [self.node_to_runtime_value(x) for x in node]
+        elif isinstance(node, ArrayNode):
+            return [self.node_to_runtime_value(x) for x in node.args.arguments]
+        elif isinstance(node, mparser.DictNode):
+            result: T.Dict[str | UnknownValue, TYPE_ivar] = {}
+            for raw_k, raw_v in node.args.kwargs.items():
+                k = self.node_to_runtime_value(raw_k)
+                if isinstance(k, str):
+                    result[k] = self.node_to_runtime_value(raw_v)
+                else:
+                    # there could be more than one unknown key, so add an unknown mapping
+                    result[UnknownValue()] = UnknownValue()
+            return result
+        elif isinstance(node, IdNode):
+            assert len(self.dataflow_dag.tgt_to_srcs[node]) == 1
+            val = next(iter(self.dataflow_dag.tgt_to_srcs[node]))
+            return self.node_to_runtime_value(val)
+        elif isinstance(node, (MethodNode, FunctionNode)):
+            funcval = self.funcvals[node]
+            if isinstance(funcval, (dict, str)):
+                return funcval
+            else:
+                return self.node_to_runtime_value(funcval)
+        elif isinstance(node, ArithmeticNode):
+            left: TYPE_ivar = self.node_to_runtime_value(node.left)
+            right: TYPE_ivar = self.node_to_runtime_value(node.right)
+            if isinstance(left, list) and isinstance(right, UnknownValue):
+                return left + [right]
+            if isinstance(right, list) and isinstance(left, UnknownValue):
+                return [left] + right
+            if isinstance(left, UnknownValue) or isinstance(right, UnknownValue):
+                return UnknownValue()
+            if node.operation == '+':
+                if isinstance(left, dict) and isinstance(right, dict):
+                    ret = left.copy()
+                    for k, v in right.items():
+                        ret[k] = v
+                    return ret
+                if isinstance(left, list):
+                    if not isinstance(right, list):
+                        right = [right]
+                    return left + right
+                if isinstance(left, str) and isinstance(right, str):
+                    return left + right
+                if (isinstance(left, int) and not isinstance(left, bool)
+                        and isinstance(right, int) and not isinstance(right, bool)):
+                    return left + right
+            elif node.operation == '-':
+                if (isinstance(left, int) and not isinstance(left, bool)
+                        and isinstance(right, int) and not isinstance(right, bool)):
+                    return left - right
+            elif node.operation == '*':
+                if (isinstance(left, int) and not isinstance(left, bool)
+                        and isinstance(right, int) and not isinstance(right, bool)):
+                    return left * right
+            elif node.operation == '/':
+                if isinstance(left, int) and isinstance(right, int):
+                    return left // right
+                elif isinstance(left, str) and isinstance(right, str):
+                    return os.path.join(left, right).replace('\\', '/')
+            elif node.operation == '%':
+                if isinstance(left, int) and isinstance(right, int):
+                    return left % right
+            raise mesonlib.MesonException(f'invalid types for binary {node.operation}')
+        elif isinstance(node, (UnknownValue, IntrospectionBuildTarget, IntrospectionFile, IntrospectionDependency, str, bool, int)):
+            return node
+        elif isinstance(node, mparser.IndexNode):
+            iobject = self.node_to_runtime_value(node.iobject)
+            index = self.node_to_runtime_value(node.index)
+            if isinstance(iobject, UnknownValue) or isinstance(index, UnknownValue):
+                return UnknownValue()
+            if (isinstance(iobject, (str, list)) and isinstance(index, int)
+                    and not isinstance(index, bool)):
+                return iobject[index]
+            if isinstance(iobject, dict) and isinstance(index, str):
+                return iobject[index]
+            raise mesonlib.MesonException('invalid types for indexing')
+        elif isinstance(node, mparser.ComparisonNode):
+            left = self.node_to_runtime_value(node.left)
+            right = self.node_to_runtime_value(node.right)
+            if isinstance(left, UnknownValue) or isinstance(right, UnknownValue):
+                return UnknownValue()
+            if node.ctype == '==':
+                return left == right
+            elif node.ctype == '!=':
+                return left != right
+            elif node.ctype == 'in':
+                if isinstance(right, list):
+                    return left in right
+                if isinstance(left, str) and isinstance(right, (str, dict)):
+                    return left in right
+            elif node.ctype == 'not in':
+                if isinstance(right, list):
+                    return left not in right
+                if isinstance(left, str) and isinstance(right, (str, dict)):
+                    return left not in right
+            raise mesonlib.MesonException(f'invalid types for "{node.ctype}"')
+        elif isinstance(node, mparser.TernaryNode):
+            cond = self.node_to_runtime_value(node.condition)
+            if isinstance(cond, UnknownValue):
+                return UnknownValue()
+            if cond is True:
+                return self.node_to_runtime_value(node.trueblock)
+            if cond is False:
+                return self.node_to_runtime_value(node.falseblock)
+        elif isinstance(node, mparser.OrNode):
+            left = self.node_to_runtime_value(node.left)
+            right = self.node_to_runtime_value(node.right)
+            match (left, right):
+                case (bool(), bool()):
+                    return left or right
+                case (True, UnknownValue()) | (UnknownValue(), True):
+                    return True
+                case _:
+                    return UnknownValue()
+        elif isinstance(node, mparser.AndNode):
+            left = self.node_to_runtime_value(node.left)
+            right = self.node_to_runtime_value(node.right)
+            match (left, right):
+                case (bool(), bool()):
+                    return left and right
+                case (False, UnknownValue()) | (UnknownValue(), False):
+                    return False
+                case _:
+                    return UnknownValue()
+        elif isinstance(node, mparser.UMinusNode):
+            val = self.node_to_runtime_value(node.value)
+            if isinstance(val, UnknownValue):
+                return val
+            if isinstance(val, (int, float)):
+                return -val
+        elif isinstance(node, mparser.NotNode):
+            val = self.node_to_runtime_value(node.value)
+            if isinstance(val, UnknownValue):
+                return val
+            if isinstance(val, bool):
+                return not val
+        elif isinstance(node, mparser.ParenthesizedNode):
+            return self.node_to_runtime_value(node.inner)
+        raise mesonlib.MesonBugException('Unhandled node type')
 
     def assignment(self, node: AssignmentNode) -> None:
         assert isinstance(node, AssignmentNode)
-        self.assignments[node.var_name.value] = node.value # Save a reference to the value node
-        if node.value.ast_id:
-            self.reverse_assignment[node.value.ast_id] = node
-        self.assign_vals[node.var_name.value] = self.evaluate_statement(node.value) # Evaluate the value just in case
+        self.evaluate_statement(node.value)
+        self.cur_assignments[node.var_name.value].append((self.nesting.copy(), node.value))
+        self.all_assignment_nodes[node.var_name.value].append(node)
 
-    def resolve_node(self, node: BaseNode, include_unknown_args: bool = False, id_loop_detect: T.Optional[T.List[str]] = None) -> T.Optional[T.Any]:
-        def quick_resolve(n: BaseNode, loop_detect: T.Optional[T.List[str]] = None) -> T.Any:
-            if loop_detect is None:
-                loop_detect = []
-            if isinstance(n, IdNode):
-                assert isinstance(n.value, str)
-                if n.value in loop_detect or n.value not in self.assignments:
-                    return []
-                return quick_resolve(self.assignments[n.value], loop_detect = loop_detect + [n.value])
-            elif isinstance(n, ElementaryNode):
-                return n.value
-            else:
-                return n
-
-        if id_loop_detect is None:
-            id_loop_detect = []
-        result = None
-
-        if not isinstance(node, BaseNode):
-            return None
-
-        assert node.ast_id
-        if node.ast_id in id_loop_detect:
-            return None # Loop detected
-        id_loop_detect += [node.ast_id]
-
-        # Try to evaluate the value of the node
-        if isinstance(node, IdNode):
-            result = quick_resolve(node)
-
-        elif isinstance(node, ElementaryNode):
-            result = node.value
-
-        elif isinstance(node, NotNode):
-            result = self.resolve_node(node.value, include_unknown_args, id_loop_detect)
-            if isinstance(result, bool):
-                result = not result
-
-        elif isinstance(node, ArrayNode):
-            result = node.args.arguments.copy()
-
-        elif isinstance(node, ArgumentNode):
-            result = node.arguments.copy()
-
-        elif isinstance(node, ArithmeticNode):
-            if node.operation != 'add':
-                return None # Only handle string and array concats
-            l = self.resolve_node(node.left, include_unknown_args, id_loop_detect)
-            r = self.resolve_node(node.right, include_unknown_args, id_loop_detect)
-            if isinstance(l, str) and isinstance(r, str):
-                result = l + r # String concatenation detected
-            else:
-                result = self.flatten_args(l, include_unknown_args, id_loop_detect) + self.flatten_args(r, include_unknown_args, id_loop_detect)
-
-        elif isinstance(node, MethodNode):
-            src = quick_resolve(node.source_object)
-            margs = self.flatten_args(node.args.arguments, include_unknown_args, id_loop_detect)
-            mkwargs: T.Dict[str, TYPE_var] = {}
-            method_name = node.name.value
-            try:
-                if isinstance(src, str):
-                    result = StringHolder(src, T.cast('Interpreter', self)).method_call(method_name, margs, mkwargs)
-                elif isinstance(src, bool):
-                    result = BooleanHolder(src, T.cast('Interpreter', self)).method_call(method_name, margs, mkwargs)
-                elif isinstance(src, int):
-                    result = IntegerHolder(src, T.cast('Interpreter', self)).method_call(method_name, margs, mkwargs)
-                elif isinstance(src, list):
-                    result = ArrayHolder(src, T.cast('Interpreter', self)).method_call(method_name, margs, mkwargs)
-                elif isinstance(src, dict):
-                    result = DictHolder(src, T.cast('Interpreter', self)).method_call(method_name, margs, mkwargs)
-            except mesonlib.MesonException:
-                return None
-
-        # Ensure that the result is fully resolved (no more nodes)
-        if isinstance(result, BaseNode):
-            result = self.resolve_node(result, include_unknown_args, id_loop_detect)
-        elif isinstance(result, list):
-            new_res: T.List[TYPE_var] = []
-            for i in result:
-                if isinstance(i, BaseNode):
-                    resolved = self.resolve_node(i, include_unknown_args, id_loop_detect)
-                    if resolved is not None:
-                        new_res += self.flatten_args(resolved, include_unknown_args, id_loop_detect)
-                else:
-                    new_res += [i]
-            result = new_res
-
-        return result
-
-    def flatten_args(self, args_raw: T.Union[TYPE_var, T.Sequence[TYPE_var]], include_unknown_args: bool = False, id_loop_detect: T.Optional[T.List[str]] = None) -> T.List[TYPE_var]:
-        # Make sure we are always dealing with lists
-        if isinstance(args_raw, list):
-            args = args_raw
+    def evaluate_plusassign(self, node: PlusAssignmentNode) -> None:
+        assert isinstance(node, PlusAssignmentNode)
+        self.evaluate_statement(node.value)
+        lhs = self.get_cur_value(node.var_name.value)
+        newval: T.Union[UnknownValue, ArithmeticNode]
+        if isinstance(lhs, UnknownValue):
+            newval = UnknownValue()
         else:
-            args = [args_raw]
+            newval = mparser.ArithmeticNode(operation='+', left=lhs, operator=_symbol('+'), right=node.value)
+        self.cur_assignments[node.var_name.value].append((self.nesting.copy(), newval))
+        self.all_assignment_nodes[node.var_name.value].append(node)
 
-        flattened_args: T.List[TYPE_var] = []
+        self.dataflow_dag.add_edge(lhs, newval)
+        self.dataflow_dag.add_edge(node.value, newval)
 
-        # Resolve the contents of args
+    def func_set_variable(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> None:
+        assert isinstance(node, FunctionNode)
+        if bool(node.args.kwargs):
+            raise InvalidArguments('set_variable accepts no keyword arguments')
+        if len(node.args.arguments) != 2:
+            raise InvalidArguments('set_variable requires exactly two positional arguments')
+        var_name = args[0]
+        value = node.args.arguments[1]
+        if isinstance(var_name, UnknownValue):
+            self.evaluate_statement(value)
+            self.tainted = True
+            return
+        assert isinstance(var_name, str)
+        equiv = AssignmentNode(var_name=IdNode(Token('', '', 0, 0, 0, (0, 0), var_name)), value=value, operator=_symbol('='))
+        equiv.ast_id = str(id(equiv))
+        self.evaluate_statement(equiv)
+
+    def func_get_variable(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> T.Any:
+        assert isinstance(node, FunctionNode)
+        var_name = args[0]
+        if isinstance(var_name, UnknownValue):
+            val: T.Union[UnknownValue, BaseNode] = UnknownValue()
+        else:
+            assert isinstance(var_name, str)
+            val = self.get_cur_value(var_name)
+        self.dataflow_dag.add_edge(val, node)
+        return val
+
+    def func_unset_variable(self, node: BaseNode, args: T.List[TYPE_var], kwargs: T.Dict[str, TYPE_var]) -> None:
+        assert isinstance(node, FunctionNode)
+        if bool(node.args.kwargs):
+            raise InvalidArguments('unset_variable accepts no keyword arguments')
+        if len(node.args.arguments) != 1:
+            raise InvalidArguments('unset_variable requires exactly one positional arguments')
+        var_name = args[0]
+        assert isinstance(var_name, str)
+        self.cur_assignments[var_name].append((self.nesting.copy(), node))
+
+    def nodes_to_pretty_filelist(self, root_path: Path, subdir: str, nodes: T.List[BaseNode]) -> T.List[T.Union[str, UnknownValue]]:
+        def src_to_abs(src: TYPE_ivar) -> T.Union[str, UnknownValue]:
+            if isinstance(src, str):
+                return os.path.normpath(os.path.join(root_path, subdir, src))
+            elif isinstance(src, IntrospectionFile):
+                return str(src.to_abs_path(root_path))
+            elif isinstance(src, UnknownValue):
+                return src
+            else:
+                raise TypeError
+
+        rtvals: T.List[TYPE_ivar] = self.flatten_args(nodes)
+        return [src_to_abs(x) for x in rtvals]
+
+    def flatten_args(self, args: T.Sequence[TYPE_nvar]) -> T.List[TYPE_ivar]:
+        flattened_args: T.List[TYPE_ivar] = []
+
+        # Resolve the contents of args, compare to interpreterbase's flatten
         for i in args:
             if isinstance(i, BaseNode):
-                resolved = self.resolve_node(i, include_unknown_args, id_loop_detect)
+                resolved = self.node_to_runtime_value(i)
                 if resolved is not None:
                     if not isinstance(resolved, list):
                         resolved = [resolved]
-                    flattened_args += resolved
-            elif isinstance(i, (str, bool, int, float)) or include_unknown_args:
+                    flattened_args += self.flatten_args(resolved)
+            elif isinstance(i, (str, bool, int, float, dict, UnknownValue, IntrospectionFile,
+                                IntrospectionBuildTarget, IntrospectionDependency)):
                 flattened_args += [i]
+            elif isinstance(i, list):
+                flattened_args += self.flatten_args(i)
+            else:
+                raise NotImplementedError(f'flatten_args is missing a case for {type(i)}')
         return flattened_args
 
-    def flatten_kwargs(self, kwargs: T.Dict[str, TYPE_var], include_unknown_args: bool = False) -> T.Dict[str, TYPE_var]:
-        flattened_kwargs = {}
-        for key, val in kwargs.items():
-            if isinstance(val, BaseNode):
-                resolved = self.resolve_node(val, include_unknown_args)
-                if resolved is not None:
-                    flattened_kwargs[key] = resolved
-            elif isinstance(val, (str, bool, int, float)) or include_unknown_args:
-                flattened_kwargs[key] = val
-        return flattened_kwargs
+    def flatten_args_hack(self, args: T.List[TYPE_var]) -> T.List[TYPE_var]:
+        # Unlike method calls, functions are invoked even if one or more values
+        # are unknown.  The return type is actually T.List[TYPE_ivar], and
+        # while callers declare args as T.List[TYPE_var], they receive a
+        # list of TYPE_nvar instead.
+        # The right solution would involve making TYPE_var an argument to
+        # InterpreterBase, so that FunctionType is also changed to not
+        # use TYPE_var.
+        return T.cast('T.List[TYPE_var]', self.flatten_args(T.cast('T.List[TYPE_nvar]', args)))
 
     def evaluate_testcase(self, node: TestCaseClauseNode) -> Disabler | None:
         return Disabler(subproject=self.subproject)
+
+    def evaluate_statement(self, cur: mparser.BaseNode) -> T.Optional[InterpreterObject]:
+        if hasattr(cur, 'args'):
+            for arg in cur.args.arguments:
+                self.dataflow_dag.add_edge(arg, cur)
+            for k, v in cur.args.kwargs.items():
+                self.dataflow_dag.add_edge(v, cur)
+        for attr in ['source_object', 'left', 'right', 'items', 'iobject', 'index', 'condition']:
+            if hasattr(cur, attr):
+                assert isinstance(getattr(cur, attr), mparser.BaseNode)
+                self.dataflow_dag.add_edge(getattr(cur, attr), cur)
+        if isinstance(cur, mparser.IdNode):
+            self.dataflow_dag.add_edge(self.get_cur_value(cur.value), cur)
+            return None
+        else:
+            return super().evaluate_statement(cur)
+
+    def function_call(self, node: mparser.FunctionNode) -> T.Any:
+        ret = super().function_call(node)
+        if ret is not None:
+            self.funcvals[node] = ret
+        return ret

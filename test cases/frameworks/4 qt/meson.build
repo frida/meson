@@ -5,8 +5,20 @@ project('qt4, qt5, and qt6 build test', 'cpp',
 # Visit the subdir before entering the loop
 subdir('mocdep')
 
+fs = import('fs')
 qt5_modules = ['Widgets']
 qt6_modules = ['Widgets']
+
+copyfile = find_program('copyfile.py')
+copyfile_gen = generator(copyfile,
+  output: '@BASENAME@Gen.cpp',
+  arguments : ['@INPUT@', '@OUTPUT@'])
+
+manualinclude_cpp_gen = copyfile_gen.process('manualinclude.cpp')
+
+manualinclude_cpp = fs.copyfile('manualinclude.cpp')
+manualinclude_h = fs.copyfile('manualinclude.h')
+
 foreach qt : ['qt4', 'qt5', 'qt6']
   qt_modules = ['Core', 'Gui']
   if qt == 'qt5'
@@ -48,7 +60,14 @@ foreach qt : ['qt4', 'qt5', 'qt6']
   qtdep = dependency(qt, modules : qt_modules, main : true, private_headers: true, required : required, method : get_option('method'))
   if qtdep.found()
     qtmodule = import(qt)
-    assert(qtmodule.has_tools())
+    assert(qtmodule.has_tools(tools: ['moc'], method: get_option('method'), version: '>=4'))
+    if get_option('expect_lrelease')
+      assert(qtmodule.has_tools(), 'You may be missing a devel package. (qttools5-dev-tools on Debian based systems)')
+    else
+      assert(not qtmodule.has_tools(), 'Unexpectedly found lrelease')
+      assert(not qtmodule.has_tools(tools: ['lrelease']), 'Unexpectedly found lrelease')
+      assert(qtmodule.has_tools(tools: ['moc', 'uic', 'rcc']), 'You may be missing a devel package. (qttools5-dev-tools on Debian based systems)')
+    endif
 
     # Test that fetching a variable works and yields a non-empty value
     assert(qtdep.get_variable('prefix', configtool: 'QT_INSTALL_PREFIX') != '')
@@ -91,23 +110,25 @@ foreach qt : ['qt4', 'qt5', 'qt6']
     # qt4-rcc and qt5-rcc take different arguments, for example qt4: ['-compress', '3']; qt5: '--compress=3'
     qtmodule.preprocess(qt + 'testrccarg', qresources : files(['stuff.qrc', 'stuff2.qrc']), rcc_extra_arguments : '--compress=3', method : get_option('method'))
 
-    translations_cpp = qtmodule.compile_translations(qresource: qt+'_lang.qrc')
-    # unity builds suck and definitely cannot handle two qrc embeds in one compilation unit
-    unityproof_translations = static_library(qt+'unityproof_translations', translations_cpp, dependencies: qtdep)
+    if get_option('expect_lrelease')
+      translations_cpp = qtmodule.compile_translations(qresource: qt+'_lang.qrc')
+      # unity builds suck and definitely cannot handle two qrc embeds in one compilation unit
+      unityproof_translations = static_library(qt+'unityproof_translations', translations_cpp, dependencies: qtdep)
 
-    extra_cpp_args += '-DQT="@0@"'.format(qt)
-    qexe = executable(qt + 'app',
-      sources : ['main.cpp', 'mainWindow.cpp', # Sources that don't need preprocessing.
-      prep, prep_rcc],
-      dependencies : qtdep,
-      link_with: unityproof_translations,
-      cpp_args: extra_cpp_args,
-      gui_app : true)
+      extra_cpp_args += '-DQT="@0@"'.format(qt)
+      qexe = executable(qt + 'app',
+        sources : ['main.cpp', 'mainWindow.cpp', # Sources that don't need preprocessing.
+        prep, prep_rcc],
+        dependencies : qtdep,
+        link_with: unityproof_translations,
+        cpp_args: extra_cpp_args,
+        gui_app : true)
 
-    # We need a console test application because some test environments
-    # do not have an X server.
+      # We need a console test application because some test environments
+      # do not have an X server.
 
-    translations = qtmodule.compile_translations(ts_files : qt+'core_fr.ts', build_by_default : true)
+      translations = qtmodule.compile_translations(ts_files : qt+'core_fr.ts', build_by_default : true)
+    endif
 
     qtcore = dependency(qt, modules : 'Core', method : get_option('method'))
 
@@ -122,15 +143,15 @@ foreach qt : ['qt4', 'qt5', 'qt6']
     # files from sources.
     qtmodule.preprocess(
       moc_extra_arguments : ['-DMOC_EXTRA_FLAG'], # This is just a random macro to test `extra_arguments`
-      moc_sources : 'manualinclude.cpp',
-      moc_headers : 'manualinclude.h',
+      moc_sources : manualinclude_cpp,
+      moc_headers : manualinclude_h[0],
       method : get_option('method'),
       dependencies: mocdep,
     )
 
     manpreprocessed = qtmodule.compile_moc(
       extra_args : ['-DMOC_EXTRA_FLAG'], # This is just a random macro to test `extra_arguments`
-      sources : 'manualinclude.cpp',
+      sources : manualinclude_cpp_gen,
       headers : 'manualinclude.h',
       method : get_option('method'),
       dependencies: mocdep,
@@ -169,5 +190,12 @@ foreach qt : ['qt4', 'qt5', 'qt6']
     accept_versions = ['>=@0@'.format(qtdep.version()), '<@0@'.format(qtdep.version()[0].to_int() + 1)]
     dependency(qt, modules: qt_modules, version: accept_versions, method : get_option('method'))
 
+    # check that QT_DEBUG is correctly defined depending on whether this is a debug build
+    if get_option('debug')
+      assert_source = 'assert_qt_debug.cpp'
+    else
+      assert_source = 'assert_qt_no_debug.cpp'
+    endif
+    executable(qt + 'assert_debug', sources: [ assert_source ], dependencies: [ qtdep ])
   endif
 endforeach

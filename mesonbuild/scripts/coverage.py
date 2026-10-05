@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
-from mesonbuild import environment, mesonlib
+from mesonbuild import tooldetect, mesonlib
 
-import argparse, re, sys, os, subprocess, pathlib, stat
+import argparse, re, sys, os, subprocess, pathlib, stat, shutil
 import typing as T
 
 def coverage(outputs: T.List[str], source_root: str, subproject_root: str, build_root: str, log_dir: str, use_llvm_cov: bool,
@@ -16,11 +16,11 @@ def coverage(outputs: T.List[str], source_root: str, subproject_root: str, build
     if gcovr_exe == '':
         gcovr_exe = None
     else:
-        gcovr_exe, gcovr_version = environment.detect_gcovr(gcovr_exe)
-    if llvm_cov_exe == '' or not mesonlib.exe_exists([llvm_cov_exe, '--version']):
+        gcovr_exe, gcovr_version = tooldetect.detect_gcovr(gcovr_exe)
+    if llvm_cov_exe == '' or shutil.which(llvm_cov_exe) is None:
         llvm_cov_exe = None
 
-    lcov_exe, lcov_version, genhtml_exe = environment.detect_lcov_genhtml()
+    lcov_exe, lcov_version, genhtml_exe = tooldetect.detect_lcov_genhtml()
 
     # load config files for tools if available in the source tree
     # - lcov requires manually specifying a per-project config
@@ -159,9 +159,14 @@ def coverage(outputs: T.List[str], source_root: str, subproject_root: str, build
             htmloutdir = os.path.join(log_dir, 'coveragereport')
             if not os.path.isdir(htmloutdir):
                 os.mkdir(htmloutdir)
+            # Use `--html-details` if gcovr version < 6.0, otherwise
+            # use `--html-nested`.
+            html_arg = '--html-details'
+            if mesonlib.version_compare(gcovr_version, '>=6.0'):
+                html_arg = '--html-nested'
             subprocess.check_call(gcovr_base_cmd + gcovr_config +
                                   ['--html',
-                                   '--html-details',
+                                   html_arg,
                                    '--print-summary',
                                    '-o', os.path.join(htmloutdir, 'index.html'),
                                    ] + gcov_exe_args)

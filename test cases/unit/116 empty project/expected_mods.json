@@ -181,6 +181,7 @@
       "mesonbuild.backend.backends",
       "mesonbuild.backend.ninjabackend",
       "mesonbuild.build",
+      "mesonbuild.cmdline",
       "mesonbuild.compilers",
       "mesonbuild.compilers.compilers",
       "mesonbuild.compilers.detect",
@@ -193,6 +194,7 @@
       "mesonbuild.environment",
       "mesonbuild.interpreter",
       "mesonbuild.interpreter.compiler",
+      "mesonbuild.interpreter.decorators",
       "mesonbuild.interpreter.dependencyfallbacks",
       "mesonbuild.interpreter.interpreter",
       "mesonbuild.interpreter.interpreterobjects",
@@ -217,6 +219,8 @@
       "mesonbuild.linkers",
       "mesonbuild.linkers.base",
       "mesonbuild.linkers.detect",
+      "mesonbuild.linkers.linkers",
+      "mesonbuild.machinefile",
       "mesonbuild.mesonlib",
       "mesonbuild.mesonmain",
       "mesonbuild.mintro",
@@ -225,18 +229,19 @@
       "mesonbuild.mparser",
       "mesonbuild.msetup",
       "mesonbuild.optinterpreter",
+      "mesonbuild.options",
       "mesonbuild.programs",
       "mesonbuild.scripts",
       "mesonbuild.scripts.meson_exe",
+      "mesonbuild.tooldetect",
       "mesonbuild.utils",
       "mesonbuild.utils.core",
       "mesonbuild.utils.platform",
-      "mesonbuild.utils.posix",
       "mesonbuild.utils.universal",
       "mesonbuild.utils.vsenv",
       "mesonbuild.wrap",
       "mesonbuild.wrap.wrap"
     ],
-    "count": 68
+    "count": 73
   }
 }

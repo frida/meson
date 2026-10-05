@@ -52,6 +52,7 @@ def check_format() -> None:
         '.eggs', '_cache',              # e.g. .mypy_cache
         'venv',                         # virtualenvs have DOS line endings
         '120 rewrite',                  # we explicitly test for tab in meson.build file
+        '3 editorconfig',
     }
     for (root, _, filenames) in os.walk('.'):
         if any([x in root for x in skip_dirs]):
@@ -64,9 +65,14 @@ def check_format() -> None:
                 check_file(root / file)
 
 def check_symlinks():
+    # Test data must NOT contain symlinks. setup.py
+    # butchers them. If you need symlinks, they need
+    # to be created on the fly.
     for f in Path('test cases').glob('**/*'):
         if f.is_symlink():
-            if 'boost symlinks' in str(f):
+            if 'boost symlinks/boost/lib' in str(f):
+                continue
+            if 'follow symlinks/bar/dir2/dir3' in str(f):
                 continue
             raise SystemExit(f'Test data dir contains symlink: {f}.')
 

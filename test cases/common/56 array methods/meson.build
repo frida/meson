@@ -1,4 +1,4 @@
-project('array methods')
+project('array methods', meson_version : '>= 1.9')
 
 empty = []
 one = ['abc']
@@ -68,3 +68,20 @@ endif
 if not combined.contains('ghi')
   error('Combined claims not to contain ghi.')
 endif
+
+# test array slicing
+assert(['a', 'b', 'c'].slice() == ['a', 'b', 'c'])
+assert(['a', 'b', 'c'].slice(step : 2) == ['a', 'c'])
+assert(['a', 'b', 'c'].slice(step : -1) == ['c', 'b', 'a'])
+assert(['a', 'b', 'c'].slice(step : -2) == ['c', 'a'])
+assert(['a', 'b', 'c'].slice(1, 2) == ['b'])
+assert(['a', 'b', 'c'].slice(2, -2) == [])
+assert(['a', 'b', 'c'].slice(-9876543, 2) == ['a', 'b'])
+assert(['a', 'b', 'c', 'd', 'e'].slice(1, 12, step : 2) == ['b', 'd'])
+
+# test array flattening
+x = ['a', ['b'], [[[[[[['c'], 'd']]], 'e']]]]
+assert(x.length() == 3)
+assert(x.flatten().length() == 5)
+assert(x.flatten() == ['a', 'b', 'c', 'd', 'e'])
+assert(['a', ['b', 'c']].flatten() == ['a', 'b', 'c'])

@@ -42,29 +42,28 @@ jobs:
           - { name: Fedora,           id: fedora   }
           - { name: Gentoo,           id: gentoo   }
           - { name: OpenSUSE,         id: opensuse }
-          - { name: Ubuntu Bionic,    id: bionic   }
-    container: mesonbuild/${{ matrix.cfg.id }}:latest
+    container:
+      image: mesonbuild/${{ matrix.cfg.id }}:latest
     env:
       MESON_CI_JOBNAME: linux-${{ matrix.cfg.id }}-gcc
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v6
+
     - name: Run tests
       # All environment variables are stored inside the docker image in /ci/env_vars.sh
       # They are defined in the `env` section in each image.json. CI_ARGS should be set
       # via the `args` array ub the image.json
-      run: bash -c 'source /ci/env_vars.sh; cd $GITHUB_WORKSPACE; ./tools/run_with_cov.py ./run_tests.py $CI_ARGS'
+      shell: bash
+      run: |
+        # dmd is installed under /root on OpenSUSE
+        [[ ${{ matrix.cfg.id }} == opensuse ]] && export HOME=/root
 
-    - name: Aggregate coverage reports
-      run: ./ci/combine_cov.sh
-
-    - name: Upload coverage report
-      uses: codecov/codecov-action@v3
-      with:
-        files: .coverage/coverage.xml
-        name: "OS Comp [${{ matrix.cfg.name }}]"
-        fail_ci_if_error: false
-        verbose: true
+        source /ci/env_vars.sh
+        cd $GITHUB_WORKSPACE
+        # disable git ownership checks
+        git config --global safe.directory '*'
+        ./run_tests.py $CI_ARGS
 
   pypy:
     name: 'Arch / PyPy'
@@ -74,7 +73,7 @@ jobs:
       MESON_CI_JOBNAME_UPDATE: linux-arch-gcc-pypy
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Run tests
       run: |
         source /ci/env_vars.sh
@@ -128,7 +127,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Run tests
         shell: bash
@@ -153,15 +152,4 @@ jobs:
           update-alternatives --set i686-w64-mingw32-gcc   /usr/bin/i686-w64-mingw32-gcc-posix
           update-alternatives --set i686-w64-mingw32-g++   /usr/bin/i686-w64-mingw32-g++-posix
 
-          ./tools/run_with_cov.py ./run_tests.py $RUN_TESTS_ARGS -- $MESON_ARGS
-
-      - name: Aggregate coverage reports
-        run: ./ci/combine_cov.sh
-
-      - name: Upload coverage report
-        uses: codecov/codecov-action@v3
-        with:
-          files: .coverage/coverage.xml
-          name: "Ubuntu [${{ matrix.cfg.CC }} ${{ matrix.cfg.RUN_TESTS_ARGS }} ${{ matrix.cfg.MESON_ARGS }}]"
-          fail_ci_if_error: false
-          verbose: true
+          ./run_tests.py $RUN_TESTS_ARGS -- $MESON_ARGS

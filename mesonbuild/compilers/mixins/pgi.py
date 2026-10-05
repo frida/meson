@@ -10,10 +10,9 @@ import os
 from pathlib import Path
 
 from ..compilers import clike_debug_args, clike_optimization_args
-from ...mesonlib import OptionKey
+from ...options import OptionKey
 
 if T.TYPE_CHECKING:
-    from ...environment import Environment
     from ...compilers.compilers import Compiler
 else:
     # This is a bit clever, for mypy we pretend that these mixins descend from
@@ -51,8 +50,17 @@ class PGICompiler(Compiler):
             return ['-fPIC']
         return []
 
+    def get_cpp_permissive_args(self) -> T.List[str]:
+        return ['-fpermissive']
+
     def openmp_flags(self) -> T.List[str]:
         return ['-mp']
+
+    def get_preprocess_only_args(self) -> T.List[str]:
+        return ['-E', '-P', '-o', '-']
+
+    def get_preprocess_to_file_args(self) -> T.List[str]:
+        return ['-E', '-P']
 
     def get_optimization_args(self, optimization_level: str) -> T.List[str]:
         return clike_optimization_args[optimization_level]
@@ -83,6 +91,6 @@ class PGICompiler(Compiler):
         else:
             return []
 
-    def thread_flags(self, env: 'Environment') -> T.List[str]:
+    def thread_flags(self) -> T.List[str]:
         # PGI cannot accept -pthread, it's already threaded
         return []

@@ -15,7 +15,7 @@ These are return values of the `get_id` (Compiler family) and
 | clang-cl  | The Clang compiler (MSVC compatible driver) | msvc |
 | dmd       | D lang reference compiler        |                 |
 | emscripten| Emscripten WASM compiler         |                 |
-| flang     | Flang Fortran compiler           |                 |
+| flang     | Classic Flang Fortran compiler   |                 |
 | g95       | The G95 Fortran compiler         |                 |
 | gcc       | The GNU Compiler Collection      | gcc             |
 | intel     | Intel compiler (Linux and Mac)   | gcc             |
@@ -24,6 +24,7 @@ These are return values of the `get_id` (Compiler family) and
 | intel-llvm-cl | Intel oneAPI LLVM-based compiler (Windows)  | msvc            |
 | lcc       | Elbrus C/C++/Fortran Compiler    |                 |
 | llvm      | LLVM-based compiler (Swift, D)   |                 |
+| llvm-flang| Flang Fortran compiler (LLVM-based) |              |
 | mono      | Xamarin C# compiler              |                 |
 | mwccarm   | Metrowerks C/C++ compiler for Embedded ARM         |                 |
 | mwcceppc  | Metrowerks C/C++ compiler for Embedded PowerPC     |                 |
@@ -34,13 +35,16 @@ These are return values of the `get_id` (Compiler family) and
 | open64    | The Open64 Fortran Compiler      |                 |
 | pathscale | The Pathscale Fortran compiler   |                 |
 | pgi       | Portland PGI C/C++/Fortran compilers |             |
+| qcc       | QNX SDP qcc/q++ compiler driver  |                 |
 | rustc     | Rust compiler                    |                 |
+| sdcc      | Small Device C Compiler          |                 |
 | sun       | Sun Fortran compiler             |                 |
 | c2000     | Texas Instruments C/C++ Compiler (C2000) |                 |
 | c6000     | Texas Instruments C/C++ Compiler (C6000) |                 |
 | ti        | Texas Instruments C/C++ Compiler |                 |
 | valac     | Vala compiler                    |                 |
 | xc16      | Microchip XC16 C compiler        |                 |
+| xc32-gcc  | Microchip XC32 C/C++ compiler    | gcc             |
 | cython    | The Cython compiler              |                 |
 | nasm      | The NASM compiler (Since 0.64.0) |                 |
 | yasm      | The YASM compiler (Since 0.64.0) |                 |
@@ -48,6 +52,7 @@ These are return values of the `get_id` (Compiler family) and
 | armasm    | Microsoft Macro Assembler for ARM and AARCH64 (Since 0.64.0) | |
 | mwasmarm        | Metrowerks Assembler for Embedded ARM | |
 | mwasmeppc       | Metrowerks Assembler for Embedded PowerPC | |
+| tasking         | TASKING VX-toolset     | |
 
 ## Linker ids
 
@@ -56,11 +61,14 @@ These are return values of the `get_linker_id` method in a compiler object.
 | Value      | Linker family                               |
 | -----      | ---------------                             |
 | ld.bfd     | The GNU linker                              |
+| ld.eld     | Qualcomm's embedded linker                  |
 | ld.gold    | The GNU gold linker                         |
 | ld.lld     | The LLVM linker, with the GNU interface     |
 | ld.mold    | The fast MOLD linker                        |
 | ld.solaris | Solaris and illumos                         |
 | ld.wasm    | emscripten's wasm-ld linker                 |
+| ld.wild    | The fast Wild Linker                        |
+| ld.zigcc   | The Zig linker (C/C++ frontend; GNU-like)   |
 | ld64       | Apple ld64                                  |
 | ld64.lld   | The LLVM linker, with the ld64 interface    |
 | link       | MSVC linker                                 |
@@ -69,6 +77,7 @@ These are return values of the `get_linker_id` method in a compiler object.
 | optlink    | optlink (used with DMD)                     |
 | rlink      | The Renesas linker, used with CCrx only     |
 | xc16-ar    | The Microchip linker, used with XC16 only   |
+| ld.xc32    | The Microchip linker, used with XC32 only   |
 | ar2000     | The Texas Instruments linker, used with C2000 only |
 | ti-ar      | The Texas Instruments linker |
 | ar6000     | The Texas Instruments linker, used with C6000 only |
@@ -78,6 +87,8 @@ These are return values of the `get_linker_id` method in a compiler object.
 | ccomp      | CompCert used as the linker driver          |
 | mwldarm    | The Metrowerks Linker with the ARM interface, used with mwccarm only |
 | mwldeppc   | The Metrowerks Linker with the PowerPC interface, used with mwcceppc only |
+| tasking    | TASKING VX-toolset                          |
+| sdcc       | SDCC used as the linker driver              |
 
 For languages that don't have separate dynamic linkers such as C# and Java, the
 `get_linker_id` will return the compiler name.
@@ -111,18 +122,25 @@ set in the cross file.
 | csky                | 32 bit CSky processor    |
 | dspic               | 16 bit Microchip dsPIC   |
 | e2k                 | MCST Elbrus processor    |
+| f8                  | 8 bit SDCC F8            |
 | ft32                | 32 bit Bridgetek MCU     |
+| hc08                | 8 bit Motorola HC08/S08  |
 | ia64                | Itanium processor        |
 | loongarch64         | 64 bit Loongson processor|
 | m68k                | Motorola 68000 processor |
+| mcs51               | 8 bit Intel MCS-51       |
 | microblaze          | MicroBlaze processor     |
 | mips                | 32 bit MIPS processor    |
 | mips64              | 64 bit MIPS processor    |
+| mos6502             | 8 bit MOS 6502/65C02     |
 | msp430              | 16 bit MSP430 processor  |
+| padauk              | 8 bit Padauk PDK         |
 | parisc              | HP PA-RISC processor     |
 | pic24               | 16 bit Microchip PIC24   |
+| pic32               | 32 bit Microchip PIC32   |
 | ppc                 | 32 bit PPC processors    |
 | ppc64               | 64 bit PPC processors    |
+| rabbit              | 8 bit Rabbit 2000/3000   |
 | riscv32             | 32 bit RISC-V Open ISA   |
 | riscv64             | 64 bit RISC-V Open ISA   |
 | rl78                | Renesas RL78             |
@@ -130,13 +148,18 @@ set in the cross file.
 | s390                | IBM zSystem s390         |
 | s390x               | IBM zSystem s390x        |
 | sh4                 | SuperH SH-4              |
+| sm83                | 8 bit Sharp SM83         |
 | sparc               | 32 bit SPARC             |
 | sparc64             | SPARC v9 processor       |
+| stm8                | 8 bit STMicro STM8       |
 | sw_64               | 64 bit sunway processor  |
+| tlcs90              | 8 bit Toshiba TLCS-90    |
 | wasm32              | 32 bit Webassembly       |
 | wasm64              | 64 bit Webassembly       |
 | x86                 | 32 bit x86 processor     |
 | x86_64              | 64 bit x86 processor     |
+| z80                 | 8 bit Zilog Z80 family   |
+| tricore             | Tricore 32 bit processor |
 
 
 Any cpu family not listed in the above list is not guaranteed to
@@ -153,8 +176,8 @@ These are provided by the `.system()` method call.
 
 | Value               | Comment                         |
 | -----               | -------                         |
-| android             | By convention only, subject to change |
-| cygwin              | The Cygwin environment for Windows |
+| android             | Android or OpenHarmony / HarmonyOS (OHOS) |
+| cygwin              | Cygwin or MSYS2 environment on Windows |
 | darwin              | Either OSX or iOS |
 | dragonfly           | DragonFly BSD |
 | emscripten          | Emscripten's JavaScript environment |
@@ -164,8 +187,12 @@ These are provided by the `.system()` method call.
 | linux               | |
 | netbsd              | |
 | openbsd             | |
-| windows             | Any version of Windows |
+| windows             | Native Windows (not Cygwin or MSYS2) |
 | sunos               | illumos and Solaris |
+| os/2                | OS/2 |
+| fuchsia             | Google's Fuchsia |
+| aix                 | IBM AIX or IBM i PASE |
+| qnx                 | QNX Neutrino RTOS |
 
 Any string not listed above is not guaranteed to remain stable in
 future releases.
@@ -180,13 +207,18 @@ Native names as returned by the `.kernel()` method.
 | freebsd | |
 | openbsd | |
 | netbsd  | |
+| gnu     | GNU Hurd |
 | nt      | |
 | xnu                 | Kernel of various Apple OSes    |
 | illumos             | Kernel derived from OpenSolaris by community efforts |
 | solaris             | Kernel derived from OpenSolaris by Oracle |
 | dragonfly | |
 | haiku| |
-| none                 | For e.g. bare metal embedded    |
+| fuchsia             | Google's Fuchsia |
+| aix     | |
+| os400               | IBM i (formerly known as OS/400) |
+| neutrino            | QNX Neutrino microkernel |
+| none                | For e.g. bare metal embedded    |
 
 
 ## Subsystem names (since 1.2.0)
@@ -195,6 +227,10 @@ A more specific description of the system in question. Most values are
 meant to be used in cross files only, as those platforms can not run
 Meson natively.
 
+### `darwin` subsystems
+
+Set when `system` is `darwin`.
+
 | Value               | Comment                         |
 | -----               | -------                         |
 | macos               | Apple macOS (formerly OSX)      |
@@ -202,30 +238,42 @@ Meson natively.
 | ios-simulator       |                                 |
 | tvos                | Apple tvOS                      |
 | tvos-simulator      |                                 |
+| visionos            | Apple visionOS                  |
+| visionos-simulator  |                                 |
 | watchos             | Apple watchOS                   |
 | watchos-simulator   |                                 |
+
+### `android` subsystems (since 1.12.0)
+
+Set when `system` is `android`.
+
+| Value               | Comment                         |
+| -----               | -------                         |
+| android             | Android (Bionic libc)           |
+| ohos                | OpenHarmony / HarmonyOS (OHOS)  |
 
 ## Language arguments parameter names
 
 These are the parameter names for passing language specific arguments
 to your build target.
 
-| Language      | compiler name | linker name       |
-| ------------- | ------------- | ----------------- |
-| C             | c_args        | c_link_args       |
-| C++           | cpp_args      | cpp_link_args     |
-| C#            | cs_args       | cs_link_args      |
-| CUDA          | cuda_args     | cuda_link_args    |
-| D             | d_args        | d_link_args       |
-| Fortran       | fortran_args  | fortran_link_args |
-| Java          | java_args     | java_link_args    |
-| Objective C   | objc_args     | objc_link_args    |
-| Objective C++ | objcpp_args   | objcpp_link_args  |
-| Rust          | rust_args     | rust_link_args    |
-| Vala          | vala_args     | vala_link_args    |
-| Cython        | cython_args   | cython_link_args  |
-| NASM          | nasm_args     | N/A               |
-| MASM          | masm_args     | N/A               |
+| Language      | compiler name  | linker name       |
+| ------------- | -------------- | ----------------- |
+| C             | c_args         | c_link_args       |
+| C++           | cpp_args       | cpp_link_args     |
+| C#            | cs_args        | cs_link_args      |
+| CUDA          | cuda_args      | cuda_link_args    |
+| D             | d_args         | d_link_args       |
+| Fortran       | fortran_args   | fortran_link_args |
+| Java          | java_args      | java_link_args    |
+| Objective C   | objc_args      | objc_link_args    |
+| Objective C++ | objcpp_args    | objcpp_link_args  |
+| Rust          | rust_args      | rust_link_args    |
+| Vala          | vala_args      | vala_link_args    |
+| Cython        | cython_args    | cython_link_args  |
+| NASM          | nasm_args      | N/A               |
+| MASM          | masm_args      | N/A               |
+| Linear ASM    | linearasm_args | N/A               |
 
 All these `<lang>_*` options are specified per machine. See in
 [specifying options per
@@ -272,54 +320,56 @@ These values are supported using the GCC style `__attribute__` annotations,
 which are supported by GCC, Clang, and other compilers.
 
 
-| Name                     |
-|--------------------------|
-| alias                    |
-| aligned                  |
-| alloc_size               |
-| always_inline            |
-| artificial               |
-| cold                     |
-| const                    |
-| constructor              |
-| constructor_priority     |
-| deprecated               |
-| destructor               |
-| error                    |
-| externally_visible       |
-| fallthrough              |
-| flatten                  |
-| format                   |
-| format_arg               |
-| force_align_arg_pointer³ |
-| gnu_inline               |
-| hot                      |
-| ifunc                    |
-| malloc                   |
-| noclone                  |
-| noinline                 |
-| nonnull                  |
-| noreturn                 |
-| nothrow                  |
-| optimize                 |
-| packed                   |
-| pure                     |
-| retain⁴                  |
-| returns_nonnull          |
-| section⁵                 |
-| sentinel⁵                |
-| unused                   |
-| used                     |
-| vector_size⁶             |
-| visibility*              |
-| visibility:default†      |
-| visibility:hidden†       |
-| visibility:internal†     |
-| visibility:protected†    |
-| warning                  |
-| warn_unused_result       |
-| weak                     |
-| weakref                  |
+| Name                        |
+|-----------------------------|
+| alias                       |
+| aligned                     |
+| alloc_size                  |
+| always_inline               |
+| artificial                  |
+| cold                        |
+| const                       |
+| constructor                 |
+| constructor_priority        |
+| counted_by⁸                 |
+| deprecated                  |
+| destructor                  |
+| error                       |
+| externally_visible          |
+| fallthrough                 |
+| flatten                     |
+| format                      |
+| format_arg                  |
+| force_align_arg_pointer³    |
+| gnu_inline                  |
+| hot                         |
+| ifunc                       |
+| malloc                      |
+| noclone                     |
+| noinline                    |
+| nonnull                     |
+| noreturn                    |
+| nothrow                     |
+| null_terminated_string_arg⁷ |
+| optimize                    |
+| packed                      |
+| pure                        |
+| retain⁴                     |
+| returns_nonnull             |
+| section⁵                    |
+| sentinel⁵                   |
+| unused                      |
+| used                        |
+| vector_size⁶                |
+| visibility*                 |
+| visibility:default†         |
+| visibility:hidden†          |
+| visibility:internal†        |
+| visibility:protected†       |
+| warning                     |
+| warn_unused_result          |
+| weak                        |
+| weakref                     |
 
 \* *Changed in 0.52.0* the "visibility" target no longer includes
 "protected", which is not present in Apple's clang.
@@ -334,6 +384,10 @@ which are supported by GCC, Clang, and other compilers.
 ⁵ *New in 0.63.0*
 
 ⁶ *New in 1.1.0*
+
+⁷ *New in 1.5.0*
+
+⁸ *New in 1.10.0*
 
 ### MSVC __declspec
 
@@ -380,6 +434,7 @@ machine](#Environment-variables-per-machine) section for details.
 | C#            | CSC      | CSC       | The linker is the compiler                  |
 | Cython        | CYTHON   |           |                                             |
 | nasm          | NASM     |           | Uses the C linker                           |
+| archiver      |          | AR        |                                             |
 
 *The old environment variables are still supported, but are deprecated
 and will be removed in a future version of Meson.

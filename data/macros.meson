@@ -28,20 +28,28 @@
 %meson_build \
     %{shrink:%{__meson} compile \
         -C %{_vpath_builddir} \
-        -j %{_smp_build_ncpus} \
-        %{?__meson_verbose:--verbose} \
+        %{_smp_mflags} \
+        %[ 0%{?__meson_verbose} ? "--verbose" : "" ] \
         %{nil}}
 
 %meson_install \
     %{shrink:DESTDIR=%{buildroot} %{__meson} install \
         -C %{_vpath_builddir} \
         --no-rebuild \
-        %{!?__meson_verbose:--quiet} \
+        %[ ! 0%{?__meson_verbose} ? "--quiet" : "" ] \
         %{nil}}
 
 %meson_test \
     %{shrink:%{__meson} test \
         -C %{_vpath_builddir} \
-        --num-processes %{_smp_build_ncpus} \
+        %{_smp_mflags} \
         --print-errorlogs \
         %{nil}}
+
+# Declarative buildsystem, requires RPM 4.20+ to work
+# https://rpm-software-management.github.io/rpm/manual/buildsystem.html
+%buildsystem_meson_conf() %meson %*
+%buildsystem_meson_generate_buildrequires() %{nil}
+%buildsystem_meson_build() %meson_build %*
+%buildsystem_meson_install() %meson_install %*
+%buildsystem_meson_check() %meson_test %*

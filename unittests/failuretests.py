@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2016-2021 The Meson development team
 
+from __future__ import annotations
 import subprocess
 import tempfile
 import os
 import shutil
 import unittest
+import typing as T
 from contextlib import contextmanager
 
 from mesonbuild.mesonlib import (
@@ -23,7 +25,7 @@ from run_tests import (
 )
 
 from .baseplatformtests import BasePlatformTests
-from .helpers import *
+from .helpers import skipIfNoPkgconfigDep
 
 @contextmanager
 def no_pkgconfig():
@@ -34,15 +36,15 @@ def no_pkgconfig():
     old_which = shutil.which
     old_search = ExternalProgram._search
 
-    def new_search(self, name, search_dir):
+    def new_search(self, name, search_dirs, exclude_paths):
         if name == 'pkg-config':
-            return [None]
-        return old_search(self, name, search_dir)
+            return []
+        return old_search(self, name, search_dirs, exclude_paths)
 
-    def new_which(cmd, *kwargs):
+    def new_which(cmd, **kwargs):
         if cmd == 'pkg-config':
             return None
-        return old_which(cmd, *kwargs)
+        return old_which(cmd, **kwargs)
 
     shutil.which = new_which
     ExternalProgram._search = new_search
@@ -75,12 +77,13 @@ class FailureTests(BasePlatformTests):
         super().tearDown()
         windows_proof_rmtree(self.srcdir)
 
-    def assertMesonRaises(self, contents, match, *,
-                          extra_args=None,
-                          langs=None,
-                          meson_version=None,
-                          options=None,
-                          override_envvars=None):
+    def assertMesonRaises(self, contents: str,
+                          match: T.Union[str, T.Pattern[str]], *,
+                          extra_args: T.Optional[T.List[str]] = None,
+                          langs: T.Optional[T.List[str]] = None,
+                          meson_version: T.Optional[str] = None,
+                          options: T.Optional[str] = None,
+                          override_envvars: T.Optional[T.MutableMapping[str, str]] = None) -> None:
         '''
         Assert that running meson configure on the specified @contents raises
         a error message matching regex @match.
@@ -140,15 +143,13 @@ class FailureTests(BasePlatformTests):
         out = self.obtainMesonOutput(contents, match, extra_args, langs, meson_version)
         self.assertNotRegex(out, match)
 
-    @skipIfNoPkgconfig
-    def test_dependency(self):
-        if subprocess.call(['pkg-config', '--exists', 'zlib']) != 0:
-            raise unittest.SkipTest('zlib not found with pkg-config')
-        a = (("dependency('zlib', method : 'fail')", "'fail' is invalid"),
-             ("dependency('zlib', static : '1')", "[Ss]tatic.*boolean"),
-             ("dependency('zlib', version : 1)", "Item must be a list or one of <class 'str'>"),
-             ("dependency('zlib', required : 1)", "[Rr]equired.*boolean"),
-             ("dependency('zlib', method : 1)", "[Mm]ethod.*string"),
+    @skipIfNoPkgconfigDep('zlib')
+    def test_dependency(self) -> None:
+        a = (("dependency('zlib', method : 'fail')", '"dependency" keyword argument "method" must be one of "auto", "builtin", "cmake", "config-tool", "cups-config", "dub", "extraframework", "libwmf-config", "pcap-config", "pkg-config", "qmake", "sdlconfig", "sysconfig", "system", not "fail"'),
+             ("dependency('zlib', static : '1')", '"dependency" keyword argument "static" was of type "str" but should have been one of: "bool", "NoneType"'),
+             ("dependency('zlib', version : 1)", r'"dependency" keyword argument "version" was of type "array\[int\]" but should have been "array\[str\]"'),
+             ("dependency('zlib', required : 1)", '"dependency" keyword argument "required" was of type "int" but should have been one of: "bool", "Feature"'),
+             ("dependency('zlib', method : 1)", '"dependency" keyword argument "method" was of type "int" but should have been "str"'),
              ("dependency('zlibfail')", self.dnf),)
         for contents, match in a:
             self.assertMesonRaises(contents, match)
@@ -199,20 +200,20 @@ class FailureTests(BasePlatformTests):
         self.assertMesonOutputs("dependency('wxwidgets', required : false)",
                                 "Run-time dependency .*WxWidgets.* found: .*NO.*")
 
-    def test_wx_dependency(self):
+    def test_wx_dependency(self) -> None:
         if not shutil.which('wx-config-3.0') and not shutil.which('wx-config') and not shutil.which('wx-config-gtk3'):
             raise unittest.SkipTest('Neither wx-config, wx-config-3.0 nor wx-config-gtk3 found')
         self.assertMesonRaises("dependency('wxwidgets', modules : 1)",
-                               "module argument is not a string")
+                               r'"dependency" keyword argument "modules" was of type "array\[int\]" but should have been "array\[str\]"')
 
-    def test_llvm_dependency(self):
+    def test_llvm_dependency(self) -> None:
         self.assertMesonRaises("dependency('llvm', modules : 'fail')",
                                f"(required.*fail|{self.dnf})")
 
-    def test_boost_notfound_dependency(self):
+    def test_boost_notfound_dependency(self) -> None:
         # Can be run even if Boost is found or not
         self.assertMesonRaises("dependency('boost', modules : 1)",
-                               "module.*not a string")
+                               r'"dependency" keyword argument "modules" was of type "array\[int\]" but should have been "array\[str\]"')
         self.assertMesonRaises("dependency('boost', modules : 'fail')",
                                f"(fail.*not found|{self.dnf})")
 
@@ -238,19 +239,26 @@ class FailureTests(BasePlatformTests):
         '''
         self.assertMesonRaises(code, ".* is not a config-tool dependency")
 
-    def test_objc_cpp_detection(self):
+    def test_objc_detection(self) -> None:
         '''
         Test that when we can't detect objc or objcpp, we fail gracefully.
         '''
         env = get_fake_env()
         try:
             detect_objc_compiler(env, MachineChoice.HOST)
+        except EnvironmentException as e:
+            self.assertRegex(str(e), r"(Unknown compiler|GCC was not built with support)")
+        else:
+            raise unittest.SkipTest('Working objective-c Compiler found, cannot test error.')
+
+    def test_objcpp_detection(self) -> None:
+        env = get_fake_env()
+        try:
             detect_objcpp_compiler(env, MachineChoice.HOST)
-        except EnvironmentException:
-            code = "add_languages('objc')\nadd_languages('objcpp')"
-            self.assertMesonRaises(code, "Unknown compiler")
-            return
-        raise unittest.SkipTest("objc and objcpp found, can't test detection failure")
+        except EnvironmentException as e:
+            self.assertRegex(str(e), r"(Unknown compiler|GCC was not built with support)")
+        else:
+            raise unittest.SkipTest('Working objective-c++ Compiler found, cannot test error.')
 
     def test_subproject_variables(self):
         '''
@@ -272,9 +280,9 @@ class FailureTests(BasePlatformTests):
             windows_proof_rm(stray_file)
         out = self.init(tdir, inprocess=True)
         self.assertRegex(out, r"Neither a subproject directory nor a .*nosubproj.wrap.* file was found")
-        self.assertRegex(out, r'Function does not take positional arguments.')
-        self.assertRegex(out, r'Dependency .*somenotfounddep.* for host machine from subproject .*subprojects/somesubproj.* found: .*NO.*')
-        self.assertRegex(out, r'Dependency .*zlibproxy.* for host machine from subproject .*subprojects.*somesubproj.* found: .*YES.*')
+        self.assertRegex(out, r'"declare_dependency" takes exactly 0 arguments, but got 1')
+        self.assertRegex(out, r'Dependency .*somenotfounddep.* from subproject .*subprojects/somesubproj.* found: .*NO.*')
+        self.assertRegex(out, r'Dependency .*zlibproxy.* from subproject .*subprojects.*somesubproj.* found: .*YES.*')
         self.assertRegex(out, r'Missing key .*source_filename.* in subsubproject.wrap')
         windows_proof_rm(stray_file)
 
@@ -381,3 +389,17 @@ class FailureTests(BasePlatformTests):
     def test_error_func(self):
         self.assertMesonRaises("error('a', 'b', ['c', ['d', {'e': 'f'}]], 'g')",
                                r"Problem encountered: a b \['c', \['d', {'e' : 'f'}\]\] g")
+
+    def test_compiler_cache_without_compiler(self):
+        self.assertMesonRaises('',
+                               'Compiler cache specified without compiler: ccache',
+                               override_envvars={'CC': 'ccache'})
+        self.assertMesonRaises('',
+                               'Compiler cache specified without compiler: sccache',
+                               override_envvars={'CC': 'sccache'})
+        self.assertMesonRaises('',
+                               'Compiler cache specified without compiler: kache',
+                               override_envvars={'CC': 'kache'})
+        self.assertMesonRaises('',
+                               'Compiler cache specified without compiler: buildcache',
+                               override_envvars={'CC': 'buildcache'})

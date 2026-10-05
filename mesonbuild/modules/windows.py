@@ -14,31 +14,26 @@ from . import ModuleReturnValue
 from .. import mesonlib, build
 from .. import mlog
 from ..interpreter.type_checking import DEPEND_FILES_KW, DEPENDS_KW, INCLUDE_DIRECTORIES
-from ..interpreterbase.decorators import ContainerTypeInfo, FeatureNew, KwargInfo, typed_kwargs, typed_pos_args
+from ..interpreterbase.decorators import ContainerTypeInfo, FeatureNew, KwargInfo, TypedArgs, VarArgInfo
 from ..mesonlib import MachineChoice, MesonException
 from ..programs import ExternalProgram
 
 if T.TYPE_CHECKING:
     from . import ModuleState
-    from ..compilers import Compiler
+    from ..compilers.compilers import Language, Compiler
     from ..interpreter import Interpreter
+    from ..programs import CommandList
 
-    from typing_extensions import TypedDict
+    from typing_extensions import Literal, TypedDict
 
     class CompileResources(TypedDict):
 
         depend_files: T.List[mesonlib.FileOrString]
         depends: T.List[T.Union[build.BuildTarget, build.CustomTarget]]
         include_directories: T.List[T.Union[str, build.IncludeDirs]]
+        implicit_include_directories: bool
         args: T.List[str]
 
-    class RcKwargs(TypedDict):
-        output: str
-        input: T.List[T.Union[mesonlib.FileOrString, build.CustomTargetIndex]]
-        depfile: T.Optional[str]
-        depend_files: T.List[mesonlib.FileOrString]
-        depends: T.List[T.Union[build.BuildTarget, build.CustomTarget]]
-        command: T.List[T.Union[str, ExternalProgram]]
 
 class ResourceCompilerType(enum.Enum):
     windres = 1
@@ -56,8 +51,11 @@ class WindowsModule(ExtensionModule):
             'compile_resources': self.compile_resources,
         })
 
-    def detect_compiler(self, compilers: T.Dict[str, 'Compiler']) -> 'Compiler':
-        for l in ('c', 'cpp'):
+    def detect_compiler(self, compilers: T.Dict[Language, 'Compiler']) -> 'Compiler':
+        # https://github.com/python/mypy/issues/18826
+        # However, we need to support versions of mypy that cannot deduce the
+        # tuple either.
+        for l in T.cast('T.Tuple[Language, ...]', ('c', 'cpp')):
             if l in compilers:
                 return compilers[l]
         raise MesonException('Resource compilation requires a C or C++ compiler.')
@@ -75,14 +73,20 @@ class WindowsModule(ExtensionModule):
         rescomp = ExternalProgram.from_bin_list(state.environment, for_machine, 'windres')
 
         if not rescomp or not rescomp.found():
-            comp = self.detect_compiler(state.environment.coredata.compilers[for_machine])
-            if comp.id in {'msvc', 'clang-cl', 'intel-cl'} or (comp.linker and comp.linker.id in {'link', 'lld-link'}):
-                # Microsoft compilers uses rc irrespective of the frontend
-                rescomp = ExternalProgram('rc', silent=True)
-            else:
-                rescomp = ExternalProgram('windres', silent=True)
+            def search_programs(names: T.List[str]) -> T.Optional[ExternalProgram]:
+                for name in names:
+                    program = ExternalProgram(name, silent=True)
+                    if program.found():
+                        return program
+                return None
 
-        if not rescomp.found():
+            comp = self.detect_compiler(state.environment.coredata.compilers[for_machine])
+            if comp.linker and comp.linker.id in {'link', 'lld-link'}:
+                rescomp = search_programs(['rc', 'llvm-rc'])
+            else:
+                rescomp = search_programs(['windres', 'llvm-windres'])
+
+        if not rescomp:
             raise MesonException('Could not find Windows resource compiler')
 
         for (arg, match, rc_type) in [
@@ -102,27 +106,33 @@ class WindowsModule(ExtensionModule):
 
         return self._rescomp
 
-    @typed_pos_args('windows.compile_resources', varargs=(str, mesonlib.File, build.CustomTarget, build.CustomTargetIndex), min_varargs=1)
-    @typed_kwargs(
+    @TypedArgs(
         'windows.compile_resources',
-        DEPEND_FILES_KW.evolve(since='0.47.0'),
-        DEPENDS_KW.evolve(since='0.47.0'),
-        INCLUDE_DIRECTORIES,
-        KwargInfo('args', ContainerTypeInfo(list, str), default=[], listify=True),
+        var_types=VarArgInfo(
+            (str, mesonlib.File, build.CustomTarget, build.CustomTargetIndex),
+            min_args=1,
+        ),
+        kw_types=[
+            DEPEND_FILES_KW.evolve(since='0.47.0'),
+            DEPENDS_KW.evolve(since='0.47.0'),
+            INCLUDE_DIRECTORIES,
+            KwargInfo('implicit_include_directories', bool, default=False, since='1.11.0'),
+            KwargInfo('args', ContainerTypeInfo(list, str), default=[], listify=True),
+        ],
     )
     def compile_resources(self, state: 'ModuleState',
                           args: T.Tuple[T.List[T.Union[str, mesonlib.File, build.CustomTarget, build.CustomTargetIndex]]],
                           kwargs: 'CompileResources') -> ModuleReturnValue:
         extra_args = kwargs['args'].copy()
-        wrc_depend_files = kwargs['depend_files']
+        wrc_depend_files = state._interpreter.source_strings_to_files(kwargs['depend_files'])
         wrc_depends = kwargs['depends']
         for d in wrc_depends:
             if isinstance(d, build.CustomTarget):
                 extra_args += state.get_include_args([
-                    build.IncludeDirs('', [], False, [os.path.join('@BUILD_ROOT@', self.interpreter.backend.get_target_dir(d))],
-                                      state.is_build_only_subproject)
+                    build.IncludeDirs('', [], False, state.current_build_project,
+                                      [self.interpreter.backend.get_target_dir(d)])
                 ])
-        extra_args += state.get_include_args(kwargs['include_directories'])
+        extra_args += state.get_include_args(kwargs['include_directories'], kwargs['implicit_include_directories'])
 
         rescomp, rescomp_type = self._find_resource_compiler(state)
         if rescomp_type == ResourceCompilerType.rc:
@@ -148,10 +158,10 @@ class WindowsModule(ExtensionModule):
 
         res_targets: T.List[build.CustomTarget] = []
 
-        def get_names() -> T.Iterable[T.Tuple[str, str, T.Union[str, mesonlib.File, build.CustomTargetIndex]]]:
+        def get_names() -> T.Iterable[T.Tuple[str, str, T.Union[mesonlib.File, build.CustomTargetIndex]]]:
             for src in args[0]:
                 if isinstance(src, str):
-                    yield os.path.join(state.subdir, src), src, src
+                    yield os.path.join(state.subdir, src), src, mesonlib.File.from_source_file(state.environment.source_dir, state.subdir, src)
                 elif isinstance(src, mesonlib.File):
                     yield src.relative_name(), src.fname, src
                 elif isinstance(src, build.CustomTargetIndex):
@@ -175,13 +185,44 @@ class WindowsModule(ExtensionModule):
             name = name.replace('/', '_').replace('\\', '_').replace(':', '_')
             name_formatted = name_formatted.replace('/', '_').replace('\\', '_').replace(':', '_')
             output = f'{name}_@BASENAME@.{suffix}'
-            command: T.List[T.Union[str, ExternalProgram]] = []
-            command.append(rescomp)
-            command.extend(res_args)
             depfile: T.Optional[str] = None
+            depfile_type: T.Optional[Literal['gcc', 'msvc']] = None
+            command: CommandList = []
+
+            if rescomp_type == ResourceCompilerType.rc:
+                compiler = self.detect_compiler(state.environment.coredata.compilers[MachineChoice.HOST])
+                command.extend(state.environment.get_build_command())
+                command.extend(['--internal', 'rc',
+                                '--rc', *rescomp.get_command(),
+                                '--cl', *compiler.get_exelist(False)])
+
+                if compiler.id in {'msvc', 'clang-cl', 'intel-cl'}:
+                    depfile_type = 'msvc'
+                    command.extend(['--Xarg=/showIncludes',
+                                    '--Xarg=/EP',
+                                    '--Xarg=/nologo',
+                                    '--Xarg=/DRC_INVOKED',
+                                    '--Xarg=/Tc@INPUT@',
+                                    ])
+                else:
+                    depfile = f'{output}.d'
+                    depfile_type = 'gcc'
+                    command.extend(['--Xarg=-xc',
+                                    '--Xarg=-E',
+                                    '--Xarg=-MD',
+                                    '--Xarg=-MQ@OUTPUT@',
+                                    '--Xarg=-MF@DEPFILE@',
+                                    '--Xarg=-DRC_INVOKED',
+                                    ])
+            else:
+                command.extend(rescomp.get_command())
+
+            command.extend(res_args)
+
             # instruct binutils windres to generate a preprocessor depfile
             if rescomp_type == ResourceCompilerType.windres:
                 depfile = f'{output}.d'
+                depfile_type = 'gcc'
                 command.extend(['--preprocessor-arg=-MD',
                                 '--preprocessor-arg=-MQ@OUTPUT@',
                                 '--preprocessor-arg=-MF@DEPFILE@'])
@@ -189,16 +230,16 @@ class WindowsModule(ExtensionModule):
             res_targets.append(build.CustomTarget(
                 name_formatted,
                 state.subdir,
-                state.subproject,
                 state.environment,
                 command,
                 [src],
                 [output],
-                state.is_build_only_subproject,
+                state.current_build_project,
                 depfile=depfile,
+                depfile_type=depfile_type,
                 depend_files=wrc_depend_files,
                 extra_depends=wrc_depends,
-                description='Compiling Windows resource {}'
+                description='Compiling Windows resource {}',
             ))
 
         return ModuleReturnValue(res_targets, [res_targets])

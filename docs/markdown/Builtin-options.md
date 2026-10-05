@@ -72,30 +72,35 @@ Options that are labeled "per machine" in the table are set per
 machine. See the [specifying options per
 machine](#specifying-options-per-machine) section for details.
 
-| Option                                 | Default value | Description                                                    | Is per machine | Is per subproject |
-| -------------------------------------- | ------------- | -----------                                                    | -------------- | ----------------- |
+| Option                                 | Default value | Description                                                    | Is per machine | Per subproject (since) |
+| -------------------------------------- | ------------- | -----------                                                    | -------------- | ---------------------- |
 | auto_features {enabled, disabled, auto} | auto         | Override value of all 'auto' features                          | no             | no                |
 | backend {ninja, vs,<br>vs2010, vs2012, vs2013, vs2015, vs2017, vs2019, vs2022, xcode, none} | ninja | Backend to use    | no             | no                |
-| genvslite {vs2022}                     | vs2022        | Setup multi-builtype ninja build directories and Visual Studio solution | no | no |
-| buildtype {plain, debug,<br>debugoptimized, release, minsize, custom} | debug | Build type to use                       | no             | no                |
-| debug                                  | true          | Enable debug symbols and other information                     | no             | no                |
-| default_library {shared, static, both} | shared        | Default library type                                           | no             | yes               |
+| genvslite {vs2022}                     | vs2022        | Setup multi-buildtype ninja build directories and Visual Studio solution | no | no |
+| buildtype {plain, debug,<br>debugoptimized, release, minsize, custom} | debug | Build type to use                       | no             | 1.8.0             |
+| debug                                  | true          | Enable debug symbols and other information                     | no             | 1.8.0             |
+| default_both_libraries {shared, static, auto} | shared | Default library type for both_libraries                        | no             | 1.8.0             |
+| default_library {shared, static, both} | shared        | Default library type                                           | no             | 0.54.0            |
 | errorlogs                              | true          | Whether to print the logs from failing tests.                  | no             | no                |
 | install_umask {preserve, 0000-0777}    | 022           | Default umask to apply on permissions of installed files       | no             | no                |
 | layout {mirror,flat}                   | mirror        | Build directory layout                                         | no             | no                |
-| optimization {plain, 0, g, 1, 2, 3, s} | 0             | Optimization level                                             | no             | no                |
+| namingscheme {platform, classic} | classic | Library naming scheme to use                                  | no             | 1.10.0             |
+| optimization {plain, 0, g, 1, 2, 3, s} | 0             | Optimization level                                             | no             | 1.8.0             |
 | pkg_config_path {OS separated path}    | ''            | Additional paths for pkg-config to search before builtin paths | yes            | no                |
 | prefer_static                          | false         | Whether to try static linking before shared linking            | no             | no                |
 | cmake_prefix_path                      | []            | Additional prefixes for cmake to search before builtin paths   | yes            | no                |
 | stdsplit                               | true          | Split stdout and stderr in test logs                           | no             | no                |
-| strip                                  | false         | Strip targets on install                                       | no             | no                |
-| unity {on, off, subprojects}           | off           | Unity build                                                    | no             | no                |
-| unity_size {>=2}                       | 4             | Unity file block size                                          | no             | no                |
-| warning_level {0, 1, 2, 3, everything} | 1             | Set the warning level. From 0 = none to everything = highest   | no             | yes               |
-| werror                                 | false         | Treat warnings as errors                                       | no             | yes               |
+| strip                                  | false         | Strip targets on install                                       | no             | 1.8.0             |
+| unity {on, off, subprojects}           | off           | Unity build                                                    | no             | 1.8.0             |
+| unity_size {>=2}                       | 4             | Unity file block size                                          | no             | 1.8.0             |
+| warning_level {0, 1, 2, 3, everything} | 1             | Set the warning level. From 0 = compiler default to everything = highest | no   | 0.56.0            |
+| werror                                 | false         | Treat warnings as errors                                       | no             | 0.54.0            |
 | wrap_mode {default, nofallback,<br>nodownload, forcefallback, nopromote} | default | Wrap mode to use                   | no             | no                |
 | force_fallback_for                     | []            | Force fallback for those dependencies                          | no             | no                |
 | vsenv                                  | false         | Activate Visual Studio environment                             | no             | no                |
+| os2_emxomf                             | false         | Use OMF format on OS/2                                         | no             | no                |
+
+(For the Rust language only, `warning_level=0` disables all warnings).
 
 #### Details for `backend`
 
@@ -112,7 +117,7 @@ for a lighter automated build pipeline.
 Setup multiple buildtype-suffixed, ninja-backend build directories (e.g.
 [builddir]_[debug/release/etc.]) and generate [builddir]_vs containing a Visual
 Studio solution with multiple configurations that invoke a meson compile of the
-setup build directories, as appropriate for the current configuration (builtype).
+setup build directories, as appropriate for the current configuration (buildtype).
 
 This has the effect of a simple setup macro of multiple 'meson setup ...'
 invocations with a set of different buildtype values.  E.g.
@@ -147,9 +152,13 @@ the two-way mapping:
 
 All other combinations of `debug` and `optimization` set `buildtype` to `'custom'`.
 
+Note that `-Ddebug=false` does not cause the compiler preprocessor macro
+`NDEBUG` to be defined.
+The macro can be defined using the base option `b_ndebug`, described below.
+
 #### Details for `warning_level`
 
-Exact flags per warning level is compiler specific, but there is an approximative
+Exact flags per warning level is compiler specific, but there is an approximate
 table for most common compilers.
 
 | Warning level | GCC/Clang                | MSVC  |
@@ -177,6 +186,34 @@ fails.
 
 `vsenv` is `true` by default when using the `vs` backend.
 
+
+#### Details for `default_both_libraries`
+
+Since `1.6.0`, you can specify the default type of library selected when using a
+`both_libraries` object with `default_both_libraries`. Note that, unlike
+`default_library`, this option does not affect how the library artifacts are
+built, but how they are internally linked to the dependent targets within the
+same project.
+
+The possible values of this option are 'shared' (default value, compatible with
+previous meson versions), 'static', and 'auto'. With auto, the value from the
+`default_library` option is used, unless it is 'both', in which case 'shared' is
+used instead.
+
+When `default_both_libraries` is 'auto', passing a [[@both_libs]] dependency
+in [[both_libraries]] will link the static dependency with the static lib,
+and the shared dependency with the shared lib.
+
+#### Details for `os2_emxomf`
+
+The `--os2-emxomf` argument is supported since `1.10.0`, `-Dos2_emxomf=true`
+syntax is supported since `1.10.0`.
+
+Setting the `os2_emxomf` option to `true` forces to use emxomf toolchains in
+order to generate OMF files instead of aout toolchains.
+
+`os2_emxomf` is `false` by default.
+
 ## Base options
 
 These are set in the same way as universal options, either by
@@ -196,6 +233,7 @@ available on all platforms or with all compilers:
 | b_bitcode           | false                | true, false                                                   | Embed Apple bitcode, see below                                                 |
 | b_colorout          | always               | auto, always, never                                           | Use colored output                                                             |
 | b_coverage          | false                | true, false                                                   | Enable coverage tracking                                                       |
+| b_freestanding      | false                | true, false                                                   | Build without assuming a hosted standard library                               |
 | b_lundef            | true                 | true, false                                                   | Don't allow undefined symbols when linking                                     |
 | b_lto               | false                | true, false                                                   | Use link time optimization                                                     |
 | b_lto_threads       | 0                    | Any integer*                                                  | Use multiple threads for lto. *(Added in 0.57.0)*                              |
@@ -210,10 +248,25 @@ available on all platforms or with all compilers:
 | b_pie               | false                | true, false                                                   | Build position-independent executables (since 0.49.0)                          |
 | b_vscrt             | from_buildtype       | none, md, mdd, mt, mtd, from_buildtype, static_from_buildtype | VS runtime library to use (since 0.48.0) (static_from_buildtype since 0.56.0)  |
 
-The value of `b_sanitize` can be one of: `none`, `address`, `thread`,
-`undefined`, `memory`, `leak`, `address,undefined`, but note that some
-compilers might not support all of them. For example Visual Studio
-only supports the address sanitizer.
+The default and possible values of sanitizers changed in 1.8. Before 1.8 they
+were string values, and restricted to a specific subset of values: `none`,
+`address`, `thread`, `undefined`, `memory`, `leak`, or `address,undefined`. In
+1.8 it was changed to a free form array of sanitizers, which are checked by a
+compiler and linker check. For backwards compatibility reasons
+`get_option('b_sanitize')` continues to return a string with the array values
+separated by a comma. Furthermore:
+
+ - If the `b_sanitize` option is empty, the `'none'` string is returned.
+
+ - If it contains only the values `'address'` and `'undefined'`, they are
+   always returned as the `'address,undefined'` string, in this order.
+
+ - Otherwise, the array elements are returned in undefined order.
+
+Be aware that `b_lundef` is `true` by default, which is incompatible with the
+address sanitizer when building shared libraries with clang, as documented
+[by clang](https://clang.llvm.org/docs/AddressSanitizer.html#usage)
+(`b_lundef` makes meson use `-Wl,--no-undefined`, which is an alias for `-Wl,-z,defs`).
 
 \* < 0 means disable, == 0 means automatic selection, > 0 sets a specific number to use
 
@@ -241,8 +294,7 @@ with `b_asneeded`, so that option will be silently disabled.
 
 [[shared_module]]s will not have
 bitcode embedded because `-Wl,-bitcode_bundle` is incompatible with
-both `-bundle` and `-Wl,-undefined,dynamic_lookup` which are necessary
-for shared modules to work.
+`-Wl,-undefined,dynamic_lookup` which is necessary for shared modules to work.
 
 ## Compiler options
 
@@ -257,18 +309,26 @@ or compiler being used:
 | ------           | ------------- | ---------------                          | ----------- |
 | c_args           |               | free-form comma-separated list           | C compile arguments to use |
 | c_link_args      |               | free-form comma-separated list           | C link arguments to use |
-| c_std            | none          | none, c89, c99, c11, c17, c18, c2x, c23, gnu89, gnu99, gnu11, gnu17, gnu18, gnu2x, gnu23 | C language standard to use |
+| c_std            | none          | none, c89, c99, c11, c17, c18, c2x, c23, c2y, clatest, gnu89, gnu99, gnu11, gnu17, gnu18, gnu2x, gnu23, gnu2y | C language standard to use |
 | c_winlibs        | see below     | free-form comma-separated list           | Standard Windows libs to link against |
 | c_thread_count   | 4             | integer value ≥ 0                        | Number of threads to use with emcc when using threads |
 | cpp_args         |               | free-form comma-separated list           | C++ compile arguments to use |
 | cpp_link_args    |               | free-form comma-separated list           | C++ link arguments to use |
-| cpp_std          | none          | none, c++98, c++03, c++11, c++14, c++17, c++20 <br/>c++2a, c++1z, gnu++03, gnu++11, gnu++14, gnu++17, gnu++1z, <br/> gnu++2a, gnu++20, vc++14, vc++17, vc++20, vc++latest | C++ language standard to use |
+| cpp_std          | none          | none, c++98, c++03, c++11, c++14, c++17, c++20, c++23, c++26, c++latest <br/>c++2a, c++1z, gnu++03, gnu++11, gnu++14, gnu++17, gnu++1z, <br/> gnu++2a, gnu++20, vc++14, vc++17, vc++20, vc++latest | C++ language standard to use |
 | cpp_debugstl     | false         | true, false                              | C++ STL debug mode |
 | cpp_eh           | default       | none, default, a, s, sc                  | C++ exception handling type |
-| cpp_rtti         | true          | true, false                              | Whether to enable RTTI (runtime type identification) |
+| cpp_rtti         | true          | true, false                              | Whether to enable RTTI (runtime type identification) for C++ and Objective-C++ |
 | cpp_thread_count | 4             | integer value ≥ 0                        | Number of threads to use with emcc when using threads |
 | cpp_winlibs      | see below     | free-form comma-separated list           | Standard Windows libs to link against |
+| cpp_importstd    | false         | true or false                            | Whether to use `import std` |
 | fortran_std      | none          | [none, legacy, f95, f2003, f2008, f2018] | Fortran language standard to use |
+| rust_dynamic_std | false         | true, false                              | Whether to link dynamically to the Rust standard library *(Added in 1.9.0)* |
+| rust_nightly     | auto          | enabled, disabled, auto                  | Nightly Rust compiler (enabled=required, disabled=don't use nightly feature, auto=use nightly feature if available) *(Added in 1.10.0)* |
+| rust_panic       | none          | none, unwind, abort                      | Panic strategy (none=use the compiler default) *(Added in 1.13.0)* |
+| rust_overflow_checks | false     | true, false                              | Whether to enable runtime integer overflow checks *(Added in 1.13.0)* |
+| rust_codegen_units | 0           | integer value ≥ 0                        | Number of code generation units to split the crate into (0=use the compiler default) *(Added in 1.13.0)* |
+| rust_incremental | false         | true, false                              | Whether to enable incremental compilation *(Added in 1.13.0)* |
+| rust_incremental_cache_dir |     | filesystem path                          | Directory used to store incremental compilation data (empty=pick a default under the build directory) *(Added in 1.13.0)* |
 | cuda_ccbindir    |               | filesystem path                          | CUDA non-default toolchain directory to use (-ccbin) *(Added in 0.57.1)* |
 
 The default values of `c_winlibs` and `cpp_winlibs` are in
@@ -280,11 +340,11 @@ All these `<lang>_*` options are specified per machine. See below in
 the [specifying options per machine](#specifying-options-per-machine)
 section on how to do this in cross builds.
 
-When using MSVC, `cpp_eh=none` will result in no exception flags being
-passed, while the `cpp_eh=[value]` will result in `/EH[value]`. Since
-*0.51.0* `cpp_eh=default` will result in `/EHsc` on MSVC. When using
-gcc-style compilers, nothing is passed (allowing exceptions to work),
-while `cpp_eh=none` passes `-fno-exceptions`.
+When using MSVC, `cpp_eh=[value]` will result in `/EH[value]` being passed.
+The magic value `none` translates to `s-c-` to disable exceptions. *Since
+0.51.0* `default` translates to `sc`. When using gcc-style compilers, nothing
+is passed (allowing exceptions to work), while `cpp_eh=none` passes
+`-fno-exceptions`.
 
 Since *0.54.0* The `<lang>_thread_count` option can be used to control
 the value passed to `-s PTHREAD_POOL_SIZE` when using emcc. No other
@@ -336,11 +396,10 @@ allowing differences in behavior to crop out.
 
 ## Specifying options per subproject
 
-Since *0.54.0* `default_library` and `werror` built-in options can be
-defined per subproject. This is useful, for example, when building
-shared libraries in the main project and statically linking a subproject,
-or when the main project must build with no warnings but some subprojects
-cannot.
+Several built-in options and all compiler options can be defined per subproject.
+This is useful, for example, when building shared libraries in the main project
+and statically linking a subproject, or when the main project must build
+with no warnings but some subprojects cannot.
 
 Most of the time, this would be used either in the parent project by
 setting subproject's default_options (e.g. `subproject('foo',
@@ -348,12 +407,35 @@ default_options: 'default_library=static')`), or by the user through the
 command line: `-Dfoo:default_library=static`.
 
 The value is overridden in this order:
-- Value from parent project
-- Value from subproject's default_options if set
-- Value from subproject() default_options if set
-- Value from command line if set
+- `opt=value` from parent project's `default_options`
+- `opt=value` from subproject's `default_options`
+- `opt=value` from machine file
+- `opt=value` from command line
+- `subp:opt=value` from parent project's default options
+- `opt=value` from `subproject()` `default_options`
+- `subp:opt=value` from machine file
+- `subp:opt=value` from command line
 
-Since *0.56.0* `warning_level` can also be defined per subproject.
+### Old behavior
+
+Between *0.54.0* and *1.7.x* only a few options could be defined per subproject:
+* `default_library` and `werror` since *0.54.0*;
+* `warning_level` since *0.56.0*;
+* compiler options since *0.63.0*
+
+The value was overridden in this order:
+
+- `opt=value` from parent project's `default_options`
+- `opt=value` from machine file
+- `opt=value` from command line
+- `opt=value` from subproject's `default_options`
+- `subp:opt=value` from parent project's default options
+- `opt=value` from `subproject()` `default_options`
+- `subp:opt=value` from machine file
+- `subp:opt=value` from command line
+
+In other word, the subproject's `default_options` had a *higher* priority
+than `opt=value` from machine file or command line.
 
 ## Module options
 
@@ -392,6 +474,7 @@ install prefix. For example: if the install prefix is `/usr` and the
 | platlibdir        |               | Directory path              | Directory for site-specific, platform-specific files (Since 0.60.0) |
 | purelibdir        |               | Directory path              | Directory for site-specific, non-platform-specific files  (Since 0.60.0) |
 | allow_limited_api | true          | true, false                 | Disables project-wide use of the Python Limited API (Since 1.3.0) |
+| build_config      |               | File path                   | Specifies the Python build configuration file (PEP 739) (Since 1.10.0) |
 
 *Since 0.60.0* The `python.platlibdir` and `python.purelibdir` options are used
 by the python module methods `python.install_sources()` and
@@ -408,7 +491,8 @@ interpreter directly, even if it is a venv. Setting to `venv` will instead use
 the paths for the virtualenv the python found installation comes from (or fail
 if it is not a virtualenv).  Setting to `auto` will check if the found
 installation is a virtualenv, and use `venv` or `system` as appropriate (but
-never `prefix`). This option is mutually exclusive with the `platlibdir`/`purelibdir`.
+never `prefix`). Note that Conda environments are treated as `system`.
+This option is mutually exclusive with the `platlibdir`/`purelibdir`.
 
 For backwards compatibility purposes, the default `install_env` is `prefix`.
 

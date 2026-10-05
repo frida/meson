@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION ${CMAKE_VERSION})
 
 project(cmMod)
 set (CMAKE_CXX_STANDARD 14)
@@ -139,10 +139,16 @@ set(ARGS_TEST ${ARGS_TEST} arg2)
 
 add_executable(macro_name macro_name.cpp)
 add_executable(args_test args_test.cpp)
+add_custom_command(
+  OUTPUT backslash.txt
+  COMMAND ${CMAKE_COMMAND} -E echo "\\1"
+)
+set_property(TARGET macro_name PROPERTY MESON_TEST_BACKSLASH "\\1")
 add_custom_target(args_test_cmd
   COMMAND args_test ${ARGS_TEST}
 )
 add_custom_target(macro_name_cmd COMMAND macro_name)
+add_custom_target(backslash_cmd COMMAND ${CMAKE_COMMAND} -E echo "\\1")
 
 if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
   message(STATUS "Running the -include test case on macro_name")

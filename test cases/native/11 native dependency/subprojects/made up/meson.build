@@ -1,4 +1,4 @@
-project('made up', 'c', meson_version : '>= 1.3.0')
+project('made up', 'c', meson_version : '>= 1.12.0')
 
 s = static_library('lib', 'lib.c')
 

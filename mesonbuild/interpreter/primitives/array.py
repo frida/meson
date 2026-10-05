@@ -5,14 +5,14 @@ from __future__ import annotations
 import typing as T
 
 from ...interpreterbase import (
-    ObjectHolder,
+    InterpreterObject,
     IterableObject,
+    KwargInfo,
     MesonOperator,
+    ObjectHolder,
     typed_operator,
-    noKwargs,
-    noPosargs,
     noArgsFlattening,
-    typed_pos_args,
+    TypedArgs,
     FeatureNew,
 
     TYPE_var,
@@ -20,33 +20,21 @@ from ...interpreterbase import (
     InvalidArguments,
 )
 from ...mparser import PlusAssignmentNode
+from ...interpreter.type_checking import (
+    OBJ_PARG, INT_PARG, OBJ_OARG, INT_OARG,
+)
 
 if T.TYPE_CHECKING:
-    # Object holders need the actual interpreter
-    from ...interpreter import Interpreter
     from ...interpreterbase import TYPE_kwargs
 
 class ArrayHolder(ObjectHolder[T.List[TYPE_var]], IterableObject):
-    def __init__(self, obj: T.List[TYPE_var], interpreter: 'Interpreter') -> None:
-        super().__init__(obj, interpreter)
-        self.methods.update({
-            'contains': self.contains_method,
-            'length': self.length_method,
-            'get': self.get_method,
-        })
-
-        self.trivial_operators.update({
-            MesonOperator.EQUALS: (list, lambda x: self.held_object == x),
-            MesonOperator.NOT_EQUALS: (list, lambda x: self.held_object != x),
-            MesonOperator.IN: (object, lambda x: x in self.held_object),
-            MesonOperator.NOT_IN: (object, lambda x: x not in self.held_object),
-        })
-
-        # Use actual methods for functions that require additional checks
-        self.operators.update({
-            MesonOperator.PLUS: self.op_plus,
-            MesonOperator.INDEX: self.op_index,
-        })
+    # Operators that only require type checks
+    TRIVIAL_OPERATORS = {
+        MesonOperator.EQUALS: (list, lambda obj, x: obj.held_object == x),
+        MesonOperator.NOT_EQUALS: (list, lambda obj, x: obj.held_object != x),
+        MesonOperator.IN: (object, lambda obj, x: x in obj.held_object),
+        MesonOperator.NOT_IN: (object, lambda obj, x: x not in obj.held_object),
+    }
 
     def display_name(self) -> str:
         return 'array'
@@ -61,8 +49,8 @@ class ArrayHolder(ObjectHolder[T.List[TYPE_var]], IterableObject):
         return len(self.held_object)
 
     @noArgsFlattening
-    @noKwargs
-    @typed_pos_args('array.contains', object)
+    @TypedArgs('array.contains', pos_types=[OBJ_PARG])
+    @InterpreterObject.method('contains')
     def contains_method(self, args: T.Tuple[object], kwargs: TYPE_kwargs) -> bool:
         def check_contains(el: T.List[TYPE_var]) -> bool:
             for element in el:
@@ -75,23 +63,40 @@ class ArrayHolder(ObjectHolder[T.List[TYPE_var]], IterableObject):
             return False
         return check_contains(self.held_object)
 
-    @noKwargs
-    @noPosargs
+    @TypedArgs('array.length')
+    @InterpreterObject.method('length')
     def length_method(self, args: T.List[TYPE_var], kwargs: TYPE_kwargs) -> int:
         return len(self.held_object)
 
     @noArgsFlattening
-    @noKwargs
-    @typed_pos_args('array.get', int, optargs=[object])
+    @TypedArgs('array.get', pos_types=[INT_PARG], opt_types=[OBJ_OARG])
+    @InterpreterObject.method('get')
     def get_method(self, args: T.Tuple[int, T.Optional[TYPE_var]], kwargs: TYPE_kwargs) -> TYPE_var:
-        index = args[0]
-        if index < -len(self.held_object) or index >= len(self.held_object):
-            if args[1] is None:
-                raise InvalidArguments(f'Array index {index} is out of bounds for array of size {len(self.held_object)}.')
-            return args[1]
-        return self.held_object[index]
+        index, fallback = args
+        try:
+            return self.held_object[index]
+        except IndexError:
+            if fallback is not None:
+                return fallback
+            raise InvalidArguments(f'Array index {index} is out of bounds for array of size {len(self.held_object)}.')
+
+    @FeatureNew('array.slice', '1.10.0')
+    @TypedArgs(
+        'array.slice',
+        opt_types=[INT_OARG, INT_OARG],
+        kw_types=[KwargInfo('step', int, default=1)],
+    )
+    @InterpreterObject.method('slice')
+    def slice_method(self, args: T.Tuple[T.Optional[int], T.Optional[int]], kwargs: T.Dict[str, int]) -> TYPE_var:
+        start, stop = args
+        if start is not None and stop is None:
+            raise InvalidArguments('Providing only one positional slice argument is ambiguous.')
+        if kwargs['step'] == 0:
+            raise InvalidArguments('Slice step cannot be zero.')
+        return self.held_object[start:stop:kwargs['step']]
 
     @typed_operator(MesonOperator.PLUS, object)
+    @InterpreterObject.operator(MesonOperator.PLUS)
     def op_plus(self, other: TYPE_var) -> T.List[TYPE_var]:
         if not isinstance(other, list):
             if not isinstance(self.current_node, PlusAssignmentNode):
@@ -101,8 +106,22 @@ class ArrayHolder(ObjectHolder[T.List[TYPE_var]], IterableObject):
         return self.held_object + other
 
     @typed_operator(MesonOperator.INDEX, int)
+    @InterpreterObject.operator(MesonOperator.INDEX)
     def op_index(self, other: int) -> TYPE_var:
         try:
             return self.held_object[other]
         except IndexError:
             raise InvalidArguments(f'Index {other} out of bounds of array of size {len(self.held_object)}.')
+
+    @TypedArgs('array.flatten')
+    @FeatureNew('array.flatten', '1.9.0')
+    @InterpreterObject.method('flatten')
+    def flatten_method(self, args: T.List[TYPE_var], kwargs: TYPE_kwargs) -> TYPE_var:
+        def flatten(obj: TYPE_var) -> T.Iterable[TYPE_var]:
+            if isinstance(obj, list):
+                for o in obj:
+                    yield from flatten(o)
+            else:
+                yield obj
+
+        return list(flatten(self.held_object))

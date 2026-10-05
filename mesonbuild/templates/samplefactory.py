@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2019 The Meson development team
+# Copyright © 2023-2025 Intel Corporation
 
 from __future__ import annotations
 
 import typing as T
 
+from mesonbuild.mesonlib import unwrap
 from mesonbuild.templates.valatemplates import ValaProject
 from mesonbuild.templates.fortrantemplates import FortranProject
 from mesonbuild.templates.objcpptemplates import ObjCppProject
@@ -38,4 +40,4 @@ _IMPL: T.Mapping[str, T.Union[T.Type[ClassImpl], T.Type[FileHeaderImpl], T.Type[
 
 
 def sample_generator(options: Arguments) -> SampleImpl:
-    return _IMPL[options.language](options)
+    return _IMPL[unwrap(options.language)](options)

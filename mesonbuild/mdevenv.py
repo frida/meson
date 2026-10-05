@@ -4,13 +4,15 @@ import os, subprocess
 import argparse
 import tempfile
 import shutil
+import sys
 import itertools
 import typing as T
 
 from pathlib import Path
 from . import build, minstall
-from .mesonlib import (EnvironmentVariables, MesonException, is_windows, setup_vsenv, OptionKey,
-                       get_wine_shortpath, MachineChoice)
+from .mesonlib import (EnvironmentVariables, MesonException, join_args, is_windows, setup_vsenv,
+                       get_wine_shortpath, MachineChoice, relpath, is_osx)
+from .options import OptionKey
 from . import mlog
 
 
@@ -67,6 +69,18 @@ def get_env(b: build.Build, dump_fmt: T.Optional[str]) -> T.Tuple[T.Dict[str, st
         extra_env.set('QEMU_LD_PREFIX', [sysroot])
 
     env = {} if dump_fmt else os.environ.copy()
+    if not is_windows():
+        # From XDG spec:
+        # > If $XDG_DATA_DIRS is either not set or empty, a value equal to /usr/local/share/:/usr/share/ should be used.
+        # We need that default value, otherwise adding directories with devenv.prepend()
+        # would override system directories instead of adding to them. Note that
+        # devenv.set() still overrides this default. Distros set their default
+        # XDG_DATA_DIRS, but CI containers often do not.
+        if not env.get('XDG_DATA_DIRS'):
+            env['XDG_DATA_DIRS'] = '/usr/local/share:/usr/share'
+        if not env.get('XDG_CONFIG_DIRS'):
+            env['XDG_CONFIG_DIRS'] = '/etc/xdg'
+
     default_fmt = '${0}' if dump_fmt in {'sh', 'export'} else None
     varnames = set()
     for i in itertools.chain(b.devenv, {extra_env}):
@@ -81,11 +95,11 @@ def bash_completion_files(b: build.Build, install_data: 'InstallData') -> T.List
     from .dependencies.pkgconfig import PkgConfigDependency
     result = []
     dep = PkgConfigDependency('bash-completion', b.environment,
-                              {'required': False, 'silent': True, 'version': '>=2.10'})
+                              {'required': False, 'silent': True, 'version': ['>=2.10'], 'native': MachineChoice.HOST})
     if dep.found():
-        prefix = b.environment.coredata.get_option(OptionKey('prefix'))
+        prefix = b.environment.coredata.optstore.get_value_for(OptionKey('prefix'))
         assert isinstance(prefix, str), 'for mypy'
-        datadir = b.environment.coredata.get_option(OptionKey('datadir'))
+        datadir = b.environment.coredata.optstore.get_value_for(OptionKey('datadir'))
         assert isinstance(datadir, str), 'for mypy'
         datadir_abs = os.path.join(prefix, datadir)
         completionsdir = dep.get_variable(pkgconfig='completionsdir', pkgconfig_define=(('datadir', datadir_abs),))
@@ -140,7 +154,7 @@ def write_gdb_script(privatedir: Path, install_data: 'InstallData', workdir: Pat
         if first_time:
             gdbinit_path = gdbinit_path.resolve()
             workdir_path = workdir.resolve()
-            rel_path = gdbinit_path.relative_to(workdir_path)
+            rel_path = Path(relpath(gdbinit_path, workdir_path))
             mlog.log('Meson detected GDB helpers and added config in', mlog.bold(str(rel_path)))
             mlog.log('To load it automatically you might need to:')
             mlog.log(' - Add', mlog.bold(f'add-auto-load-safe-path {gdbinit_path.parent}'),
@@ -148,6 +162,14 @@ def write_gdb_script(privatedir: Path, install_data: 'InstallData', workdir: Pat
             if gdbinit_path.parent != workdir_path:
                 mlog.log(' - Change current workdir to', mlog.bold(str(rel_path.parent)),
                          'or use', mlog.bold(f'--init-command {rel_path}'))
+
+def macos_sip_enabled() -> bool:
+    if not is_osx():
+        return False
+    ret = subprocess.run(["csrutil", "status"], text=True, capture_output=True, encoding='utf-8')
+    if not ret.stdout:
+        return True
+    return 'enabled' in ret.stdout
 
 def dump(devenv: T.Dict[str, str], varnames: T.Set[str], dump_format: T.Optional[str], output: T.Optional[T.TextIO] = None) -> None:
     for name in varnames:
@@ -163,7 +185,7 @@ def run(options: argparse.Namespace) -> int:
     b = build.load(options.builddir)
     workdir = options.workdir or options.builddir
 
-    need_vsenv = T.cast('bool', b.environment.coredata.get_option(OptionKey('vsenv')))
+    need_vsenv = T.cast('bool', b.environment.coredata.optstore.get_value_for(OptionKey('vsenv')))
     setup_vsenv(need_vsenv) # Call it before get_env to get vsenv vars as well
     dump_fmt = options.dump_format if options.dump else None
     devenv, varnames = get_env(b, dump_fmt)
@@ -191,6 +213,8 @@ def run(options: argparse.Namespace) -> int:
     args = options.devcmd
     if not args:
         prompt_prefix = f'[{b.project_name}]'
+        if os.environ.get("MESON_DISABLE_PS1_OVERRIDE"):
+            prompt_prefix = None
         shell_env = os.environ.get("SHELL")
         # Prefer $SHELL in a MSYS2 bash despite it being Windows
         if shell_env and os.path.exists(shell_env):
@@ -201,8 +225,9 @@ def run(options: argparse.Namespace) -> int:
                 mlog.warning('Failed to determine Windows shell, fallback to cmd.exe')
             if shell in POWERSHELL_EXES:
                 args = [shell, '-NoLogo', '-NoExit']
-                prompt = f'function global:prompt {{  "{prompt_prefix} PS " + $PWD + "> "}}'
-                args += ['-Command', prompt]
+                if prompt_prefix:
+                    prompt = f'function global:prompt {{  "{prompt_prefix} PS " + $PWD + "> "}}'
+                    args += ['-Command', prompt]
             else:
                 args = [os.environ.get("COMSPEC", r"C:\WINDOWS\system32\cmd.exe")]
                 args += ['/k', f'prompt {prompt_prefix} $P$G']
@@ -210,25 +235,42 @@ def run(options: argparse.Namespace) -> int:
             args = [os.environ.get("SHELL", os.path.realpath("/bin/sh"))]
         if "bash" in args[0]:
             # Let the GC remove the tmp file
-            tmprc = tempfile.NamedTemporaryFile(mode='w')
+            tmprc = tempfile.NamedTemporaryFile(mode='w', encoding='utf-8')
             tmprc.write('[ -e ~/.bashrc ] && . ~/.bashrc\n')
-            if not os.environ.get("MESON_DISABLE_PS1_OVERRIDE"):
+            if prompt_prefix:
                 tmprc.write(f'export PS1="{prompt_prefix} $PS1"\n')
             for f in bash_completion_files(b, install_data):
                 tmprc.write(f'. "{f}"\n')
             tmprc.flush()
             args.append("--rcfile")
             args.append(tmprc.name)
+        elif args[0].endswith('zsh'):
+            # Let the GC remove the tmp file
+            tmpdir = tempfile.TemporaryDirectory()
+            with open(os.path.join(tmpdir.name, '.zshrc'), 'w', encoding='utf-8') as zshrc:
+                zshrc.write('[ -e ~/.zshrc ] && . ~/.zshrc\n')
+                if prompt_prefix:
+                    zshrc.write(f'export PROMPT="{prompt_prefix} $PROMPT"\n')
+            devenv['ZDOTDIR'] = tmpdir.name
+        if 'DYLD_LIBRARY_PATH' in devenv and macos_sip_enabled():
+            mlog.warning('macOS System Integrity Protection is enabled: DYLD_LIBRARY_PATH cannot be set in the subshell')
+            mlog.warning('To fix that, use `meson devenv --dump dev.env && source dev.env`')
+            del devenv['DYLD_LIBRARY_PATH']
     else:
         # Try to resolve executable using devenv's PATH
         abs_path = shutil.which(args[0], path=devenv.get('PATH', None))
         args[0] = abs_path or args[0]
 
     try:
-        return subprocess.call(args, close_fds=False,
-                               env=devenv,
-                               cwd=workdir)
-    except subprocess.CalledProcessError as e:
-        return e.returncode
+        if is_windows():
+            # execvpe doesn't return exit code on Windows
+            # see https://github.com/python/cpython/issues/63323
+            result = subprocess.run(args, env=devenv, cwd=workdir)
+            sys.exit(result.returncode)
+        else:
+            os.chdir(workdir)
+            os.execvpe(args[0], args, env=devenv)
     except FileNotFoundError:
         raise MesonException(f'Command not found: {args[0]}')
+    except OSError as e:
+        raise MesonException(f'Command `{join_args(args)}` failed to execute: {e}')

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2021-2023 Intel Corporation
+# Copyright © 2021-2024 Intel Corporation
 
 """Script for running a single project test.
 
@@ -13,9 +13,11 @@ import pathlib
 import typing as T
 
 from mesonbuild import mlog
+from mesonbuild.mesonlib import is_windows
 from run_tests import handle_meson_skip_test
-from run_project_tests import TestDef, load_test_json, run_test, BuildStep
-from run_project_tests import setup_commands, detect_system_compiler, print_tool_versions
+from run_project_tests import TestDef, TestCategory, load_test_json, run_test, BuildStep
+from run_project_tests import setup_commands, detect_system_compiler, detect_tools
+from run_project_tests import scan_test_data_symlinks, setup_symlinks, clear_transitive_files
 
 if T.TYPE_CHECKING:
     from run_project_tests import CompilerArgumentType
@@ -44,15 +46,17 @@ def main() -> None:
     parser.add_argument('--quick', action='store_true', help='Skip some compiler and tool checking')
     args = T.cast('ArgumentType', parser.parse_args())
 
-    detect_system_compiler(args, args.quick)
-
+    if not is_windows():
+        scan_test_data_symlinks()
+        setup_symlinks()
     setup_commands(args.backend)
     if not args.quick:
         detect_system_compiler(args)
-        print_tool_versions()
+    detect_tools(not args.quick)
 
-    test = TestDef(args.case, args.case.stem, [])
-    tests = load_test_json(test, False)
+    cat = TestCategory(args.case.stem, args.case.stem, False, False)
+    test = TestDef(args.case, None, [], False, cat)
+    tests = load_test_json(test, cat)
     if args.subtests:
         tests = [t for i, t in enumerate(tests) if i in args.subtests]
 
@@ -97,6 +101,7 @@ def main() -> None:
                 mlog.log(cmd_res)
             mlog.log(result.stde)
 
+    clear_transitive_files()
     exit(1 if failed else 0)
 
 if __name__ == "__main__":

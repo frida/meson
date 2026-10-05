@@ -3,23 +3,29 @@
 
 from __future__ import annotations
 
-import collections, functools, importlib
+import collections, importlib
+import enum
 import typing as T
 
-from .base import ExternalDependency, DependencyException, DependencyMethods, NotFoundDependency
+from .base import DependencyCandidate, ExternalDependency, DependencyException, DependencyMethods, NotFoundDependency
 
-from ..mesonlib import listify, MachineChoice, PerMachine
+from ..mesonlib import listify, PerMachine, MesonBugException, MesonException
 from .. import mlog
 
 if T.TYPE_CHECKING:
     from ..environment import Environment
-    from .factory import DependencyFactory, WrappedFactoryFunc, DependencyGenerator
+    from .factory import DependencyFactory, DependencyGenerator, WrappedFactoryFunc
+    from .base import DependencyObjectKWs
 
-    TV_DepIDEntry = T.Union[str, bool, int, T.Tuple[str, ...]]
+    TV_DepIDEntry = T.Union[str, bool, int, None, T.Tuple[str, ...]]
     TV_DepID = T.Tuple[T.Tuple[str, TV_DepIDEntry], ...]
-    PackageTypes = T.Union[T.Type[ExternalDependency], DependencyFactory, WrappedFactoryFunc]
+    PackageTypes = T.Union[T.Type[ExternalDependency], DependencyFactory, DependencyCandidate, WrappedFactoryFunc]
+    # Workaround for older python
+    DependencyPackagesType = collections.UserDict[str, PackageTypes]
+else:
+    DependencyPackagesType = collections.UserDict
 
-class DependencyPackages(collections.UserDict):
+class DependencyPackages(DependencyPackagesType):
     data: T.Dict[str, PackageTypes]
     defaults: T.Dict[str, str] = {}
 
@@ -38,12 +44,15 @@ class DependencyPackages(collections.UserDict):
 packages = DependencyPackages()
 _packages_accept_language: T.Set[str] = set()
 
-def get_dep_identifier(name: str, kwargs: T.Dict[str, T.Any]) -> 'TV_DepID':
+def get_dep_identifier(name: str, kwargs: DependencyObjectKWs) -> 'TV_DepID':
     identifier: 'TV_DepID' = (('name', name), )
-    from ..interpreter import permitted_dependency_kwargs
-    assert len(permitted_dependency_kwargs) == 19, \
+    from ..interpreter.type_checking import DEPENDENCY_KWS
+    nkwargs = T.cast('DependencyObjectKWs', {k.name: k.default for k in DEPENDENCY_KWS})
+    nkwargs.update(kwargs)
+
+    assert len(DEPENDENCY_KWS) == 20, \
            'Extra kwargs have been added to dependency(), please review if it makes sense to handle it here'
-    for key, value in kwargs.items():
+    for key, value in nkwargs.items():
         # 'version' is irrelevant for caching; the caller must check version matches
         # 'native' is handled above with `for_machine`
         # 'required' is irrelevant for caching; the caller handles it separately
@@ -59,10 +68,13 @@ def get_dep_identifier(name: str, kwargs: T.Dict[str, T.Any]) -> 'TV_DepID':
         # All keyword arguments are strings, ints, or lists (or lists of lists)
         if isinstance(value, list):
             for i in value:
-                assert isinstance(i, str)
+                assert isinstance(i, str), i
             value = tuple(frozenset(listify(value)))
+        elif isinstance(value, enum.Enum):
+            value = value.value
+            assert isinstance(value, str), 'for mypy'
         else:
-            assert isinstance(value, (str, bool, int))
+            assert value is None or isinstance(value, (str, bool, int)), value
         identifier = (*identifier, (key, value),)
     return identifier
 
@@ -80,33 +92,27 @@ display_name_map = {
     'wxwidgets': 'WxWidgets',
 }
 
-def find_external_dependency(name: str, env: 'Environment', kwargs: T.Dict[str, object], candidates: T.Optional[T.List['DependencyGenerator']] = None) -> T.Union['ExternalDependency', NotFoundDependency]:
+def find_external_dependency(name: str, env: 'Environment', kwargs: DependencyObjectKWs, candidates: T.Optional[T.List['DependencyGenerator']] = None) -> T.Union['ExternalDependency', NotFoundDependency]:
     assert name
     required = kwargs.get('required', True)
-    if not isinstance(required, bool):
-        raise DependencyException('Keyword "required" must be a boolean.')
-    if not isinstance(kwargs.get('method', ''), str):
-        raise DependencyException('Keyword "method" must be a string.')
     lname = name.lower()
-    if lname not in _packages_accept_language and 'language' in kwargs:
+    if lname not in _packages_accept_language and kwargs.get('language') is not None:
         raise DependencyException(f'{name} dependency does not accept "language" keyword argument')
-    if not isinstance(kwargs.get('version', ''), (str, list)):
-        raise DependencyException('Keyword "Version" must be string or list.')
 
     # display the dependency name with correct casing
     display_name = display_name_map.get(lname, lname)
 
-    for_machine = MachineChoice.BUILD if kwargs.get('native', False) else MachineChoice.HOST
-
+    for_machine = kwargs['native']
     type_text = PerMachine('Build-time', 'Run-time')[for_machine] + ' dependency'
 
     # build a list of dependency methods to try
     if candidates is None:
-        candidates = _build_external_dependency_list(name, env, for_machine, kwargs)
+        candidates = _build_external_dependency_list(name, env, kwargs)
 
     pkg_exc: T.List[DependencyException] = []
     pkgdep:  T.List[ExternalDependency] = []
     details = ''
+    tried_methods: T.List[str] = []
 
     for c in candidates:
         # try this dependency method
@@ -115,22 +121,25 @@ def find_external_dependency(name: str, env: 'Environment', kwargs: T.Dict[str, 
             d._check_version()
             pkgdep.append(d)
         except DependencyException as e:
-            assert isinstance(c, functools.partial), 'for mypy'
-            bettermsg = f'Dependency lookup for {name} with method {c.func.log_tried()!r} failed: {e}'
+            bettermsg = f'Dependency lookup for {name} with method {c.method!r} failed: {e}'
             mlog.debug(bettermsg)
             e.args = (bettermsg,)
             pkg_exc.append(e)
+        except MesonException:
+            raise
+        except Exception as e:
+            bettermsg = f'Dependency lookup for {name} with method {c.method!r} failed: {e}'
+            raise MesonBugException(bettermsg) from e
         else:
             pkg_exc.append(None)
             details = d.log_details()
             if details:
                 details = '(' + details + ') '
-            if 'language' in kwargs:
+            if kwargs.get('language') is not None:
                 details += 'for ' + d.language + ' '
 
             # if the dependency was found
             if d.found():
-
                 info: mlog.TV_LoggableList = []
                 if d.version:
                     info.append(mlog.normal_cyan(d.version))
@@ -142,16 +151,11 @@ def find_external_dependency(name: str, env: 'Environment', kwargs: T.Dict[str, 
                 mlog.log(type_text, mlog.bold(display_name), details + 'found:', mlog.green('YES'), *info)
 
                 return d
+            tried_methods.append(c.method)
 
     # otherwise, the dependency could not be found
-    tried_methods = [d.log_tried() for d in pkgdep if d.log_tried()]
-    if tried_methods:
-        tried = mlog.format_list(tried_methods)
-    else:
-        tried = ''
-
-    mlog.log(type_text, mlog.bold(display_name), details + 'found:', mlog.red('NO'),
-             f'(tried {tried})' if tried else '')
+    tried = ' (tried {})'.format(mlog.format_list(tried_methods)) if tried_methods else ''
+    mlog.log(type_text, mlog.bold(display_name), details + 'found:', mlog.red('NO'), tried)
 
     if required:
         # if an exception occurred with the first detection method, re-raise it
@@ -162,64 +166,60 @@ def find_external_dependency(name: str, env: 'Environment', kwargs: T.Dict[str, 
 
         # we have a list of failed ExternalDependency objects, so we can report
         # the methods we tried to find the dependency
-        raise DependencyException(f'Dependency "{name}" not found' +
-                                  (f', tried {tried}' if tried else ''))
+        raise DependencyException(f'Dependency "{name}" not found' + tried)
 
     return NotFoundDependency(name, env)
 
 
-def _build_external_dependency_list(name: str, env: 'Environment', for_machine: MachineChoice,
-                                    kwargs: T.Dict[str, T.Any]) -> T.List['DependencyGenerator']:
-    # First check if the method is valid
-    if 'method' in kwargs and kwargs['method'] not in [e.value for e in DependencyMethods]:
-        raise DependencyException('method {!r} is invalid'.format(kwargs['method']))
-
+def _build_external_dependency_list(name: str, env: 'Environment', kwargs: DependencyObjectKWs
+                                    ) -> T.List['DependencyGenerator']:
     # Is there a specific dependency detector for this dependency?
     lname = name.lower()
     if lname in packages:
-        # Create the list of dependency object constructors using a factory
-        # class method, if one exists, otherwise the list just consists of the
-        # constructor
-        if isinstance(packages[lname], type):
-            entry1 = T.cast('T.Type[ExternalDependency]', packages[lname])  # mypy doesn't understand isinstance(..., type)
-            if issubclass(entry1, ExternalDependency):
-                func: T.Callable[[], 'ExternalDependency'] = functools.partial(entry1, env, kwargs)
-                dep = [func]
+        entry = packages[lname]
+        if isinstance(entry, type):
+            if issubclass(entry, ExternalDependency):
+                dep = [DependencyCandidate.from_dependency(name, entry, (env, kwargs))]
+            else:
+                raise MesonBugException(f'Got an invalid type in the dependency list: {entry!r}')
+        elif isinstance(entry, DependencyCandidate):
+            entry.arguments = (env, kwargs)
+            dep = [entry]
         else:
-            entry2 = T.cast('T.Union[DependencyFactory, WrappedFactoryFunc]', packages[lname])
-            dep = entry2(env, for_machine, kwargs)
+            dep = entry(env, kwargs)
         return dep
 
     candidates: T.List['DependencyGenerator'] = []
 
-    if kwargs.get('method', 'auto') == 'auto':
+    method = kwargs.get('method', DependencyMethods.AUTO)
+    if method is DependencyMethods.AUTO:
         # Just use the standard detection methods.
-        methods = ['pkg-config', 'extraframework', 'cmake']
+        methods = [DependencyMethods.PKGCONFIG, DependencyMethods.EXTRAFRAMEWORK, DependencyMethods.CMAKE]
     else:
         # If it's explicitly requested, use that detection method (only).
-        methods = [kwargs['method']]
+        methods = [method]
 
     # Exclusive to when it is explicitly requested
-    if 'dub' in methods:
+    if DependencyMethods.DUB in methods:
         from .dub import DubDependency
-        candidates.append(functools.partial(DubDependency, name, env, kwargs))
+        candidates.append(DependencyCandidate.from_dependency(name, DubDependency, (env, kwargs)))
 
     # Preferred first candidate for auto.
-    if 'pkg-config' in methods:
+    if DependencyMethods.PKGCONFIG in methods:
         from .pkgconfig import PkgConfigDependency
-        candidates.append(functools.partial(PkgConfigDependency, name, env, kwargs))
+        candidates.append(DependencyCandidate.from_dependency(name, PkgConfigDependency, (env, kwargs)))
 
     # On OSX only, try framework dependency detector.
-    if 'extraframework' in methods:
-        if env.machines[for_machine].is_darwin():
+    if DependencyMethods.EXTRAFRAMEWORK in methods:
+        if env.machines[kwargs['native']].is_darwin():
             from .framework import ExtraFrameworkDependency
-            candidates.append(functools.partial(ExtraFrameworkDependency, name, env, kwargs))
+            candidates.append(DependencyCandidate.from_dependency(name, ExtraFrameworkDependency, (env, kwargs)))
 
     # Only use CMake:
     # - if it's explicitly requested
     # - as a last resort, since it might not work 100% (see #6113)
-    if 'cmake' in methods:
+    if DependencyMethods.CMAKE in methods:
         from .cmake import CMakeDependency
-        candidates.append(functools.partial(CMakeDependency, name, env, kwargs))
+        candidates.append(DependencyCandidate.from_dependency(name, CMakeDependency, (env, kwargs)))
 
     return candidates

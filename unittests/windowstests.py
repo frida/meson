@@ -17,8 +17,9 @@ import mesonbuild.coredata
 import mesonbuild.modules.gnome
 from mesonbuild.mesonlib import (
     MachineChoice, is_windows, is_cygwin, python_command, version_compare,
-    EnvironmentException, OptionKey
+    EnvironmentException
 )
+from mesonbuild.options import OptionKey
 from mesonbuild.compilers import (
     detect_c_compiler, detect_d_compiler, compiler_from_language,
 )
@@ -32,7 +33,9 @@ from run_tests import (
 )
 
 from .baseplatformtests import BasePlatformTests
-from .helpers import *
+from .helpers import (
+    get_path_without_cmd, skip_if_not_base_option, IS_CI, skip_if_not_language,
+)
 
 @skipUnless(is_windows() or is_cygwin(), "requires Windows (or Windows via Cygwin)")
 class WindowsTests(BasePlatformTests):
@@ -250,9 +253,15 @@ class WindowsTests(BasePlatformTests):
                 env=current_env)
 
             # Check this has actually built the appropriate exes
-            output_debug = subprocess.check_output(str(os.path.join(self.builddir+'_debug', 'genvslite.exe')))
-            self.assertEqual( output_debug, b'Debug\r\n' )
-            output_release = subprocess.check_output(str(os.path.join(self.builddir+'_release', 'genvslite.exe')))
+            exe_path = str(os.path.join(self.builddir+'_debug', 'genvslite.exe'))
+            self.assertTrue(os.path.exists(exe_path))
+            rc = subprocess.run([exe_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.assertEqual(rc.returncode, 0, rc.stdout + rc.stderr)
+            output_debug = rc.stdout
+            self.assertEqual(output_debug, b'Debug\r\n' )
+            exe_path = str(os.path.join(self.builddir+'_release', 'genvslite.exe'))
+            self.assertTrue(os.path.exists(exe_path))
+            output_release = subprocess.check_output([exe_path])
             self.assertEqual( output_release, b'Non-debug\r\n' )
 
         finally:
@@ -278,11 +287,11 @@ class WindowsTests(BasePlatformTests):
     def _check_ld(self, name: str, lang: str, expected: str) -> None:
         if not shutil.which(name):
             raise SkipTest(f'Could not find {name}.')
-        envvars = [mesonbuild.envconfig.ENV_VAR_PROG_MAP[f'{lang}_ld']]
+        envvars = mesonbuild.envconfig.ENV_VAR_PROG_MAP[f'{lang}_ld'].copy()
 
         # Also test a deprecated variable if there is one.
         if f'{lang}_ld' in mesonbuild.envconfig.DEPRECATED_ENV_PROG_MAP:
-            envvars.append(
+            envvars.extend(
                 mesonbuild.envconfig.DEPRECATED_ENV_PROG_MAP[f'{lang}_ld'])
 
         for envvar in envvars:
@@ -331,7 +340,7 @@ class WindowsTests(BasePlatformTests):
         try:
             import pefile
         except ImportError:
-            if is_ci():
+            if IS_CI:
                 raise
             raise SkipTest('pefile module not found')
         testdir = os.path.join(self.common_test_dir, '6 linkshared')
@@ -354,22 +363,18 @@ class WindowsTests(BasePlatformTests):
                 # Verify that a valid checksum was written by all other compilers
                 self.assertTrue(pe.verify_checksum(), msg=msg)
 
+    @skip_if_not_base_option('b_vscrt')
     def test_qt5dependency_vscrt(self):
         '''
         Test that qt5 dependencies use the debug module suffix when b_vscrt is
         set to 'mdd'
         '''
-        # Verify that the `b_vscrt` option is available
-        env = get_fake_env()
-        cc = detect_c_compiler(env, MachineChoice.HOST)
-        if OptionKey('b_vscrt') not in cc.base_options:
-            raise SkipTest('Compiler does not support setting the VS CRT')
         # Verify that qmake is for Qt5
         if not shutil.which('qmake-qt5'):
-            if not shutil.which('qmake') and not is_ci():
+            if not IS_CI and not shutil.which('qmake'):
                 raise SkipTest('QMake not found')
             output = subprocess.getoutput('qmake --version')
-            if 'Qt version 5' not in output and not is_ci():
+            if not IS_CI and 'Qt version 5' not in output:
                 raise SkipTest('Qmake found, but it is not for Qt 5.')
         # Setup with /MDd
         testdir = os.path.join(self.framework_test_dir, '4 qt')
@@ -381,17 +386,24 @@ class WindowsTests(BasePlatformTests):
             m = re.search('build qt5core.exe: cpp_LINKER.*Qt5Cored.lib', contents)
         self.assertIsNotNone(m, msg=contents)
 
+    @skip_if_not_base_option('b_vscrt')
     def test_compiler_checks_vscrt(self):
         '''
         Test that the correct VS CRT is used when running compiler checks
         '''
-        # Verify that the `b_vscrt` option is available
         env = get_fake_env()
         cc = detect_c_compiler(env, MachineChoice.HOST)
-        if OptionKey('b_vscrt') not in cc.base_options:
-            raise SkipTest('Compiler does not support setting the VS CRT')
+
+        MSVCRT_MAP = {
+            '/MD': '-fms-runtime-lib=dll',
+            '/MDd': '-fms-runtime-lib=dll_dbg',
+            '/MT': '-fms-runtime-lib=static',
+            '/MTd': '-fms-runtime-lib=static_dbg',
+        }
 
         def sanitycheck_vscrt(vscrt):
+            if cc.get_argument_syntax() != 'msvc':
+                vscrt = MSVCRT_MAP[vscrt]
             checks = self.get_meson_log_sanitychecks()
             self.assertGreater(len(checks), 0)
             for check in checks:
@@ -449,7 +461,7 @@ class WindowsTests(BasePlatformTests):
         self.init(testdir, extra_args=['-Dtest-failure=true'])
         self.assertRaises(subprocess.CalledProcessError, self.build)
 
-    @unittest.skipIf(is_cygwin(), "Needs visual studio")
+    @skipIf(is_cygwin(), "Needs visual studio")
     def test_vsenv_option(self):
         if self.backend is not Backend.ninja:
             raise SkipTest('Only ninja backend is valid for test')
@@ -459,6 +471,12 @@ class WindowsTests(BasePlatformTests):
         # Studio is picked, as a regression test for
         # https://github.com/mesonbuild/meson/issues/9774
         env['PATH'] = get_path_without_cmd('ninja', env['PATH'])
+        # Add a multiline variable to test that it is handled correctly
+        # with a line that contains only '=' and a line that would result
+        # in an invalid variable name.
+        # see: https://github.com/mesonbuild/meson/pull/13682
+        env['MULTILINE_VAR_WITH_EQUALS'] = 'Foo\r\n=====\r\n'
+        env['MULTILINE_VAR_WITH_INVALID_NAME'] = 'Foo\n%=Bar\n'
         testdir = os.path.join(self.common_test_dir, '1 trivial')
         out = self.init(testdir, extra_args=['--vsenv'], override_envvars=env)
         self.assertIn('Activating VS', out)
@@ -474,3 +492,30 @@ class WindowsTests(BasePlatformTests):
         with mock.patch.object(self, 'install_command', self.meson_command + ['install']):
             out = self.install(override_envvars=env)
             self.assertIn('Activating VS', out)
+
+    def test_extra_paths_content(self):
+        '''
+        Test that when a test depends on a non-SharedLibrary, the extra_paths
+        not include parent directories from that non-SharedLibrary.
+
+        See: https://github.com/mesonbuild/meson/issues/16010
+        '''
+        testdir = os.path.join(self.platform_test_dir, '13 test argument extra paths')
+        self.init(testdir)
+
+        tests = self.introspect('--tests')
+        run_exe = None
+        for t in tests:
+            if t['name'] == 'run_exe':
+                run_exe = t
+                break
+
+        self.assertIsNotNone(run_exe, 'Test run_exe not found')
+
+        extra_paths = run_exe.get('extra_paths', [])
+        self.assertIsInstance(extra_paths, list)
+
+        # The executable 'barexe' links against libfoo, so the lib directory
+        # should be in extra_paths (so the DLL can be found at runtime).
+        self.assertTrue(any('lib' in p for p in extra_paths) and len(extra_paths) == 1,
+            f'extra_paths should contain a lib directory and nothing else: {extra_paths}')

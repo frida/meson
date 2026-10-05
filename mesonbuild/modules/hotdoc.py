@@ -13,25 +13,33 @@ from .. import build, mesonlib, mlog
 from ..build import CustomTarget, CustomTargetIndex
 from ..dependencies import Dependency, InternalDependency
 from ..interpreterbase import (
-    InvalidArguments, noPosargs, noKwargs, typed_kwargs, FeatureDeprecated,
-    ContainerTypeInfo, KwargInfo, typed_pos_args
+    InvalidArguments, TypedArgs, FeatureDeprecated,
+    ContainerTypeInfo, KwargInfo, InterpreterObject
 )
 from ..interpreter.interpreterobjects import _CustomTargetHolder
-from ..interpreter.type_checking import NoneType
+from ..interpreter.type_checking import STR_PARG, STR_VARG_1, NoneType
 from ..mesonlib import File, MesonException
 from ..programs import ExternalProgram
+from ..options import OptionKey
 
 if T.TYPE_CHECKING:
     from typing_extensions import TypedDict
 
     from . import ModuleState
+    from ..build import BuildProject
     from ..environment import Environment
     from ..interpreter import Interpreter
+    from ..interpreter.kwargs import TargetDepends
     from ..interpreterbase import TYPE_kwargs, TYPE_var
 
     _T = T.TypeVar('_T')
 
-    class GenerateDocKwargs(TypedDict):
+    # there is currently no way to represent the arbitrary key/value paris that
+    # the hotdoc module allows.
+    #
+    # PEP-728, which is due in Python 3.15, will fix this, we can then add a new
+    # extra_items=str keyword argument.
+    class GenerateDocKwargs(TypedDict, total=False):
         sitemap: T.Union[str, File, CustomTarget, CustomTargetIndex]
         index: T.Union[str, File, CustomTarget, CustomTargetIndex]
         project_version: str
@@ -44,6 +52,8 @@ if T.TYPE_CHECKING:
         extra_extension_paths: T.List[str]
         subprojects: T.List['HotdocTarget']
         install: bool
+        build_by_default: bool
+
 
 def ensure_list(value: T.Union[_T, T.List[_T]]) -> T.List[_T]:
     if not isinstance(value, list):
@@ -63,7 +73,7 @@ class HotdocExternalProgram(ExternalProgram):
 
 class HotdocTargetBuilder:
 
-    def __init__(self, name: str, state: ModuleState, hotdoc: HotdocExternalProgram, interpreter: Interpreter, kwargs):
+    def __init__(self, name: str, state: ModuleState, hotdoc: HotdocExternalProgram, interpreter: Interpreter, kwargs: GenerateDocKwargs):
         self.hotdoc = hotdoc
         self.build_by_default = kwargs.pop('build_by_default', False)
         self.kwargs = kwargs
@@ -80,25 +90,22 @@ class HotdocTargetBuilder:
         self.cmd: T.List[TYPE_var] = ['conf', '--project-name', name, "--disable-incremental-build",
                                       '--output', os.path.join(self.builddir, self.subdir, self.name + '-doc')]
 
-        self._extra_extension_paths = set()
-        self.extra_assets = set()
-        self.extra_depends = []
-        self._subprojects = []
+        self._extra_extension_paths: set[str] = set()
+        self.extra_depends: list[build.BuildTargetProto] = []
+        self._subprojects: list[HotdocTarget] = []
 
     def process_known_arg(self, option: str, argname: T.Optional[str] = None, value_processor: T.Optional[T.Callable] = None) -> None:
         if not argname:
             argname = option.strip("-").replace("-", "_")
 
-        value = self.kwargs.pop(argname)
-        if value is not None and value_processor:
+        value = self.kwargs.pop(argname)  # type: ignore[misc]
+        if value is None:
+            return
+        if value_processor:
             value = value_processor(value)
-
         self.set_arg_value(option, value)
 
     def set_arg_value(self, option: str, value: TYPE_var) -> None:
-        if value is None:
-            return
-
         if isinstance(value, bool):
             if value:
                 self.cmd.append(option)
@@ -142,33 +149,8 @@ class HotdocTargetBuilder:
     def process_extra_args(self) -> None:
         for arg, value in self.kwargs.items():
             option = "--" + arg.replace("_", "-")
-            self.check_extra_arg_type(arg, value)
-            self.set_arg_value(option, value)
-
-    def get_value(self, types, argname, default=None, value_processor=None,
-                  mandatory=False, force_list=False):
-        if not isinstance(types, list):
-            types = [types]
-        try:
-            uvalue = value = self.kwargs.pop(argname)
-            if value_processor:
-                value = value_processor(value)
-
-            for t in types:
-                if isinstance(value, t):
-                    if force_list and not isinstance(value, list):
-                        return [value], uvalue
-                    return value, uvalue
-            raise MesonException(f"{argname} field value {value} is not valid,"
-                                 f" valid types are {types}")
-        except KeyError:
-            if mandatory:
-                raise MesonException(f"{argname} mandatory field not found")
-
-            if default is not None:
-                return default, default
-
-        return None, None
+            self.check_extra_arg_type(arg, value)  # type: ignore[arg-type]
+            self.set_arg_value(option, value)  # type: ignore[arg-type]
 
     def add_extension_paths(self, paths: T.Union[T.List[str], T.Set[str]]) -> None:
         for path in paths:
@@ -193,7 +175,9 @@ class HotdocTargetBuilder:
 
         self.cmd += ['--gi-c-source-roots'] + value
 
-    def process_dependencies(self, deps: T.List[T.Union[Dependency, build.StaticLibrary, build.SharedLibrary, CustomTarget, CustomTargetIndex]]) -> T.List[str]:
+    def process_dependencies(self, deps: T.Sequence[TargetDepends | build.BothLibraries | Dependency | File | build.ExtractedObjects]) -> T.List[str]:
+        # build.ExtractedObjects shouldn't actually
+        # happen here, but we get them from Dependency.
         cflags = set()
         for dep in mesonlib.listify(ensure_list(deps)):
             if isinstance(dep, InternalDependency):
@@ -205,10 +189,15 @@ class HotdocTargetBuilder:
                 cflags.update(self.process_dependencies(dep.ext_deps))
             elif isinstance(dep, Dependency):
                 cflags.update(dep.get_compile_args())
+            elif isinstance(dep, build.BothLibraries):
+                dep = dep.get_default_object()
+                self.extra_depends.append(dep)
+                for incd in dep.get_include_dirs():
+                    cflags.update(incd.incdirs)
             elif isinstance(dep, (build.StaticLibrary, build.SharedLibrary)):
                 self.extra_depends.append(dep)
                 for incd in dep.get_include_dirs():
-                    cflags.update(incd.get_incdirs())
+                    cflags.update(incd.incdirs)
             elif isinstance(dep, HotdocTarget):
                 # Recurse in hotdoc target dependencies
                 self.process_dependencies(dep.get_target_dependencies())
@@ -217,10 +206,8 @@ class HotdocTargetBuilder:
                 self.include_paths.add(os.path.join(self.builddir, dep.hotdoc_conf.subdir))
                 self.cmd += ['--extra-assets=' + p for p in dep.extra_assets]
                 self.add_extension_paths(dep.extra_extension_paths)
-            elif isinstance(dep, (CustomTarget, build.BuildTarget)):
-                self.extra_depends.append(dep)
-            elif isinstance(dep, CustomTargetIndex):
-                self.extra_depends.append(dep.target)
+            elif isinstance(dep, (CustomTarget, build.BuildTarget, CustomTargetIndex)):
+                self.extra_depends.append(dep.get_target())
 
         return [f.strip('-I') for f in cflags]
 
@@ -243,16 +230,10 @@ class HotdocTargetBuilder:
                 arg = arg.absolute_path(self.state.environment.get_source_dir(),
                                         self.state.environment.get_build_dir())
             elif isinstance(arg, build.IncludeDirs):
-                for inc_dir in arg.get_incdirs():
-                    cmd.append(os.path.join(self.sourcedir, arg.get_curdir(), inc_dir))
-                    cmd.append(os.path.join(self.builddir, arg.get_curdir(), inc_dir))
-
+                cmd.extend(arg.abs_string_list(self.sourcedir, self.builddir))
                 continue
-            elif isinstance(arg, (build.BuildTarget, CustomTarget)):
-                self.extra_depends.append(arg)
-                arg = self.interpreter.backend.get_target_filename_abs(arg)
-            elif isinstance(arg, CustomTargetIndex):
-                self.extra_depends.append(arg.target)
+            elif isinstance(arg, (build.BuildTarget, CustomTarget, CustomTargetIndex)):
+                self.extra_depends.append(arg.get_target())
                 arg = self.interpreter.backend.get_target_filename_abs(arg)
 
             cmd.append(arg)
@@ -268,9 +249,18 @@ class HotdocTargetBuilder:
             raise MesonException('hotdoc failed to configure')
         os.chdir(cwd)
 
-    def ensure_file(self, value: T.Union[str, File, CustomTarget, CustomTargetIndex]) -> T.Union[File, CustomTarget, CustomTargetIndex]:
+    @T.overload
+    def ensure_file(self, value: list[str | File | CustomTarget | CustomTargetIndex]
+                    ) -> list[File | CustomTarget | CustomTargetIndex]: ...
+
+    @T.overload
+    def ensure_file(self, value: str | File | CustomTarget | CustomTargetIndex
+                    ) -> File | CustomTarget | CustomTargetIndex: ...
+
+    def ensure_file(self, value: str | File | CustomTarget | CustomTargetIndex | list[str | File | CustomTarget | CustomTargetIndex]
+                    ) -> File | CustomTarget | CustomTargetIndex | list[File | CustomTarget | CustomTargetIndex]:
         if isinstance(value, list):
-            res = []
+            res: list[File | CustomTarget | CustomTargetIndex] = []
             for val in value:
                 res.append(self.ensure_file(val))
             return res
@@ -296,7 +286,7 @@ class HotdocTargetBuilder:
             if arg in self.kwargs:
                 raise InvalidArguments(f'Argument "{arg}" is forbidden.')
 
-    def make_targets(self) -> T.Tuple[HotdocTarget, mesonlib.ExecutableSerialisation]:
+    def make_targets(self) -> T.Tuple[HotdocTarget, mesonlib.ExecutableSerialisation | None]:
         self.check_forbidden_args()
         self.process_known_arg("--index", value_processor=self.ensure_file)
         self.process_known_arg("--project-version")
@@ -330,7 +320,7 @@ class HotdocTargetBuilder:
         for path in self.include_paths:
             self.cmd.extend(['--include-path', path])
 
-        if self.state.environment.coredata.get_option(mesonlib.OptionKey('werror', subproject=self.state.subproject)):
+        if self.state.environment.coredata.optstore.get_value_for(OptionKey('werror', subproject=self.state.subproject)):
             self.cmd.append('--fatal-warnings')
         self.generate_hotdoc_config()
 
@@ -340,24 +330,27 @@ class HotdocTargetBuilder:
 
         target = HotdocTarget(fullname,
                               subdir=self.subdir,
-                              subproject=self.state.subproject,
                               environment=self.state.environment,
                               hotdoc_conf=File.from_built_file(
                                   self.subdir, hotdoc_config_name),
                               extra_extension_paths=self._extra_extension_paths,
                               extra_assets=self._extra_assets,
                               subprojects=self._subprojects,
-                              is_build_only_subproject=self.interpreter.coredata.is_build_only,
                               command=target_cmd,
                               extra_depends=self.extra_depends,
                               outputs=[fullname],
                               sources=[],
+                              build_project=self.state.current_build_project,
                               depfile=os.path.basename(depfile),
                               build_by_default=self.build_by_default)
 
         install_script = None
         if install:
-            datadir = os.path.join(self.state.get_option('prefix'), self.state.get_option('datadir'))
+            prefix = self.state.get_option('prefix')
+            assert isinstance(prefix, str), 'for mypy'
+            datadir = self.state.get_option('datadir')
+            assert isinstance(datadir, str), 'for mypy'
+            datadir = os.path.join(prefix, datadir)
             devhelp = self.kwargs.get('devhelp_activate', False)
             if not isinstance(devhelp, bool):
                 FeatureDeprecated.single_use('hotdoc.generate_doc() devhelp_activate must be boolean', '1.1.0', self.state.subproject)
@@ -383,12 +376,8 @@ class HotdocTargetBuilder:
 
 
 class HotdocTargetHolder(_CustomTargetHolder['HotdocTarget']):
-    def __init__(self, target: HotdocTarget, interp: Interpreter):
-        super().__init__(target, interp)
-        self.methods.update({'config_path': self.config_path_method})
-
-    @noPosargs
-    @noKwargs
+    @TypedArgs('hotdoc_target.config_path')
+    @InterpreterObject.method('config_path')
     def config_path_method(self, *args: T.Any, **kwargs: T.Any) -> str:
         conf = self.held_object.hotdoc_conf.absolute_path(self.interpreter.environment.source_dir,
                                                           self.interpreter.environment.build_dir)
@@ -396,11 +385,11 @@ class HotdocTargetHolder(_CustomTargetHolder['HotdocTarget']):
 
 
 class HotdocTarget(CustomTarget):
-    def __init__(self, name: str, subdir: str, subproject: str, hotdoc_conf: File,
+    def __init__(self, name: str, subdir: str, hotdoc_conf: File,
                  extra_extension_paths: T.Set[str], extra_assets: T.List[str],
                  subprojects: T.List['HotdocTarget'], environment: Environment,
-                 is_build_only_subproject: bool, **kwargs: T.Any):
-        super().__init__(name, subdir, subproject, environment, **kwargs, build_only_subproject=is_build_only_subproject, absolute_paths=True)
+                 build_project: BuildProject, **kwargs: T.Any):
+        super().__init__(name, subdir, environment, **kwargs, build_project=build_project, absolute_paths=True)
         self.hotdoc_conf = hotdoc_conf
         self.extra_extension_paths = extra_extension_paths
         self.extra_assets = extra_assets
@@ -432,46 +421,49 @@ class HotDocModule(ExtensionModule):
             'generate_doc': self.generate_doc,
         })
 
-    @noKwargs
-    @typed_pos_args('hotdoc.has_extensions', varargs=str, min_varargs=1)
+    @TypedArgs('hotdoc.has_extensions', var_types=STR_VARG_1)
     def has_extensions(self, state: ModuleState, args: T.Tuple[T.List[str]], kwargs: TYPE_kwargs) -> bool:
         return self.hotdoc.run_hotdoc([f'--has-extension={extension}' for extension in args[0]]) == 0
 
-    @typed_pos_args('hotdoc.generate_doc', str)
-    @typed_kwargs(
+    @TypedArgs(
         'hotdoc.generate_doc',
-        KwargInfo('sitemap', file_types, required=True),
-        KwargInfo('index', file_types, required=True),
-        KwargInfo('project_version', str, required=True),
-        KwargInfo('html_extra_theme', (str, NoneType)),
-        KwargInfo('include_paths', ContainerTypeInfo(list, str), listify=True, default=[]),
-        # --c-include-directories
-        KwargInfo(
-            'dependencies',
-            ContainerTypeInfo(list, (Dependency, build.StaticLibrary, build.SharedLibrary,
-                                     CustomTarget, CustomTargetIndex)),
-            listify=True,
-            default=[],
-        ),
-        KwargInfo(
-            'depends',
-            ContainerTypeInfo(list, (CustomTarget, CustomTargetIndex)),
-            listify=True,
-            default=[],
-            since='0.64.1',
-        ),
-        KwargInfo('gi_c_source_roots', ContainerTypeInfo(list, str), listify=True, default=[]),
-        KwargInfo('extra_assets', ContainerTypeInfo(list, str), listify=True, default=[]),
-        KwargInfo('extra_extension_paths', ContainerTypeInfo(list, str), listify=True, default=[]),
-        KwargInfo('subprojects', ContainerTypeInfo(list, HotdocTarget), listify=True, default=[]),
-        KwargInfo('install', bool, default=False),
-        allow_unknown=True
+        pos_types=[STR_PARG],
+        kw_types=[
+            KwargInfo('sitemap', file_types, required=True),
+            KwargInfo('index', file_types, required=True),
+            KwargInfo('project_version', str, required=True),
+            KwargInfo('html_extra_theme', (str, NoneType)),
+            KwargInfo('include_paths', ContainerTypeInfo(list, str), listify=True, default=[]),
+            # --c-include-directories
+            KwargInfo(
+                'dependencies',
+                ContainerTypeInfo(list, (Dependency, build.StaticLibrary, build.SharedLibrary,
+                                         CustomTarget, CustomTargetIndex)),
+                listify=True,
+                default=[],
+                deprecated_values={
+                    CustomTarget: ('0.64.1', 'use `depends` instead'),
+                    CustomTargetIndex: ('0.64.1', 'use `depends` instead'),
+                }
+            ),
+            KwargInfo(
+                'depends',
+                ContainerTypeInfo(list, (CustomTarget, CustomTargetIndex)),
+                listify=True,
+                default=[],
+                since='0.64.1',
+            ),
+            KwargInfo('gi_c_source_roots', ContainerTypeInfo(list, str), listify=True, default=[]),
+            KwargInfo('extra_assets', ContainerTypeInfo(list, str), listify=True, default=[]),
+            KwargInfo('extra_extension_paths', ContainerTypeInfo(list, str), listify=True, default=[]),
+            KwargInfo('subprojects', ContainerTypeInfo(list, HotdocTarget), listify=True, default=[]),
+            KwargInfo('install', bool, default=False),
+            KwargInfo('build_by_default', bool, default=False),
+        ],
+        unknown_kwargs=True,
     )
     def generate_doc(self, state: ModuleState, args: T.Tuple[str], kwargs: GenerateDocKwargs) -> ModuleReturnValue:
         project_name = args[0]
-        if any(isinstance(x, (CustomTarget, CustomTargetIndex)) for x in kwargs['dependencies']):
-            FeatureDeprecated.single_use('hotdoc.generate_doc dependencies argument with custom_target',
-                                         '0.64.1', state.subproject, 'use `depends`', state.current_node)
         builder = HotdocTargetBuilder(project_name, state, self.hotdoc, self.interpreter, kwargs)
         target, install_script = builder.make_targets()
         targets: T.List[T.Union[HotdocTarget, mesonlib.ExecutableSerialisation]] = [target]

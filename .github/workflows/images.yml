@@ -37,15 +37,15 @@ jobs:
       fail-fast: false
       matrix:
         cfg:
-          - { name: Arch Linux,       id: arch     }
-          - { name: CUDA (on Arch),   id: cuda     }
-          - { name: Fedora,           id: fedora   }
-          - { name: Gentoo,           id: gentoo   }
-          - { name: OpenSUSE,         id: opensuse }
-          - { name: Ubuntu Bionic,    id: bionic   }
-          - { name: Ubuntu Rolling,   id: ubuntu-rolling  }
+          - { name: Arch Linux,                   id: arch           }
+          - { name: CUDA (on Arch),               id: cuda           }
+          - { name: CUDA Cross (on Ubuntu Jammy), id: cuda-cross     }
+          - { name: Fedora,                       id: fedora         }
+          - { name: Gentoo,                       id: gentoo         }
+          - { name: OpenSUSE,                     id: opensuse       }
+          - { name: Ubuntu Rolling,               id: ubuntu-rolling }
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
 
       # Login to dockerhub
       - name: Docker login

@@ -5,12 +5,12 @@ from __future__ import annotations
 
 import os
 import argparse
-import multiprocessing
 import subprocess
 from pathlib import Path
 import typing as T
 
-from ..mesonlib import Popen_safe, split_args
+from ..mesonlib import Popen_safe, split_args, determine_worker_count
+from .. import mlog
 
 class ExternalProject:
     def __init__(self, options: argparse.Namespace):
@@ -48,7 +48,7 @@ class ExternalProject:
     def build(self) -> int:
         make_cmd = self.make.copy()
         if self.supports_jobs_flag():
-            make_cmd.append(f'-j{multiprocessing.cpu_count()}')
+            make_cmd.append(f'-j{determine_worker_count()}')
         rc = self._run('build', make_cmd)
         if rc != 0:
             return rc
@@ -68,10 +68,10 @@ class ExternalProject:
 
     def _run(self, step: str, command: T.List[str], env: T.Optional[T.Dict[str, str]] = None) -> int:
         m = 'Running command ' + str(command) + ' in directory ' + str(self.build_dir) + '\n'
-        log_filename = Path(self.log_dir, f'{self.name}-{step}.log')
+        logfile = Path(self.log_dir, f'{self.name}-{step}.log')
         output = None
         if not self.verbose:
-            output = open(log_filename, 'w', encoding='utf-8')
+            output = open(logfile, 'w', encoding='utf-8')
             output.write(m + '\n')
             output.flush()
         else:
@@ -85,8 +85,11 @@ class ExternalProject:
         if p.returncode != 0:
             m = f'{step} step returned error code {p.returncode}.'
             if not self.verbose:
-                m += '\nSee logs: ' + str(log_filename)
+                m += '\nSee logs: ' + str(logfile)
             print(m)
+            contents = mlog.ci_fold_file(logfile, f'CI platform detected, click here for {os.path.basename(logfile)} contents.')
+            if contents:
+                print(contents)
         return p.returncode
 
 def run(args: T.List[str]) -> int:

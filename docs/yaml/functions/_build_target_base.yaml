@@ -43,15 +43,9 @@ kwargs:
     description: precompiled header file to use for the given language
 
   <lang>_args:
-    type: list[str]
+    type: array[str | file]
     description: |
-      compiler flags to use for the given language;
-      eg: `cpp_args` for C++
-
-  vala_args:
-    type: list[str | file]
-    description: |
-      Compiler flags for Vala. Unlike other languages this may contain Files
+      compiler flags to use for the given language; eg: `cpp_args` for C++
 
   sources:
     type: str | file | custom_tgt | custom_idx | generated_list | structured_src
@@ -74,7 +68,7 @@ kwargs:
       but which will be removed on install
 
   dependencies:
-    type: list[dep]
+    type: array[dep]
     description: |
       one or more dependency objects
       created with
@@ -83,10 +77,20 @@ kwargs:
       (for deps built by the project)
 
   extra_files:
-    type: str | file | custom_tgt | custom_idx
+    type: str | file
     description: |
       Not used for the build itself but are shown as source files in IDEs
-      that group files by targets (such as Visual Studio)
+      that group files by targets (such as Visual Studio).
+
+      These may only be static sources.
+
+  embed_directories:
+    type: array[inc | str]
+    since: 1.13.0
+    description: |
+      one or more objects created with the [[include_directories]] function, or
+      strings, which will be implicitly convert to [[@inc]] objects, that is
+      used for the #embed preprocessor directive.
 
   gui_app:
     type: bool
@@ -98,10 +102,19 @@ kwargs:
       0.56.0, use `win_subsystem` instead.
 
   link_args:
-    type: list[str]
+    type: array[str]
     description: |
       Flags to use during linking. You can use UNIX-style
       flags here for all platforms.
+
+  link_early_args:
+    type: array[str]
+    description: |
+      Flags to use during linking. These are just like link_args,
+      except that they are inserted into the linker command line
+      before any object files or libraries. You can use UNIX-style
+      flags here for all platforms. This is only supported when using
+      the Ninja backend.
 
   link_depends:
     type: str | file | custom_tgt | custom_idx
@@ -125,7 +138,7 @@ kwargs:
       *(broken until 0.55.0)*
 
   link_whole:
-    type: list[lib | custom_tgt | custom_idx]
+    type: array[lib | custom_tgt | custom_idx]
     since: 0.40.0
     description: |
       Links all contents of the given static libraries whether they are used or
@@ -133,18 +146,18 @@ kwargs:
       '/WHOLEARCHIVE' MSVC linker option. This allows the linked target to
       re-export symbols from all objects in the static libraries.
 
-      *(since 0.41.0)* If passed a list that list will be flattened.
+      *(since 0.41.0)* If passed an array that array will be flattened.
 
       *(since 0.51.0)* This argument also accepts outputs produced by
       custom targets. The user must ensure that the output is a library in
       the correct format.
 
   link_with:
-    type: list[lib | custom_tgt | custom_idx]
+    type: array[lib | custom_tgt | custom_idx]
     description: |
       One or more shared or static libraries
-      (built by this project) that this target should be linked with. *(since 0.41.0)* If passed a
-      list this list will be flattened. *(since 0.51.0)* The arguments can also be custom targets.
+      (built by this project) that this target should be linked with. *(since 0.41.0)* If passed an
+      array that array will be flattened. *(since 0.51.0)* The arguments can also be custom targets.
       In this case Meson will assume that merely adding the output file in the linker command
       line is sufficient to make linking work. If this is not sufficient,
       then the build system writer must write all other steps manually.
@@ -156,26 +169,36 @@ kwargs:
     description: Controls whether Meson adds the current source and build directories to the include path
 
   include_directories:
-    type: list[inc | str]
+    type: array[inc | str]
     description: |
-      one or more objects created with the [[include_directories]] function,
-      or *(since 0.50.0)* strings, which will be transparently expanded to include directory objects
+      one or more objects created with the [[include_directories]] function, or
+      *(since 0.50.0)* strings, which will be implicitly convert to [[@inc]]
+      objects
 
   install:
     type: bool
     default: false
-    description: When set to true, this executable should be installed.
+    description: When set to true, all outputs of this build_target will be installed.
 
   install_dir:
-    type: str
+    type: array[str | bool]
     description: |
-      override install directory for this file. If the value is a relative path,
-      it will be considered relative the `prefix` option.
+      override install directory for outputs of this build target. If the value is a
+      relative path, it will be considered relative the `prefix` option.
       For example, if you want to install plugins into a subdir, you'd use
       something like this: `install_dir : get_option('libdir') / 'projectname-1.0'`.
 
+      This can be set to an array of values to control the the installation path
+      of build targets with multiple outputs. Currently, that means Vala. Setting
+      them to `true` means "use the default", and `false` means, don't install.
+      By default the first element is true, and all other elements are false.
+
+      *Since 1.11.0* Passing an array is deprecated, and install_vala_header,
+      install_vala_vapi, and install_vala_gir keyword arguments should be used
+      instead.
+
   install_mode:
-    type: list[str | int]
+    type: array[str | int]
     since: 0.47.0
     description: |
       Specify the file mode in symbolic format
@@ -198,7 +221,7 @@ kwargs:
       (but *not* before that). On Windows, this argument has no effect.
 
   objects:
-    type: list[extracted_obj | file | str]
+    type: array[extracted_obj | file | str]
     description: |
       List of object files that should be linked in this target.
 
@@ -208,7 +231,7 @@ kwargs:
       object files had to be placed in `sources`.
 
   name_prefix:
-    type: str | list[void]
+    type: str
     description: |
       The string that will be used as the prefix for the
       target output filename by overriding the default (only used for
@@ -216,10 +239,11 @@ kwargs:
       except for MSVC shared libraries where it is omitted to follow
       convention, and Cygwin shared libraries where it is `cyg`.
 
-      Set this to `[]`, or omit the keyword argument for the default behaviour.
+      To conditionally keep the default behavior use a [[default]] object.
+      For Meson < 1.12, use `[]`.
 
   name_suffix:
-    type: str | list[void]
+    type: str
     description: |
       The string that will be used as the extension for the
       target by overriding the default. By default on Windows this is
@@ -232,10 +256,11 @@ kwargs:
       potential name clash with shared libraries which also generate
       import libraries with a `lib` suffix.
 
-      Set this to `[]`, or omit the keyword argument for the default behaviour.
+      To conditionally keep the default behavior use a [[default]] object.
+      For Meson < 1.12, use `[]`.
 
   override_options:
-    type: list[str] | dict[str | bool | int | list[str]]
+    type: array[str] | dict[str | bool | int | array[str]]
     since: 0.40.0
     description: |
       takes an array of strings in the same format as `project`'s `default_options`
@@ -253,11 +278,17 @@ kwargs:
       `default`, `internal`, `hidden`, `protected` or `inlineshidden`, which
       is the same as `hidden` but also includes things like C++ implicit
       constructors as specified in the GCC manual. Ignored on compilers that
-      do not support GNU visibility arguments.
+      do not support GNU visibility arguments. See also
+      [`snippets.symbol_visibility_header()`](Snippets-module.md#symbol_visibility_header)
+      method to help with defining public API.
 
   d_import_dirs:
-    type: list[str]
-    description: List of directories to look in for string imports used in the D programming language.
+    type: array[inc | str]
+    since: 0.62.0
+    description: |
+      the directories to add to the string search path (i.e. `-J` switch for DMD).
+      Must be objects created with the [[include_directories]] function or plain
+      strings, which will be implicitly converted into [[@inc]] objects.
 
   d_unittest:
     type: bool
@@ -265,11 +296,11 @@ kwargs:
     description: When set to true, the D modules are compiled in debug mode.
 
   d_module_versions:
-    type: list[str | int]
+    type: array[str | int]
     description: List of module version identifiers set when compiling D sources.
 
   d_debug:
-    type: list[str]
+    type: array[str]
     description: |
       The [D version identifiers](https://dlang.org/spec/version.html#version) to add
       during the compilation of D source files.
@@ -320,8 +351,83 @@ kwargs:
     type: dict[str]
     since: 1.2.0
     description: |
-      On rust targets this provides a map of library names to the crate name
-      with which it would be available inside the rust code.
+      On rust targets this allows giving custom names to the crates that are
+      linked into the target.  For example, passing a dependency map of
+      `{ 'gtk4': 'gtk' }` has the same effect of writing `gtk.package = "gtk4"`
+      in the `dependencies` section of a Cargo.toml file, or
+      `extern crate gtk4 as gtk` inside Rust code.
 
-      This allows renaming similar to the dependency renaming feature of cargo
-      or `extern crate foo as bar` inside rust code.
+      *Since 1.10.0*, the keys can be either crate names or target names.
+
+  vala_header:
+    type: str
+    description: |
+      On Vala targets, this provides a way to override the name of the generated
+      C compatible header for targets that generate them.
+
+      If it is not set the default will be calculated from the target's name.
+
+  vala_vapi:
+    type: str
+    description: |
+      On Vala targets, this provides a way to override the name of the generated
+      VAPI file.
+
+      If it is not set the default will be calculated from the target's name.
+
+  vala_gir:
+    type: str
+    description: |
+      If set, generates a GIR file with the given name. If this is unset then
+      no GIR file will be generated.
+
+  build_subdir:
+    type: str
+    since: 1.10.0
+    description:
+      Places the build results in a subdirectory of the given name
+      rather than directly into the build directory. This does not
+      affect the install directory, which uses install_dir.
+
+      This allows inserting a directory name into the build path,
+      either when needed to use the build result while building other
+      targets or as a way to support multiple targets with the same
+      basename by using unique build_subdir values for each one.
+
+      To prevent collisions within the build directory, build_subdir
+      is not allowed to match a file or directory in the source
+      directory, nor contain '..' to refer to the parent of the build
+      directory.
+
+  install_vala_header:
+    type: str | bool
+    since: 1.11.0
+    description: |
+      If set to a string value, the vala generated header will be installed to
+      that path, if set to `true`, the default include path will be used, if
+      `false` the header will not be installed.
+
+      The default value is `false`.
+
+  install_vala_vapi:
+    type: str | bool
+    since: 1.11.0
+    description: |
+      If set to a string value, the vala generated vapi library will be
+      installed to that path, if set to `true`, the default vapi path will be
+      used, if `false` the vapi library will not be installed.
+
+      The default value is `false`.
+
+  install_vala_gir:
+    type: str | bool
+    since: 1.11.0
+    description: |
+      If set to a string value, the vala generated gir library will be
+      installed to that path, if set to `true`, the default gir path will be
+      used, if `false` the gir library will not be installed.
+
+      It is an error for this to be either `true` or a string and `vala_gir` to
+      be unset.
+
+      The default value is `false`.

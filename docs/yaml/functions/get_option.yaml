@@ -1,5 +1,5 @@
 name: get_option
-returns: str | int | bool | feature | list[str | int | bool]
+returns: str | int | bool | feature | array[str | int | bool]
 description: |
   Obtains the value of the [project build option](Build-options.md)
   specified in the positional argument.
@@ -19,6 +19,11 @@ description: |
   is returned instead of a string.
   See [`feature` options](Build-options.md#features)
   documentation for more details.
+
+  For options that are [specified
+  per-machine](Builtin-options.md#specifying-options-per-machine)
+  `get_option()` retrieves the value of the option for the
+  build machine if the argument starts with `build.`.
 
 posargs:
   option_name:

@@ -44,7 +44,7 @@ class Builder:
         :param value: the value of the string
         :return: A StringNode
         """
-        return mparser.StringNode(self._token('string', value))
+        return mparser.StringNode(self._token('string', value), escape=False)
 
     def number(self, value: int) -> mparser.NumberNode:
         """Build A NumberNode
@@ -133,7 +133,7 @@ class Builder:
 
         :param lhs: The left hand side of the equal
         :param rhs: the right hand side of the equal
-        :return: A compraison node
+        :return: A comparison node
         """
         return mparser.ComparisonNode('==', lhs, self._symbol('=='), rhs)
 
@@ -142,7 +142,7 @@ class Builder:
 
         :param lhs: The left hand side of the "!="
         :param rhs: the right hand side of the "!="
-        :return: A compraison node
+        :return: A comparison node
         """
         return mparser.ComparisonNode('!=', lhs, self._symbol('!='), rhs)
 
@@ -151,7 +151,7 @@ class Builder:
 
         :param lhs: The left hand side of the "in"
         :param rhs: the right hand side of the "in"
-        :return: A compraison node
+        :return: A comparison node
         """
         return mparser.ComparisonNode('in', lhs, self._symbol('in'), rhs)
 
@@ -160,9 +160,9 @@ class Builder:
 
         :param lhs: The left hand side of the "not in"
         :param rhs: the right hand side of the "not in"
-        :return: A compraison node
+        :return: A comparison node
         """
-        return mparser.ComparisonNode('notin', lhs, self._symbol('not in'), rhs)
+        return mparser.ComparisonNode('not in', lhs, self._symbol('not in'), rhs)
 
     def or_(self, lhs: mparser.BaseNode, rhs: mparser.BaseNode) -> mparser.OrNode:
         """Create and OrNode
@@ -202,7 +202,7 @@ class Builder:
         :param rhs: The right of the addition
         :return: The ArithmeticNode
         """
-        return mparser.ArithmeticNode('add', lhs, self._symbol('+'), rhs)
+        return mparser.ArithmeticNode('+', lhs, self._symbol('+'), rhs)
 
     def plusassign(self, value: mparser.BaseNode, varname: str) -> mparser.PlusAssignmentNode:
         """Create a "+=" node

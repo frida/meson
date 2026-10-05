@@ -45,7 +45,7 @@ methods:
 
     posargs:
       script_name:
-        type: str | file | external_program
+        type: str | file | program
         description: |
           The script to execute.
 
@@ -55,7 +55,7 @@ methods:
 
     varargs:
       name: arg
-      type: str | file | external_program
+      type: str | file | program
       since: 0.49.0
       description: |
         Additional arguments
@@ -102,7 +102,7 @@ methods:
 
     posargs:
       script_name:
-        type: str | file | external_program | exe | custom_tgt | custom_idx
+        type: str | file | program | exe | custom_tgt | custom_idx
         description: |
           The script to execute.
 
@@ -113,7 +113,7 @@ methods:
 
     varargs:
       name: arg
-      type: str | file | external_program | exe | custom_tgt | custom_idx
+      type: str | file | program | exe | custom_tgt | custom_idx
       since: 0.49.0
       description: |
         Additional arguments
@@ -389,12 +389,12 @@ methods:
         description: The name of the program to override.
 
       program:
-        type: exe | file | external_program
+        type: exe | file | program
         description: The program to set as the override for `progname`.
 
       native:
         type: bool
-        since: 1.3.0
+        since: 1.12.0
         default: false
         description : |
           If set to `true`, the override is for the build machine, and will be returned
@@ -456,12 +456,12 @@ methods:
     description: Returns the version string specified in [[project]] function call.
 
   - name: project_license
-    returns: list[str]
+    returns: array[str]
     since: 0.45.0
     description: Returns the array of licenses specified in [[project]] function call.
 
   - name: project_license_files
-    returns: list[file]
+    returns: array[file]
     since: 1.1.0
     description: Returns the array of license files specified in the [[project]] function call.
 
@@ -507,10 +507,10 @@ methods:
 
     posargs:
       env:
-        type: env | str | list[str] | dict[str] | dict[list[str]]
+        type: env | str | array[str] | dict[str] | dict[array[str]]
         description: |
           The [[@env]] object to add.
-          Since *0.62.0* list of strings is allowed in dictionary values. In that
+          Since *0.62.0* array of strings is allowed in dictionary values. In that
           case values are joined using the separator.
     kwargs:
       separator:

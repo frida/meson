@@ -1,4 +1,4 @@
-project('buildtool', 'c', meson_version : '>= 1.3.0')
+project('buildtool', 'c', meson_version : '>= 1.12.0')
 
 maingen = find_program('maingen')
 

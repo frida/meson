@@ -8,7 +8,11 @@ subdir('liba')
 subdir('libb')
 
 main = executable('main', 'main.rs',
-  dependencies : [libb_dep],
+  link_with : [libb],
+)
+
+main = executable('main-with-staticlib', 'main-with-staticlib.rs',
+  link_with : [libb_staticlib],
 )
 
 # Since foo-rs is a static library, its dependencies are normally added to
@@ -21,6 +25,7 @@ foo = static_library('foo-rs', 'foo.rs',
   rust_abi: 'c',
   link_with: pm,
 )
+shared_library('shared', 'foo.c', link_with : foo)
 exe = executable('footest', 'foo.c',
   link_with: foo,
 )

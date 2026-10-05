@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2016-2021 The Meson development team
 
-import glob, os, pathlib, shutil, subprocess, unittest
+import glob, os, pathlib, shutil, subprocess, sys, unittest
 
 from run_tests import (
     Backend
@@ -9,9 +9,10 @@ from run_tests import (
 
 from .allplatformstests import git_init
 from .baseplatformtests import BasePlatformTests
-from .helpers import *
+from .helpers import get_fake_env
 
-from mesonbuild.mesonlib import MachineChoice, TemporaryDirectoryWinProof
+from mesonbuild.compilers.detect import detect_c_compiler
+from mesonbuild.mesonlib import MachineChoice, TemporaryDirectoryWinProof, is_windows
 from mesonbuild.modules.python import PythonModule
 
 class PythonTests(BasePlatformTests):
@@ -64,7 +65,12 @@ python = pymod.find_installation('python3', required: true)
             for file in files:
                 realfile = os.path.join(root, file)
                 if file.endswith('.py'):
-                    cached = glob.glob(realfile+'?') + glob.glob(os.path.join(root, '__pycache__', os.path.splitext(file)[0] + '*.pyc'))
+                    # FIXME: relpath must be adjusted for windows path behaviour
+                    if getattr(sys, "pycache_prefix", None) is not None:
+                        root = os.path.join(sys.pycache_prefix, os.path.relpath(root, '/'))
+                    else:
+                        root = os.path.join(root, '__pycache__')
+                    cached = glob.glob(realfile+'?') + glob.glob(os.path.join(root, os.path.splitext(file)[0] + '*.pyc'))
                     if py2 and cc.get_id() == 'msvc':
                         # MSVC python installs python2/python3 into the same directory
                         self.assertLength(cached, 4)
@@ -86,3 +92,32 @@ python = pymod.find_installation('python3', required: true)
         if shutil.which('python2') or PythonModule._get_win_pythonpath('python2'):
             raise self.skipTest('python2 installed, already tested')
         self._test_bytecompile()
+
+    def test_limited_api_linked_correct_lib(self):
+        if not is_windows():
+            return self.skipTest('Test only run on Windows.')
+
+        testdir = os.path.join(self.src_root, 'test cases', 'python', '9 extmodule limited api')
+
+        self.init(testdir)
+        self.build()
+
+        from importlib.machinery import EXTENSION_SUFFIXES
+        limited_suffix = EXTENSION_SUFFIXES[1]
+
+        limited_library_path = os.path.join(self.builddir, f'limited{limited_suffix}')
+        self.assertPathExists(limited_library_path)
+
+        limited_dep_name = 'python3.dll'
+        if shutil.which('dumpbin'):
+            # MSVC
+            output = subprocess.check_output(['dumpbin', '/DEPENDENTS', limited_library_path],
+                                            stderr=subprocess.STDOUT)
+            self.assertIn(limited_dep_name, output.decode())
+        elif shutil.which('objdump'):
+            # mingw
+            output = subprocess.check_output(['objdump', '-p', limited_library_path],
+                                             stderr=subprocess.STDOUT)
+            self.assertIn(limited_dep_name, output.decode())
+        else:
+            raise self.skipTest('Test needs either dumpbin(MSVC) or objdump(mingw).')

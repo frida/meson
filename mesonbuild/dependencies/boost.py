@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .. import mlog
 from .. import mesonlib
+from ..options import OptionKey
 
 from .base import DependencyException, SystemDependency
 from .detect import packages
@@ -20,6 +21,7 @@ from .misc import threads_factory
 if T.TYPE_CHECKING:
     from ..envconfig import Properties
     from ..environment import Environment
+    from .base import DependencyObjectKWs
 
 # On windows 3 directory layouts are supported:
 # * The default layout (versioned) installed:
@@ -55,7 +57,7 @@ if T.TYPE_CHECKING:
 # Mac   / homebrew: libboost_<module>.dylib + libboost_<module>-mt.dylib    (location = /usr/local/lib)
 # Mac   / macports: libboost_<module>.dylib + libboost_<module>-mt.dylib    (location = /opt/local/lib)
 #
-# Its not clear that any other abi tags (e.g. -gd) are used in official packages.
+# It's not clear that any other abi tags (e.g. -gd) are used in official packages.
 #
 # On Linux systems, boost libs have multithreading support enabled, but without the -mt tag.
 #
@@ -260,7 +262,7 @@ class BoostLibraryFile():
                 update_vers(i[2:])
             elif i.isdigit():
                 update_vers(i)
-            elif len(i) >= 3 and i[0].isdigit and i[2].isdigit() and i[1] == '.':
+            elif len(i) >= 3 and i[0].isdigit() and i[2].isdigit() and i[1] == '.':
                 update_vers(i)
             else:
                 other_tags += [i]
@@ -338,21 +340,20 @@ class BoostLibraryFile():
         return [self.path.as_posix()]
 
 class BoostDependency(SystemDependency):
-    def __init__(self, environment: Environment, kwargs: T.Dict[str, T.Any]) -> None:
-        super().__init__('boost', environment, kwargs, language='cpp')
-        buildtype = environment.coredata.get_option(mesonlib.OptionKey('buildtype'))
+    def __init__(self, name: str, environment: Environment, kwargs: DependencyObjectKWs) -> None:
+        kwargs['language'] = 'cpp'
+        super().__init__(name, environment, kwargs)
+        buildtype = environment.coredata.optstore.get_value_for(OptionKey('buildtype'))
         assert isinstance(buildtype, str)
         self.debug = buildtype.startswith('debug')
         self.multithreading = kwargs.get('threading', 'multi') == 'multi'
 
         self.boost_root: T.Optional[Path] = None
-        self.explicit_static = 'static' in kwargs
+        self.explicit_static = kwargs.get('static') is not None
 
         # Extract and validate modules
-        self.modules: T.List[str] = mesonlib.extract_as_list(kwargs, 'modules')
+        self.modules = kwargs.get('modules', [])
         for i in self.modules:
-            if not isinstance(i, str):
-                raise DependencyException('Boost module argument is not a string.')
             if i.startswith('boost_'):
                 raise DependencyException('Boost modules must be passed without the boost_ prefix')
 
@@ -361,7 +362,7 @@ class BoostDependency(SystemDependency):
 
         # Do we need threads?
         if 'thread' in self.modules:
-            if not self._add_sub_dependency(threads_factory(environment, self.for_machine, {})):
+            if not self._add_sub_dependency(threads_factory(environment, {'native': self.for_machine})):
                 self.is_found = False
                 return
 
@@ -439,6 +440,8 @@ class BoostDependency(SystemDependency):
         mlog.debug('  - potential library dirs: {}'.format([x.as_posix() for x in lib_dirs]))
         mlog.debug('  - potential include dirs: {}'.format([x.path.as_posix() for x in inc_dirs]))
 
+        must_have_library = ['boost_python']
+
         #   2. Find all boost libraries
         libs: T.List[BoostLibraryFile] = []
         for i in lib_dirs:
@@ -451,6 +454,10 @@ class BoostDependency(SystemDependency):
                 break
         libs = sorted(set(libs))
 
+        any_libs_found = len(libs) > 0
+        if not any_libs_found:
+            return False
+
         modules = ['boost_' + x for x in self.modules]
         for inc in inc_dirs:
             mlog.debug(f'  - found boost {inc.version} include dir: {inc.path}')
@@ -461,7 +468,7 @@ class BoostDependency(SystemDependency):
                 mlog.debug(f'    - {j}')
 
             #   3. Select the libraries matching the requested modules
-            not_found: T.List[str] = []
+            not_found_as_libs: T.List[str] = []
             selected_modules: T.List[BoostLibraryFile] = []
             for mod in modules:
                 found = False
@@ -471,7 +478,24 @@ class BoostDependency(SystemDependency):
                         found = True
                         break
                 if not found:
-                    not_found += [mod]
+                    not_found_as_libs += [mod]
+
+            # If a lib is not found, but an include directory exists,
+            # assume it is a header only module.
+            not_found: T.List[str] = []
+            for boost_modulename in not_found_as_libs:
+                assert boost_modulename.startswith('boost_')
+                if boost_modulename in must_have_library:
+                    not_found.append(boost_modulename)
+                    continue
+                include_subdir = boost_modulename.replace('boost_', 'boost/', 1)
+                headerdir_found = False
+                for inc_dir in inc_dirs:
+                    if (inc_dir.path / include_subdir).is_dir():
+                        headerdir_found = True
+                        break
+                if not headerdir_found:
+                    not_found.append(boost_modulename)
 
             # log the result
             mlog.debug('  - found:')
@@ -534,7 +558,7 @@ class BoostDependency(SystemDependency):
         # given root path
 
         if use_system:
-            system_dirs_t = self.clib_compiler.get_library_dirs(self.env)
+            system_dirs_t = self.clib_compiler.get_library_dirs()
             system_dirs = [Path(x) for x in system_dirs_t]
             system_dirs = [x.resolve() for x in system_dirs if x.exists()]
             system_dirs = [x for x in system_dirs if mesonlib.path_is_in_root(x, root)]
@@ -580,9 +604,9 @@ class BoostDependency(SystemDependency):
         # MSVC is very picky with the library tags
         vscrt = ''
         try:
-            crt_val = self.env.coredata.options[mesonlib.OptionKey('b_vscrt')].value
-            buildtype = self.env.coredata.options[mesonlib.OptionKey('buildtype')].value
-            vscrt = self.clib_compiler.get_crt_compile_args(crt_val, buildtype)[0]
+            crt_val = self.env.coredata.optstore.get_value_for('b_vscrt')
+            assert isinstance(crt_val, str)
+            vscrt = self.clib_compiler.get_crt_compile_args(crt_val)[0]
         except (KeyError, IndexError, AttributeError):
             pass
 
@@ -594,7 +618,8 @@ class BoostDependency(SystemDependency):
         # mlog.debug('    - vscrt: {}'.format(vscrt))
         libs = [x for x in libs if x.static == self.static or not self.explicit_static]
         libs = [x for x in libs if x.mt == self.multithreading]
-        libs = [x for x in libs if x.version_matches(lib_vers)]
+        if not self.env.machines[self.for_machine].is_openbsd():
+            libs = [x for x in libs if x.version_matches(lib_vers)]
         libs = [x for x in libs if x.arch_matches(self.arch)]
         libs = [x for x in libs if x.vscrt_matches(vscrt)]
         libs = [x for x in libs if x.nvsuffix != 'dll']  # Only link to import libraries
@@ -610,6 +635,19 @@ class BoostDependency(SystemDependency):
             return []
         abitag = libs[0].abitag
         libs = [x for x in libs if x.abitag == abitag]
+
+        # Assume that we are building against the latest Python version
+        # and that the other ones are only there for backwards compatibility.
+        # https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1141440
+        no_python_libs = []
+        python_libs = []
+        for l in libs:
+            if l.is_python_lib():
+                python_libs.append(l)
+            else:
+                no_python_libs.append(l)
+        sorted_pylibs = sorted(python_libs, key=lambda l: l.name, reverse=True)
+        libs = no_python_libs + sorted_pylibs[:1]
 
         return libs
 
@@ -650,11 +688,21 @@ class BoostDependency(SystemDependency):
         # Try getting the BOOST_ROOT from a boost.pc if it exists. This primarily
         # allows BoostDependency to find boost from Conan. See #5438
         try:
-            boost_pc = PkgConfigDependency('boost', self.env, {'required': False})
+            boost_pc = PkgConfigDependency('boost', self.env, {'required': False, 'native': self.for_machine})
             if boost_pc.found():
-                boost_root = boost_pc.get_variable(pkgconfig='prefix')
-                if boost_root:
-                    roots += [Path(boost_root)]
+                boost_lib_dir = boost_pc.get_variable(pkgconfig='libdir')
+                boost_inc_dir = boost_pc.get_variable(pkgconfig='includedir')
+                if boost_lib_dir and boost_inc_dir:
+                    mlog.debug('Trying to find boost with:')
+                    mlog.debug(f'  - boost_includedir = {Path(boost_inc_dir)}')
+                    mlog.debug(f'  - boost_librarydir = {Path(boost_lib_dir)}')
+
+                    self.detect_split_root(Path(boost_inc_dir), Path(boost_lib_dir))
+                    return
+                else:
+                    boost_root = boost_pc.get_variable(pkgconfig='prefix')
+                    if boost_root:
+                        roots += [Path(boost_root)]
         except DependencyException:
             pass
 
@@ -664,8 +712,9 @@ class BoostDependency(SystemDependency):
         inc_paths = [x.resolve() for x in inc_paths]
         roots += inc_paths
 
+        m = self.env.machines[self.for_machine]
         # Add system paths
-        if self.env.machines[self.for_machine].is_windows():
+        if m.is_windows():
             # Where boost built from source actually installs it
             c_root = Path('C:/Boost')
             if c_root.is_dir():
@@ -687,8 +736,12 @@ class BoostDependency(SystemDependency):
             tmp: T.List[Path] = []
 
             # Add some default system paths
+            if m.is_darwin():
+                tmp.extend([
+                    Path('/opt/homebrew/'),        # for Apple Silicon MacOS
+                    Path('/usr/local/opt/boost'),  # for Intel Silicon MacOS
+                ])
             tmp += [Path('/opt/local')]
-            tmp += [Path('/usr/local/opt/boost')]
             tmp += [Path('/usr/local')]
             tmp += [Path('/usr')]
 

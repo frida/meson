@@ -5,50 +5,88 @@ from __future__ import annotations
 
 import typing as T
 
-from .. import coredata
-from ..mesonlib import OptionKey
+from ..options import OptionKey, UserBooleanOption, UserStdOption
 
-from .mixins.clike import CLikeCompiler
+from .cpp import ALL_STDS
 from .compilers import Compiler
-from .mixins.gnu import GnuCompiler, gnu_common_warning_args, gnu_objc_warning_args
-from .mixins.clang import ClangCompiler
+from .mixins.apple import AppleCPPStdsMixin
+from .mixins.gnu import GnuCompiler, GnuCPPStds, gnu_common_warning_args, gnu_objc_warning_args
+from .mixins.clang import ClangCompiler, ClangCPPStds
+from .mixins.clike import CLikeCompiler
 
 if T.TYPE_CHECKING:
-    from ..envconfig import MachineInfo
     from ..environment import Environment
     from ..linkers.linkers import DynamicLinker
     from ..mesonlib import MachineChoice
+    from ..build import BuildTarget
+    from ..options import MutableKeyedOptionDictType
+
 
 class ObjCPPCompiler(CLikeCompiler, Compiler):
 
     language = 'objcpp'
 
     def __init__(self, ccache: T.List[str], exelist: T.List[str], version: str, for_machine: MachineChoice,
-                 is_cross: bool, info: 'MachineInfo',
+                 env: Environment,
                  linker: T.Optional['DynamicLinker'] = None,
                  full_version: T.Optional[str] = None):
-        Compiler.__init__(self, ccache, exelist, version, for_machine, info,
-                          is_cross=is_cross, full_version=full_version,
-                          linker=linker)
+        Compiler.__init__(self, ccache, exelist, version, for_machine, env,
+                          full_version=full_version, linker=linker)
         CLikeCompiler.__init__(self)
+
+    def get_no_stdinc_args(self) -> T.List[str]:
+        return ['-nostdinc++']
+
+    def get_no_stdlib_link_args(self) -> T.List[str]:
+        return ['-nostdlib++']
+
+    def form_compileropt_key(self, basename: str) -> OptionKey:
+        if basename in {'std', 'rtti'}:
+            return OptionKey(f'cpp_{basename}', machine=self.for_machine)
+        return super().form_compileropt_key(basename)
+
+    def make_option_name(self, key: OptionKey) -> str:
+        if key.name == 'std':
+            return 'cpp_std'
+        return super().make_option_name(key)
 
     @staticmethod
     def get_display_language() -> str:
         return 'Objective-C++'
 
-    def sanity_check(self, work_dir: str, environment: 'Environment') -> None:
-        code = '#import<stdio.h>\nclass MyClass;int main(void) { return 0; }\n'
-        return self._sanity_check_impl(work_dir, environment, 'sanitycheckobjcpp.mm', code)
+    def _sanity_check_source_code(self) -> str:
+        return '#import<stdio.h>\nclass MyClass;int main(void) { return 0; }\n'
+
+    def get_options(self) -> MutableKeyedOptionDictType:
+        opts = super().get_options()
+        key = self.form_compileropt_key('std')
+        opts.update({
+            key: UserStdOption('cpp', ALL_STDS),
+        })
+        key = self.form_compileropt_key('rtti')
+        opts[key] = UserBooleanOption(
+            self.make_option_name(key),
+            'Enable RTTI',
+            True)
+        return opts
+
+    def get_option_compile_args(self, target: 'BuildTarget', subproject: T.Optional[str] = None) -> T.List[str]:
+        args: T.List[str] = []
+        rtti = self.get_compileropt_value('rtti', target, subproject)
+        assert isinstance(rtti, bool)
+        if not rtti:
+            args.append('-fno-rtti')
+        return args
 
 
-class GnuObjCPPCompiler(GnuCompiler, ObjCPPCompiler):
+class GnuObjCPPCompiler(GnuCPPStds, GnuCompiler, ObjCPPCompiler):
     def __init__(self, ccache: T.List[str], exelist: T.List[str], version: str, for_machine: MachineChoice,
-                 is_cross: bool, info: 'MachineInfo',
+                 env: Environment,
                  defines: T.Optional[T.Dict[str, str]] = None,
                  linker: T.Optional['DynamicLinker'] = None,
                  full_version: T.Optional[str] = None):
-        ObjCPPCompiler.__init__(self, ccache, exelist, version, for_machine, is_cross,
-                                info, linker=linker, full_version=full_version)
+        ObjCPPCompiler.__init__(self, ccache, exelist, version, for_machine,
+                                env, linker=linker, full_version=full_version)
         GnuCompiler.__init__(self, defines)
         default_warn_args = ['-Wall', '-Winvalid-pch']
         self.warn_args = {'0': [],
@@ -59,16 +97,27 @@ class GnuObjCPPCompiler(GnuCompiler, ObjCPPCompiler):
                                          self.supported_warn_args(gnu_common_warning_args) +
                                          self.supported_warn_args(gnu_objc_warning_args))}
 
+    def get_option_std_args(self, target: BuildTarget, subproject: T.Optional[str] = None) -> T.List[str]:
+        args: T.List[str] = []
+        key = OptionKey('cpp_std', subproject=subproject, machine=self.for_machine)
+        if target:
+            std = self.environment.coredata.get_option_for_target(target, key)
+        else:
+            std = self.environment.coredata.optstore.get_value_for(key)
+        assert isinstance(std, str)
+        if std != 'none':
+            args.append('-std=' + std)
+        return args
 
-class ClangObjCPPCompiler(ClangCompiler, ObjCPPCompiler):
+class ClangObjCPPCompiler(ClangCPPStds, ClangCompiler, ObjCPPCompiler):
 
     def __init__(self, ccache: T.List[str], exelist: T.List[str], version: str, for_machine: MachineChoice,
-                 is_cross: bool, info: 'MachineInfo',
+                 env: Environment,
                  defines: T.Optional[T.Dict[str, str]] = None,
                  linker: T.Optional['DynamicLinker'] = None,
                  full_version: T.Optional[str] = None):
-        ObjCPPCompiler.__init__(self, ccache, exelist, version, for_machine, is_cross,
-                                info, linker=linker, full_version=full_version)
+        ObjCPPCompiler.__init__(self, ccache, exelist, version, for_machine,
+                                env, linker=linker, full_version=full_version)
         ClangCompiler.__init__(self, defines)
         default_warn_args = ['-Wall', '-Winvalid-pch']
         self.warn_args = {'0': [],
@@ -77,26 +126,16 @@ class ClangObjCPPCompiler(ClangCompiler, ObjCPPCompiler):
                           '3': default_warn_args + ['-Wextra', '-Wpedantic'],
                           'everything': ['-Weverything']}
 
-    def get_options(self) -> coredata.MutableKeyedOptionDictType:
-        return self.update_options(
-            super().get_options(),
-            self.create_option(coredata.UserComboOption,
-                               OptionKey('std', machine=self.for_machine, lang='cpp'),
-                               'C++ language standard to use',
-                               ['none', 'c++98', 'c++11', 'c++14', 'c++17', 'c++20', 'c++2b',
-                                'gnu++98', 'gnu++11', 'gnu++14', 'gnu++17', 'gnu++20',
-                                'gnu++2b'],
-                               'none'),
-        )
-
-    def get_option_compile_args(self, options: 'coredata.KeyedOptionDictType') -> T.List[str]:
+    def get_option_std_args(self, target: BuildTarget, subproject: T.Optional[str] = None) -> T.List[str]:
         args = []
-        std = options[OptionKey('std', machine=self.for_machine, lang='cpp')]
-        if std.value != 'none':
-            args.append('-std=' + std.value)
+        key = OptionKey('cpp_std', machine=self.for_machine)
+        std = self.get_compileropt_value(key, target, subproject)
+        assert isinstance(std, str)
+        if std != 'none':
+            args.append('-std=' + std)
         return args
 
 
-class AppleClangObjCPPCompiler(ClangObjCPPCompiler):
+class AppleClangObjCPPCompiler(AppleCPPStdsMixin, ClangObjCPPCompiler):
 
     """Handle the differences between Apple's clang and vanilla clang."""

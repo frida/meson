@@ -1,13 +1,10 @@
-# Unstable Wayland Module
+# Wayland Module
 
-This module is available since version 0.62.0.
+This module is available since version 0.62.0, and has been stable since version
+1.8.0.
 
 This module provides helper functions to find wayland protocol
 xmls and to generate .c and .h files using wayland-scanner
-
-**Note**: this module is unstable. It is only provided as a technology
-preview. Its API may change in arbitrary ways between releases or it
-might be removed from Meson altogether.
 
 ## Quick Usage
 
@@ -15,7 +12,7 @@ might be removed from Meson altogether.
 project('hello-wayland', 'c')
 
 wl_dep = dependency('wayland-client')
-wl_mod = import('unstable-wayland')
+wl_mod = import('wayland')
 
 xml = wl_mod.find_protocol('xdg-shell')
 xdg_shell = wl_mod.scan_xml(xml)
@@ -53,7 +50,8 @@ generated = wl_mod.scan_xml(
   include_core_only : true,
 )
 ```
-This function accepts one or more arguments of either string or file type.
+This function accepts one or more arguments of either string or file type, so
+it can be used in conjunction with `find_protocol` or not.
 
 It takes the following keyword arguments:
 - `public` Optional arg that specifies the scope of the generated code.
@@ -63,7 +61,7 @@ It takes the following keyword arguments:
 - `server` Optional arg that specifies if server side header file is
   generated. The default is false.
 - `include_core_only` Optional arg that specifies that generated headers only include
-  `wayland-<client|server>-core.h` instead of `wayland-<client|server>.h`. 
+  `wayland-<client|server>-core.h` instead of `wayland-<client|server>.h`.
   The default is true. Since *0.64.0*
 
 **Returns**: a list of [[@custom_tgt]] in the order source, client side header,

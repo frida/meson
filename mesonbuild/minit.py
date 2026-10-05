@@ -17,9 +17,10 @@ import typing as T
 
 from mesonbuild import build, mesonlib, mlog
 from mesonbuild.coredata import FORBIDDEN_TARGET_NAMES
-from mesonbuild.environment import detect_ninja
+from mesonbuild.tooldetect import detect_ninja
 from mesonbuild.templates.mesontemplates import create_meson_build
 from mesonbuild.templates.samplefactory import sample_generator
+from mesonbuild.options import OptionKey
 
 if T.TYPE_CHECKING:
     import argparse
@@ -33,7 +34,7 @@ if T.TYPE_CHECKING:
         name: str
         executable: str
         deps: str
-        language: Literal['c', 'cpp', 'cs', 'cuda', 'd', 'fortran', 'java', 'rust', 'objc', 'objcpp', 'vala']
+        language: Literal['c', 'cpp', 'cs', 'cuda', 'd', 'fortran', 'java', 'rust', 'objc', 'objcpp', 'vala'] | None
         build: bool
         builddir: str
         force: bool
@@ -192,12 +193,13 @@ def run(options: Arguments) -> int:
             raise SystemExit
 
         b = build.load(options.builddir)
-        need_vsenv = T.cast('bool', b.environment.coredata.get_option(mesonlib.OptionKey('vsenv')))
+        need_vsenv = T.cast('bool', b.environment.coredata.optstore.get_value_for(OptionKey('vsenv')))
         vsenv_active = mesonlib.setup_vsenv(need_vsenv)
         if vsenv_active:
             mlog.log(mlog.green('INFO:'), 'automatically activated MSVC compiler environment')
 
-        cmd = detect_ninja() + ['-C', options.builddir]
+        ninja = mesonlib.unwrap_err(detect_ninja(), 'Could not detect ninja and it is required')
+        cmd = ninja + ['-C', options.builddir]
         ret = subprocess.run(cmd)
         if ret.returncode:
             raise SystemExit

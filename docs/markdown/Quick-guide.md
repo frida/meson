@@ -35,11 +35,10 @@ generate native VS and Xcode project files.*
 Installation using package manager
 --
 
-Ubuntu:
+Debian or Ubuntu:
 
 ```console
-$ sudo apt-get install python3 python3-pip python3-setuptools \
-                       python3-wheel ninja-build
+$ sudo apt-get install python3 ninja-build meson
 ```
 *Due to our frequent release cycle and development speed, distro packaged software may quickly become outdated.*
 
@@ -47,13 +46,19 @@ Installation using Python
 --
 Requirements: **pip3**
 
-The best way to receive the most up-to-date version of Mesonbuild.
+This is the best way to receive the most up-to-date version of Mesonbuild.
 
-Install as a local user (recommended):
+First, install dependencies using the package manager:
+```console
+$ sudo apt-get install python3 python3-pip python3-setuptools \
+                       python3-wheel ninja-build
+```
+
+Then, install meson as a local user (recommended):
 ```console
 $ pip3 install --user meson
 ```
-Install as root:
+Or, install meson as root:
 ```console
 # pip3 install meson
 ```
@@ -79,19 +84,20 @@ $ meson setup builddir
 $ bash: /usr/bin/meson: No such file or directory
 ```
 
-Description: The default installation prefix for the python pip module
-installation is not included in your shell environment PATH. The
-default prefix for python pip installation modules is located under
-``/usr/local``.
+**Description**: The default installation prefix for the python pip module
+installation might not be included in your shell environment `PATH`.
+The default install location varies depending on your OS, distro and
+Python version.
 
-**Resolution:
-This issue can be resolved by altering the default shell environment
-PATH to include ``/usr/local/bin``. **
+**Resolution**: This issue can be resolved by altering the default shell
+environment `PATH` to include the path where Pip installed the
+binaries. This can be, e.g. ``/usr/local/bin`` or
+`/home/<username>/.local/bin`.
 
-*Note: There are other ways of fixing this issue such as using
+**Note**: There are other ways of fixing this issue such as using
  symlinks or copying the binaries to a default path and these methods
  are not recommended or supported as they may break package management
- interoperability.*
+ interoperability.
 
 
 Compiling a Meson project

@@ -1,4 +1,4 @@
-project('native subproject', 'c', meson_version : '>= 1.3.0')
+project('native subproject', 'c', meson_version : '>= 1.12.0')
 
 # Test running a subproject for both host and build
 subproject('both', native : true)

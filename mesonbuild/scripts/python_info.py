@@ -65,11 +65,13 @@ paths, install_paths = get_install_paths()
 
 def links_against_libpython():
     # on versions supporting python-embed.pc, this is the non-embed lib
-    #
-    # PyPy is not yet up to 3.12 and work is still pending to export the
-    # relevant information (it doesn't automatically provide arbitrary
-    # Makefile vars)
-    if sys.version_info >= (3, 8) and not is_pypy:
+    if is_pypy:
+        # PyPy work is still pending to export the relevant information (it
+        # doesn't automatically provide arbitrary Makefile vars). However,
+        # the only PyPy supported platform that requires linking to libpython
+        # is Windows, thus it is easy enough to hardcode the answer.
+        return sysconfig.get_platform() == "win-amd64"
+    elif sys.version_info >= (3, 8):
         variables = sysconfig.get_config_vars()
         return bool(variables.get('LIBPYTHON', 'yes'))
     else:
@@ -100,11 +102,14 @@ if sys.version_info >= (3, 2):
     except Exception:
         pass
 
-# pypy supports modules targetting the limited api but
+# pypy supports modules targeting the limited api but
 # does not use a special suffix to distinguish them:
 # https://doc.pypy.org/en/latest/cpython_differences.html#permitted-abi-tags-in-extensions
 if is_pypy:
     limited_api_suffix = suffix
+
+# Whether we're targeting a free-threaded CPython interpreter
+is_freethreaded = bool(variables.get('Py_GIL_DISABLED', False))
 
 print(json.dumps({
   'variables': variables,
@@ -118,4 +123,5 @@ print(json.dumps({
   'link_libpython': links_against_libpython(),
   'suffix': suffix,
   'limited_api_suffix': limited_api_suffix,
+  'is_freethreaded': is_freethreaded,
 }))

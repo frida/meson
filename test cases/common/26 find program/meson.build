@@ -1,4 +1,4 @@
-project('find program')
+project('find program', meson_version: '>= 1.10.0',)
 
 if build_machine.system() == 'windows'
   # Things Windows does not provide:
@@ -32,8 +32,37 @@ assert(prog.version() == '1.0', 'Program version should be detectable')
 prog = find_program('print-version-with-prefix.py', version : '>=1.0')
 assert(prog.found(), 'Program version should match')
 
+prog = find_program('print-version-custom-argument.py', version : '>=1.0', version_argument : '-version')
+assert(prog.found(), 'Program version should match')
+
+# Fallback to a later name when an earlier match fails the version check (#14141)
+prog = find_program('print-version-old.py', 'print-version.py', version : '>=1.0')
+assert(prog.found(), 'Should fall back to print-version.py after version mismatch')
+assert(prog.version() == '1.0', 'Fallback program version should be 1.0')
+
+prog = find_program('print-version-old.py', 'print-version.py', version : '>=2.0', required : false)
+assert(not prog.found(), 'Both candidates are too old for >=2.0')
+
 prog = find_program('test_subdir.py', required : false)
 assert(not prog.found(), 'Program should not be found')
 
 prog = find_program('test_subdir.py', dirs : ['/nonexistent', meson.current_source_dir() / 'scripts'])
 assert(prog.found(), 'Program should be found')
+
+prog = find_program('print-version.py')
+if build_machine.system() != 'cygwin'
+  assert(prog.cmd_array() != [prog.full_path()])
+  assert(prog.cmd_array().length() == 2)
+endif
+
+ret = run_command(prog.cmd_array(),'--version', check: true)
+assert(ret.returncode() == 0)
+assert(ret.stdout().strip() == '1.0')
+
+if build_machine.system() == 'windows'
+  prog = find_program('cmd.exe')
+  assert(prog.cmd_array() == [prog.full_path()])
+else
+  prog = find_program('ld')
+  assert(prog.cmd_array() == [prog.full_path()])
+endif

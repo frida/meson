@@ -1,5 +1,5 @@
 name: find_program
-returns: external_program
+returns: program
 description: |
   `program_name` here is a string that can be an executable or script
   to be searched for in `PATH` or other places inside the project.
@@ -10,21 +10,42 @@ description: |
     in subproject wrap files, if [`wrap_mode`](Builtin-options.md#core-options) is
     set to `forcefallback`
   1. [`[binaries]` section](Machine-files.md#binaries) in your machine files
-  1. Directories provided using the `dirs:` kwarg (see below)
   1. Project's source tree relative to the current subdir
      - If you use the return value of [[configure_file]], the
        current subdir inside the build tree is used instead
+  1. Directories provided using the `dirs:` kwarg (see below)
   1. `PATH` environment variable
   1. [`[provide]` sections](Wrap-dependency-system-manual.md#provide-section) in
     subproject wrap files, if [`wrap_mode`](Builtin-options.md#core-options) is
     set to anything other than `nofallback`
+
+  More precisely, program overrides and forced subproject fallbacks are checked first.
+  If neither provides a program, Meson tries the names in the order given.
+  Only after trying all names does it consider the remaining subproject fallbacks.
+
+  *Until 1.12.x* Meson looked first in the machine files for any name; then
+  searched for the program in the project's source tree, the directories listed
+  in `dirs:`, and `PATH`, as described above.  Machine-file entries
+  took precedence over system lookup, even if their version did not satisfy
+  the requirement.  Likewise, the first program found in the system was used
+  even if its version did not satisfy the requirement, without trying later names.
+
+  *Since 1.13.0*, the search is conducted separately for each name:
+
+  - If the first name is defined in a machine file, Meson uses that entry.
+
+  - Otherwise, Meson searches for the first name in the project's source tree,
+    the directories listed in `dirs:`, and `PATH`, as described above.
+
+  - If the program is not found or does not satisfy the requested version,
+    Meson tries the next name.
 
   Meson will also autodetect scripts with a shebang line and run them
   with the executable/interpreter specified in it both on Windows
   (because the command invocator will reject the command otherwise) and
   Unixes (if the script file does not have the executable bit set).
   Hence, you *must not* manually add the interpreter while using this
-  script as part of a list of commands. Since *0.50.0* if the "python3"
+  script as part of an array of commands. Since *0.50.0* if the "python3"
   program is requested and it is not found in the system, Meson will return
   its current interpreter.
 
@@ -45,7 +66,7 @@ description: |
   *Since 1.2.0* `find_program('meson')` is automatically overridden to the Meson
   command used to execute the build script.
 
-  The returned [[@external_program]] object also has documented methods.
+  The returned [[@program]] object also has documented methods.
 
 posargs:
   program_name:
@@ -63,7 +84,8 @@ varargs:
     This is meant to be used for cases where the
     program may have many alternative names, such as `foo` and
     `foo.py`. The function will check for the arguments one by one and the
-    first one that is found is returned.
+    first one that is found is returned. *Since 1.13.0*, programs that do not
+    satisfy the requested version can fall back to subsequent names.
 
 kwargs:
   required:
@@ -73,7 +95,7 @@ kwargs:
       When `true`, Meson will abort if no program can be found.
       If `required` is set to `false`,
       Meson continue even if none of the programs can be found. You can
-      then use the `.found()` method on the returned [[@external_program]] to check
+      then use the `.found()` method on the returned [[@program]] to check
       whether it was found or not. *(since 0.47.0)* The value of a
       [`feature`](Build-options.md#features) option can also be passed to the
       `required` keyword argument.
@@ -98,24 +120,31 @@ kwargs:
       instead of a not-found object.
 
   version:
-    type: str | list[str]
+    type: str | array[str]
     since: 0.52.0
     description: |
       Specifies the required version, see
-      [[dependency]] for argument format. The version of the program
+      [[dependency]] for argument format. By default, the version of the program
       is determined by running `program_name --version` command. If stdout is empty
       it fallbacks to stderr. If the output contains more text than simply a version
       number, only the first occurrence of numbers separated by dots is kept.
       If the output is more complicated than that, the version checking will have to
       be done manually using [[run_command]].
 
+  version_argument:
+    type: str
+    since: 1.5.0
+    description: |
+      Specifies the argument to pass when trying to find the version of the program.
+      If this is unspecified, `program_name --version` will be used.
+
   dirs:
-    type: list[str]
+    type: array[str]
     since: 0.53.0
-    description: extra list of absolute paths where to look for program names.
+    description: extra array of absolute paths where to look for program names.
 
   default_options:
-    type: list[str] | dict[str | bool | int | list[str]]
+    type: array[str] | dict[str | bool | int | array[str]]
     since: 1.3.0
     description: |
       An array of default option values

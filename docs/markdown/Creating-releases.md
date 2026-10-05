@@ -31,6 +31,13 @@ Meson then takes this archive and tests that it works by doing a full
 `compile` + `test` + `install` cycle. If all these pass, Meson will
 then create a `SHA-256` checksum file next to the archive.
 
+## Modifying the dist directory before creating the archive
+
+Modification to the checked out files like generating files or
+setting version info can be done with dist scripts:
+```meson
+[[#meson.add_dist_script]]('distscript.sh')
+```
 
 ## Autotools dist VS Meson dist
 
@@ -97,7 +104,7 @@ following example.
 `meson.build`:
 ```meson
 project('tig', 'c',
-  version : run_command('version.sh', 'get-vcs').stdout.strip())
+  version : run_command('version.sh', 'get-vcs').stdout().strip())
 
 meson.add_dist_script('version.sh', 'set-dist', meson.project_version())
 ```

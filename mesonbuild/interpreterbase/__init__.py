@@ -8,6 +8,7 @@ __all__ = [
     'IterableObject',
     'MutableInterpreterObject',
     'ContextManagerObject',
+    'DefaultObject',
 
     'MesonOperator',
 
@@ -23,43 +24,38 @@ __all__ = [
 
     'default_resolve_key',
     'flatten',
-    'resolve_second_level_holders',
     'stringifyUserArguments',
+    'Feature',
+    'FeatureValue',
 
-    'noPosargs',
-    'noKwargs',
-    'stringArgs',
     'noArgsFlattening',
-    'noSecondLevelHolderResolving',
     'unholder_return',
     'disablerIfNotFound',
-    'permittedKwargs',
     'typed_operator',
-    'typed_pos_args',
     'ContainerTypeInfo',
     'KwargInfo',
-    'typed_kwargs',
+    'TypedArgs',
+    'PosArgInfo',
+    'OptArgInfo',
+    'VarArgInfo',
     'FeatureCheckBase',
     'FeatureNew',
     'FeatureDeprecated',
     'FeatureBroken',
-    'FeatureNewKwargs',
-    'FeatureDeprecatedKwargs',
 
     'InterpreterBase',
-
-    'SubProject',
 
     'TV_func',
     'TYPE_elementary',
     'TYPE_var',
-    'TYPE_nvar',
     'TYPE_kwargs',
-    'TYPE_nkwargs',
     'TYPE_key_resolver',
     'TYPE_HoldableTypes',
 
     'HoldableTypes',
+
+    'UnknownValue',
+    'UndefinedVariable',
 ]
 
 from .baseobjects import (
@@ -69,41 +65,36 @@ from .baseobjects import (
     IterableObject,
     MutableInterpreterObject,
     ContextManagerObject,
+    DefaultObject,
 
     TV_func,
     TYPE_elementary,
     TYPE_var,
-    TYPE_nvar,
     TYPE_kwargs,
-    TYPE_nkwargs,
     TYPE_key_resolver,
     TYPE_HoldableTypes,
 
-    SubProject,
-
     HoldableTypes,
+
+    UnknownValue,
+    UndefinedVariable,
 )
 
 from .decorators import (
-    noPosargs,
-    noKwargs,
-    stringArgs,
     noArgsFlattening,
-    noSecondLevelHolderResolving,
     unholder_return,
     disablerIfNotFound,
-    permittedKwargs,
-    typed_pos_args,
     ContainerTypeInfo,
     KwargInfo,
     typed_operator,
-    typed_kwargs,
     FeatureCheckBase,
     FeatureNew,
     FeatureDeprecated,
     FeatureBroken,
-    FeatureNewKwargs,
-    FeatureDeprecatedKwargs,
+    TypedArgs,
+    PosArgInfo,
+    OptArgInfo,
+    VarArgInfo,
 )
 
 from .exceptions import (
@@ -119,8 +110,9 @@ from .disabler import Disabler, is_disabled
 from .helpers import (
     default_resolve_key,
     flatten,
-    resolve_second_level_holders,
     stringifyUserArguments,
+    Feature,
+    FeatureValue,
 )
 from .interpreterbase import InterpreterBase
 from .operator import MesonOperator

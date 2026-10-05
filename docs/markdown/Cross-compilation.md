@@ -14,6 +14,7 @@ targeting 64-bit Windows could be:
 c = 'x86_64-w64-mingw32-gcc'
 cpp = 'x86_64-w64-mingw32-g++'
 ar = 'x86_64-w64-mingw32-ar'
+windres = 'x86_64-w64-mingw32-windres'
 strip = 'x86_64-w64-mingw32-strip'
 exe_wrapper = 'wine64'
 
@@ -84,7 +85,7 @@ their user interface much more complex.
 
 The most complicated case is when you cross-compile a cross compiler.
 As an example you can, on a Linux machine, generate a cross compiler
-that runs on Windows but produces binaries on MIPS Linux. In this case
+that runs on Windows but produces binaries for MIPS Linux. In this case
 *build machine* is x86 Linux, *host machine* is x86 Windows and
 *target machine* is MIPS Linux. This setup is known as the [Canadian
 Cross](https://en.wikipedia.org/wiki/Cross_compiler#Canadian_Cross).
@@ -138,6 +139,22 @@ of a wrapper, these lines are all you need to write. Meson will
 automatically use the given wrapper when it needs to run host
 binaries. This happens e.g. when running the project's test suite.
 
+Note that `exe_wrapper` in the cross file is handled separately
+from the `exe_wrapper` argument in
+[`add_test_setup`](Reference-manual_functions.md#add_test_setup_exe_wrapper)
+and [`meson test --wrapper`](Unit-tests.md#other-test-options)
+command line argument. Meson must have `exe_wrapper` specified in the
+cross file or else it will skip tests that attempt to run cross
+compiled binaries. Only the cross file `exe_wrapper` value will be
+stored in the `MESON_EXE_WRAPPER` environment variable. If another
+wrapper is given in the test setup with `exe_wrapper` or as a
+`meson test --wrapper` command line argument, then meson will prepend
+the additional wrapper before the cross file wrapper like the
+following command:
+```
+[prepend_wrapper] <cross_file_wrapper> <exe_binary> <args...>
+```
+
 ### Properties
 
 In addition to the properties allowed in [all machine
@@ -172,12 +189,12 @@ remember to specify the args as an array and not as a single string
 
 *Since 0.52.0* The `sys_root` property may point to the root of the
 host system path (the system that will run the compiled binaries).
-This is used internally by Meson to set the PKG_CONFIG_SYSROOT_DIR
+This is used internally by Meson to set the `PKG_CONFIG_SYSROOT_DIR`
 environment variable for pkg-config. If this is unset the host system
 is assumed to share a root with the build system.
 
-*Since 0.54.0* The pkg_config_libdir property may point to a list of
-path used internally by Meson to set the PKG_CONFIG_LIBDIR environment
+*Since 0.54.0* The `pkg_config_libdir` property may point to a list of
+path used internally by Meson to set the `PKG_CONFIG_LIBDIR` environment
 variable for pkg-config. This prevents pkg-config from searching cross
 dependencies in system directories.
 
@@ -356,7 +373,7 @@ myvar = meson.get_external_property('somekey')
 
 As of version 0.44.0 Meson supports loading cross files from system
 locations (except on Windows). This will be
-$XDG_DATA_DIRS/meson/cross, or if XDG_DATA_DIRS is undefined, then
+`$XDG_DATA_DIRS/meson/cross`, or if `XDG_DATA_DIRS` is undefined, then
 /usr/local/share/meson/cross and /usr/share/meson/cross will be tried
 in that order, for system wide cross files. User local files can be
 put in $XDG_DATA_HOME/meson/cross, or ~/.local/share/meson/cross if
