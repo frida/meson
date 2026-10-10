@@ -645,6 +645,9 @@ class CoreData:
                              if k.machine is MachineChoice.BUILD})
         self.options.update({k.as_build(): v for k, v in other.options.items()
                              if k.machine is MachineChoice.HOST and k.subproject and k.is_project()})
+        self.options.update({k.as_build(): v for k, v in other.options.items()
+                             if k.machine is MachineChoice.HOST and not k.subproject
+                             and self.is_per_machine_option(k) and k.as_build() not in self.options})
 
     @staticmethod
     def __load_config_files(options: SharedCMDOptions, scratch_dir: str, ftype: str) -> T.List[str]:

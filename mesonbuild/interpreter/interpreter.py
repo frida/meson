@@ -843,7 +843,8 @@ class Interpreter(InterpreterBase, HoldableObject):
                     a = os.path.join(srcdir, self.subdir, a)
             self.add_build_def_file(a)
 
-        return RunProcess(cmd, expanded_args, env, srcdir, builddir, self.relative_builddir_path_for(self.subdir),
+        run_subdir = self.relative_builddir_path_for(self.subdir) if in_builddir else self.subdir
+        return RunProcess(cmd, expanded_args, env, srcdir, builddir, run_subdir,
                           self.environment.get_build_command() + ['introspect'],
                           in_builddir=in_builddir, check=check, capture=capture)
 
@@ -2793,7 +2794,7 @@ class Interpreter(InterpreterBase, HoldableObject):
             install_tag = kwargs['install_tag']
             self.build.data.append(build.Data([cfile], idir, idir_name, install_mode, self.subproject,
                                               install_tag=install_tag, data_type='configure'))
-        return mesonlib.File.from_built_file(self.subdir, output)
+        return mesonlib.File.from_built_file(ofile_path, ofile_fname)
 
     def extract_incdirs(self, kwargs, key: str = 'include_directories') -> T.List[build.IncludeDirs]:
         prospectives = extract_as_list(kwargs, key)
