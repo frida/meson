@@ -665,7 +665,7 @@ class PkgConfigModule(NewExtensionModule):
             if uninstalled:
                 for d in deps.uninstalled_incdirs:
                     for basedir in ['${prefix}', '${srcdir}']:
-                        path = self._escape(PurePosixPath(basedir, d))
+                        path = self._escape(PurePosixPath(basedir, PurePath(d).as_posix()))
                         cflags.append(f'-I{path}')
             else:
                 for d in subdirs:
